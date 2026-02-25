@@ -1,0 +1,7 @@
+build/
+external/
+*.zip
+.vs/
+.vscode/
+*.user
+CMakeSettings.json
