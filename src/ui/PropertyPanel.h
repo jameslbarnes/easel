@@ -2,15 +2,20 @@
 #include "compositing/Layer.h"
 #include <memory>
 #include <string>
+#include <vector>
 
 class ShaderSource;
+class WhisperSpeech;
 
 // Speech-to-text state shared between PropertyPanel and Application
 struct SpeechState {
-    bool available = false;   // true if HAS_WEBVIEW2
-    bool listening = false;   // true while recognition is active
+    bool available = false;
+    bool listening = false;
     ShaderSource* targetSource = nullptr;
     std::string targetParam;
+#ifdef HAS_WHISPER
+    WhisperSpeech* whisper = nullptr; // for device selection UI
+#endif
 };
 
 class PropertyPanel {

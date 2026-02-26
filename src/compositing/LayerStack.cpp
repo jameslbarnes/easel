@@ -5,6 +5,12 @@ void LayerStack::addLayer(LayerPtr layer) {
     m_layers.push_back(std::move(layer));
 }
 
+void LayerStack::insertLayer(int index, LayerPtr layer) {
+    if (index < 0) index = 0;
+    if (index > (int)m_layers.size()) index = (int)m_layers.size();
+    m_layers.insert(m_layers.begin() + index, std::move(layer));
+}
+
 void LayerStack::removeLayer(int index) {
     if (index >= 0 && index < (int)m_layers.size()) {
         m_layers.erase(m_layers.begin() + index);

@@ -8,6 +8,7 @@ public:
     using LayerPtr = std::shared_ptr<Layer>;
 
     void addLayer(LayerPtr layer);
+    void insertLayer(int index, LayerPtr layer);
     void removeLayer(int index);
     void moveLayer(int from, int to);
 

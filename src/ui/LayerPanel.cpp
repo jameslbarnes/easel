@@ -354,6 +354,31 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer) {
     if (ImGui::BeginPopup("LayerMenu")) {
         int ci = selectedLayer;
         if (ci >= 0 && ci < layerCount) {
+            if (ImGui::MenuItem("Duplicate", "Ctrl+D")) {
+                auto& orig = stack[ci];
+                auto dupe = std::make_shared<Layer>();
+                dupe->name = orig->name + " copy";
+                dupe->visible = orig->visible;
+                dupe->opacity = orig->opacity;
+                dupe->blendMode = orig->blendMode;
+                dupe->position = orig->position;
+                dupe->scale = orig->scale;
+                dupe->rotation = orig->rotation;
+                dupe->flipH = orig->flipH;
+                dupe->flipV = orig->flipV;
+                dupe->tileX = orig->tileX;
+                dupe->tileY = orig->tileY;
+                dupe->cropTop = orig->cropTop;
+                dupe->cropBottom = orig->cropBottom;
+                dupe->cropLeft = orig->cropLeft;
+                dupe->cropRight = orig->cropRight;
+                dupe->source = orig->source;
+                dupe->mask = orig->mask;
+                dupe->maskPath = orig->maskPath;
+                dupe->maskEnabled = orig->maskEnabled;
+                stack.insertLayer(ci + 1, dupe);
+                selectedLayer = ci + 1;
+            }
             if (ImGui::MenuItem("Rename")) {
                 m_renaming = true;
                 m_renameIndex = ci;
@@ -388,11 +413,37 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer) {
         ImGui::EndPopup();
     }
 
-    // Delete key
-    if (!m_renaming && selectedLayer >= 0 && selectedLayer < stack.count()) {
-        if (ImGui::IsKeyPressed(ImGuiKey_Delete) && !ImGui::IsAnyItemActive()) {
+    // Keyboard shortcuts
+    if (!m_renaming && selectedLayer >= 0 && selectedLayer < stack.count() && !ImGui::IsAnyItemActive()) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Delete)) {
             stack.removeLayer(selectedLayer);
             selectedLayer = std::min(selectedLayer, stack.count() - 1);
+        }
+        if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D)) {
+            int ci = selectedLayer;
+            auto& orig = stack[ci];
+            auto dupe = std::make_shared<Layer>();
+            dupe->name = orig->name + " copy";
+            dupe->visible = orig->visible;
+            dupe->opacity = orig->opacity;
+            dupe->blendMode = orig->blendMode;
+            dupe->position = orig->position;
+            dupe->scale = orig->scale;
+            dupe->rotation = orig->rotation;
+            dupe->flipH = orig->flipH;
+            dupe->flipV = orig->flipV;
+            dupe->tileX = orig->tileX;
+            dupe->tileY = orig->tileY;
+            dupe->cropTop = orig->cropTop;
+            dupe->cropBottom = orig->cropBottom;
+            dupe->cropLeft = orig->cropLeft;
+            dupe->cropRight = orig->cropRight;
+            dupe->source = orig->source;
+            dupe->mask = orig->mask;
+            dupe->maskPath = orig->maskPath;
+            dupe->maskEnabled = orig->maskEnabled;
+            stack.insertLayer(ci + 1, dupe);
+            selectedLayer = ci + 1;
         }
     }
 

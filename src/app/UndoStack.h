@@ -15,6 +15,9 @@ struct LayerSnapshot {
     float rotation = 0.0f;
     bool flipH = false;
     bool flipV = false;
+    int tileX = 1, tileY = 1;
+    float cropTop = 0.0f, cropBottom = 0.0f;
+    float cropLeft = 0.0f, cropRight = 0.0f;
     bool maskEnabled = false;
     std::vector<MaskPoint> maskPoints;
     bool maskClosed = true;
@@ -79,6 +82,12 @@ private:
             ls.rotation = layer->rotation;
             ls.flipH = layer->flipH;
             ls.flipV = layer->flipV;
+            ls.tileX = layer->tileX;
+            ls.tileY = layer->tileY;
+            ls.cropTop = layer->cropTop;
+            ls.cropBottom = layer->cropBottom;
+            ls.cropLeft = layer->cropLeft;
+            ls.cropRight = layer->cropRight;
             ls.maskEnabled = layer->maskEnabled;
             ls.maskPoints = layer->maskPath.points();
             ls.maskClosed = layer->maskPath.closed();
@@ -114,6 +123,12 @@ private:
             layer->rotation = ls.rotation;
             layer->flipH = ls.flipH;
             layer->flipV = ls.flipV;
+            layer->tileX = ls.tileX;
+            layer->tileY = ls.tileY;
+            layer->cropTop = ls.cropTop;
+            layer->cropBottom = ls.cropBottom;
+            layer->cropLeft = ls.cropLeft;
+            layer->cropRight = ls.cropRight;
             layer->maskEnabled = ls.maskEnabled;
             layer->maskPath.points() = ls.maskPoints;
             layer->maskPath.setClosed(ls.maskClosed);

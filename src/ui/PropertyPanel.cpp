@@ -1,6 +1,9 @@
 #include "ui/PropertyPanel.h"
 #include "compositing/BlendMode.h"
 #include "sources/ShaderSource.h"
+#ifdef HAS_WHISPER
+#include "speech/WhisperSpeech.h"
+#endif
 #include <imgui.h>
 #include <cstdio>
 
@@ -99,6 +102,20 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode, Spe
     labeledDrag("X", "##PosX", &layer->position.x, 0.01f, -2.0f, 2.0f);
     if (ImGui::IsItemActivated()) undoNeeded = true;
     labeledDrag("Y", "##PosY", &layer->position.y, 0.01f, -2.0f, 2.0f);
+    if (ImGui::IsItemActivated()) undoNeeded = true;
+
+    // Uniform size slider (drags both W and H together)
+    float uniformScale = (layer->scale.x + layer->scale.y) * 0.5f;
+    ImGui::PushStyleColor(ImGuiCol_Text, kAccentText);
+    ImGui::Text("Size");
+    ImGui::PopStyleColor();
+    ImGui::SameLine(38);
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::DragFloat("##Size", &uniformScale, 0.01f, 0.01f, 10.0f, "%.2f")) {
+        float ratio = (layer->scale.x > 0.001f) ? layer->scale.y / layer->scale.x : 1.0f;
+        layer->scale.x = uniformScale;
+        layer->scale.y = uniformScale * ratio;
+    }
     if (ImGui::IsItemActivated()) undoNeeded = true;
 
     ImGui::PushStyleColor(ImGuiCol_Text, kAccentText);
@@ -383,6 +400,38 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode, Spe
                 ImGui::PopID();
             }
         }
+
+#ifdef HAS_WHISPER
+        // Mic device selector
+        if (speech && speech->available && speech->whisper) {
+            auto& devices = speech->whisper->captureDevices();
+            if (!devices.empty()) {
+                ImGui::Dummy(ImVec2(0, 4));
+                ImGui::PushStyleColor(ImGuiCol_Text, kDimText);
+                ImGui::Text("Mic");
+                ImGui::PopStyleColor();
+                int sel = speech->whisper->selectedDevice();
+                // Build preview string
+                std::string preview = (sel < 0) ? "Default" :
+                    (sel < (int)devices.size() ? devices[sel].name : "Unknown");
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::BeginCombo("##mic_device", preview.c_str())) {
+                    // Default option
+                    if (ImGui::Selectable("Default", sel < 0)) {
+                        if (!speech->listening) speech->whisper->selectDevice(-1);
+                    }
+                    for (auto& d : devices) {
+                        bool isSel = (d.index == sel);
+                        std::string label = d.name + (d.isDefault ? " *" : "");
+                        if (ImGui::Selectable(label.c_str(), isSel)) {
+                            if (!speech->listening) speech->whisper->selectDevice(d.index);
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+            }
+        }
+#endif
 
         // Show shader description if present
         if (!shaderSrc->description().empty()) {
