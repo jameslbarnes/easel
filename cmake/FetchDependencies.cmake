@@ -75,6 +75,30 @@ if(NOT imgui_POPULATED)
     target_link_libraries(imgui PUBLIC glfw glad)
 endif()
 
+# tinygltf (header-only glTF 2.0 loader)
+FetchContent_Declare(
+    tinygltf
+    GIT_REPOSITORY https://github.com/syoyo/tinygltf.git
+    GIT_TAG        v2.9.7
+    GIT_SHALLOW    TRUE
+)
+FetchContent_GetProperties(tinygltf)
+if(NOT tinygltf_POPULATED)
+    FetchContent_Populate(tinygltf)
+endif()
+
+# tinyobjloader (header-only OBJ loader)
+FetchContent_Declare(
+    tinyobjloader
+    GIT_REPOSITORY https://github.com/tinyobjloader/tinyobjloader.git
+    GIT_TAG        v2.0.0rc13
+    GIT_SHALLOW    TRUE
+)
+FetchContent_GetProperties(tinyobjloader)
+if(NOT tinyobjloader_POPULATED)
+    FetchContent_Populate(tinyobjloader)
+endif()
+
 # Catch2 (testing framework)
 FetchContent_Declare(
     Catch2
@@ -82,3 +106,18 @@ FetchContent_Declare(
     GIT_TAG        v3.5.2
 )
 FetchContent_MakeAvailable(Catch2)
+
+# whisper.cpp (local speech-to-text)
+set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_SERVER OFF CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(GGML_CUDA ON CACHE BOOL "" FORCE)
+set(CMAKE_CUDA_ARCHITECTURES "89" CACHE STRING "" FORCE)
+FetchContent_Declare(
+    whisper
+    GIT_REPOSITORY https://github.com/ggerganov/whisper.cpp.git
+    GIT_TAG        v1.7.4
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(whisper)

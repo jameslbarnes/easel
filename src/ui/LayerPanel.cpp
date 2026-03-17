@@ -125,7 +125,24 @@ static void drawLayerRow(ImDrawList* draw, const std::shared_ptr<Layer>& layer,
     }
 }
 
-void LayerPanel::render(LayerStack& stack, int& selectedLayer) {
+// Zone indicator colors (up to 8 zones)
+static ImU32 zoneColor(int idx) {
+    static const ImU32 colors[] = {
+        IM_COL32(0, 200, 255, 220),    // cyan
+        IM_COL32(255, 140, 50, 220),   // orange
+        IM_COL32(80, 220, 120, 220),   // green
+        IM_COL32(220, 80, 200, 220),   // magenta
+        IM_COL32(255, 220, 60, 220),   // yellow
+        IM_COL32(100, 140, 255, 220),  // blue
+        IM_COL32(255, 100, 100, 220),  // red
+        IM_COL32(180, 180, 180, 220),  // grey
+    };
+    return colors[idx % 8];
+}
+
+void LayerPanel::render(LayerStack& stack, int& selectedLayer,
+                        std::vector<std::unique_ptr<OutputZone>>* zones,
+                        int activeZone) {
     ImGui::Begin("Layers");
 
     ImDrawList* draw = ImGui::GetWindowDrawList();
@@ -284,6 +301,53 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer) {
 
         drawLayerRow(draw, layer, listStart.x, rowY, panelWidth, rowHeight,
                      selected, rowHovered, false, thumbSize);
+
+        // Zone visibility dots (only when multiple zones exist)
+        if (zones && zones->size() > 1) {
+            float dotX = listStart.x + panelWidth - 8;
+            float dotY = rowY + 6;
+            float dotR = 4.0f;
+            float dotSpacing = 12.0f;
+
+            for (int zi = (int)zones->size() - 1; zi >= 0; zi--) {
+                auto& z = *(*zones)[zi];
+                bool inZone = z.showAllLayers || z.visibleLayerIds.count(layer->id);
+
+                ImVec2 center(dotX, dotY + dotR);
+                ImU32 col = zoneColor(zi);
+                ImU32 dimCol = IM_COL32((col & 0xFF) / 3, ((col >> 8) & 0xFF) / 3,
+                                        ((col >> 16) & 0xFF) / 3, 100);
+
+                if (inZone) {
+                    draw->AddCircleFilled(center, dotR, col);
+                } else {
+                    draw->AddCircle(center, dotR, dimCol, 0, 1.2f);
+                }
+
+                // Click to toggle zone membership
+                if (!m_dragActive && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && windowHovered) {
+                    float dx = mousePos.x - center.x, dy = mousePos.y - center.y;
+                    if (dx*dx + dy*dy < (dotR + 4) * (dotR + 4)) {
+                        if (z.showAllLayers) {
+                            // Transition to explicit visibility: add all current layers, then toggle this one
+                            z.showAllLayers = false;
+                            for (int li = 0; li < stack.count(); li++) {
+                                z.visibleLayerIds.insert(stack[li]->id);
+                            }
+                            z.visibleLayerIds.erase(layer->id);
+                        } else {
+                            if (inZone) {
+                                z.visibleLayerIds.erase(layer->id);
+                            } else {
+                                z.visibleLayerIds.insert(layer->id);
+                            }
+                        }
+                    }
+                }
+
+                dotX -= dotSpacing;
+            }
+        }
 
         // Separator
         if (displayIdx < layerCount - 1) {

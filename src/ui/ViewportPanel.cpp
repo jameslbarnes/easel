@@ -1,10 +1,14 @@
 #include "ui/ViewportPanel.h"
+#include "app/OutputZone.h"
+#include "app/ProjectorOutput.h"
 #include "warp/CornerPinWarp.h"
 #include "warp/MeshWarp.h"
+#include "warp/ObjMeshWarp.h"
 #include "compositing/MaskPath.h"
 #include <imgui.h>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 // Theme colors
 static const ImU32 kAccent        = IM_COL32(0, 200, 255, 255);
@@ -59,10 +63,273 @@ glm::vec2 ViewportPanel::ndcToScreen(glm::vec2 ndc) const {
 static ImVec2 toImVec2(glm::vec2 v) { return ImVec2(v.x, v.y); }
 
 void ViewportPanel::render(GLuint texture, CornerPinWarp& cornerPin, MeshWarp& meshWarp,
-                           WarpMode warpMode, float projectorAspect) {
+                           WarpMode warpMode, float projectorAspect,
+                           std::vector<std::unique_ptr<OutputZone>>* zones,
+                           int* activeZone,
+                           const std::vector<MonitorInfo>* monitors,
+                           bool ndiAvailable,
+                           ObjMeshWarp* objMeshWarp) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::Begin("Projector Preview");
     ImGui::PopStyleVar();
+
+    // Zone tab bar + output routing — always visible
+    if (zones && activeZone) {
+        ImGui::Dummy(ImVec2(0, 2));
+        ImGui::Indent(6);
+
+        ImDrawList* tabDraw = ImGui::GetWindowDrawList();
+
+        // --- Zone tabs ---
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(3, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12, 4));
+        for (int i = 0; i < (int)zones->size(); i++) {
+            ImGui::PushID(9000 + i);
+            bool isActive = (i == *activeZone);
+            auto& z = *(*zones)[i];
+
+            if (isActive) {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.25f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.35f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.90f, 1.0f, 1.0f));
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.08f, 0.09f, 0.13f, 0.9f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.12f, 0.14f, 0.20f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.60f, 0.68f, 1.0f));
+            }
+            if (ImGui::SmallButton(z.name.c_str())) {
+                *activeZone = i;
+            }
+            ImGui::PopStyleColor(3);
+
+            // Double-click to rename
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+                m_renaming = true;
+                m_renameIndex = i;
+                strncpy(m_renameBuf, z.name.c_str(), sizeof(m_renameBuf) - 1);
+                m_renameBuf[sizeof(m_renameBuf) - 1] = '\0';
+            }
+
+            // Right-click context menu
+            if (ImGui::BeginPopupContextItem("ZoneTabCtx")) {
+                if (ImGui::MenuItem("Rename")) {
+                    m_renaming = true;
+                    m_renameIndex = i;
+                    strncpy(m_renameBuf, z.name.c_str(), sizeof(m_renameBuf) - 1);
+                    m_renameBuf[sizeof(m_renameBuf) - 1] = '\0';
+                }
+                if (ImGui::MenuItem("Duplicate")) {
+                    *activeZone = -(200 + i); // signal: duplicate zone i
+                }
+                if ((int)zones->size() > 1) {
+                    if (ImGui::MenuItem("Remove")) {
+                        *activeZone = -(300 + i); // signal: remove zone i
+                    }
+                }
+                ImGui::EndPopup();
+            }
+
+            // Output type dot on tab (top-left corner)
+            ImVec2 btnMin = ImGui::GetItemRectMin();
+            if (z.outputDest == OutputDest::Fullscreen) {
+                tabDraw->AddCircleFilled(ImVec2(btnMin.x + 5, btnMin.y + 5), 3.0f, IM_COL32(0, 200, 255, 255));
+            } else if (z.outputDest == OutputDest::NDI) {
+                tabDraw->AddCircleFilled(ImVec2(btnMin.x + 5, btnMin.y + 5), 3.0f, IM_COL32(34, 210, 130, 255));
+            }
+            ImGui::SameLine();
+            ImGui::PopID();
+        }
+
+        // Rename popup
+        if (m_renaming) {
+            ImGui::OpenPopup("##RenameZone");
+        }
+        if (ImGui::BeginPopup("##RenameZone")) {
+            ImGui::Text("Rename Zone");
+            ImGui::SetNextItemWidth(200);
+            bool enter = ImGui::InputText("##RenameInput", m_renameBuf, sizeof(m_renameBuf),
+                                          ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+            if (m_renaming) {
+                ImGui::SetKeyboardFocusHere(-1);
+                m_renaming = false; // only set focus once
+            }
+            if (enter || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                if (enter && m_renameIndex >= 0 && m_renameIndex < (int)zones->size() && m_renameBuf[0]) {
+                    (*zones)[m_renameIndex]->name = m_renameBuf;
+                }
+                m_renameIndex = -1;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+
+        // "+" button to add zone
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.08f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.25f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 0.85f));
+        if (ImGui::SmallButton("+")) {
+            *activeZone = -(100 + (int)zones->size()); // signal: want add
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Add output zone");
+        }
+        ImGui::PopStyleColor(3);
+        ImGui::PopStyleVar(2);
+
+        // --- Output routing row ---
+        int ai = *activeZone;
+        if (ai >= 0 && ai < (int)zones->size()) {
+            auto& az = *(*zones)[ai];
+
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 2));
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 2));
+
+            // Build display label
+            static char destBuf[128] = {};
+            const char* destLabel = "Preview Only";
+            if (az.outputDest == OutputDest::Fullscreen && monitors) {
+                int mi = az.outputMonitor;
+                if (mi >= 0 && mi < (int)monitors->size()) {
+                    snprintf(destBuf, sizeof(destBuf), "Fullscreen: %s", (*monitors)[mi].name.c_str());
+                    destLabel = destBuf;
+                }
+            } else if (az.outputDest == OutputDest::NDI) {
+                snprintf(destBuf, sizeof(destBuf), "NDI: \"%s\"",
+                         az.ndiStreamName.empty() ? az.name.c_str() : az.ndiStreamName.c_str());
+                destLabel = destBuf;
+            }
+
+            // "Output" label with status dot
+            bool live = (az.outputDest != OutputDest::None);
+            ImVec2 dotPos = ImGui::GetCursorScreenPos();
+            float lineH = ImGui::GetTextLineHeight();
+            if (live) {
+                tabDraw->AddCircleFilled(ImVec2(dotPos.x + 4, dotPos.y + lineH * 0.5f),
+                                         3.5f, IM_COL32(34, 210, 130, 255));
+                tabDraw->AddCircle(ImVec2(dotPos.x + 4, dotPos.y + lineH * 0.5f),
+                                   5.5f, IM_COL32(34, 210, 130, 40));
+            } else {
+                tabDraw->AddCircle(ImVec2(dotPos.x + 4, dotPos.y + lineH * 0.5f),
+                                   3.0f, IM_COL32(100, 110, 130, 140), 0, 1.2f);
+            }
+            ImGui::Dummy(ImVec2(12, 0));
+            ImGui::SameLine();
+
+            if (live) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+            }
+            ImGui::Text("Output");
+            ImGui::PopStyleColor();
+            ImGui::SameLine();
+
+            // Combo inherits accent color when live
+            if (live) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.70f, 0.73f, 0.78f, 1.0f));
+            }
+
+            float comboW = std::min(300.0f, ImGui::GetContentRegionAvail().x - 4);
+            ImGui::SetNextItemWidth(comboW);
+            if (ImGui::BeginCombo("##ZoneOutput", destLabel, ImGuiComboFlags_HeightLarge)) {
+                if (ImGui::Selectable("Preview Only", az.outputDest == OutputDest::None)) {
+                    az.outputDest = OutputDest::None;
+                    az.outputMonitor = -1;
+                }
+
+                if (monitors && !monitors->empty()) {
+                    ImGui::Separator();
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.7f));
+                    ImGui::Text("  Fullscreen");
+                    ImGui::PopStyleColor();
+                    for (int mi = 0; mi < (int)monitors->size(); mi++) {
+                        ImGui::PushID(mi);
+                        // Check if another zone claims this monitor
+                        std::string claimedBy;
+                        for (int zi = 0; zi < (int)zones->size(); zi++) {
+                            if (zi == ai) continue;
+                            auto& oz = *(*zones)[zi];
+                            if (oz.outputDest == OutputDest::Fullscreen && oz.outputMonitor == mi) {
+                                claimedBy = oz.name;
+                                break;
+                            }
+                        }
+
+                        char label[256];
+                        if (!claimedBy.empty()) {
+                            snprintf(label, sizeof(label), "%s  %dx%d  (-> %s)",
+                                     (*monitors)[mi].name.c_str(),
+                                     (*monitors)[mi].width, (*monitors)[mi].height,
+                                     claimedBy.c_str());
+                        } else {
+                            snprintf(label, sizeof(label), "%s  %dx%d",
+                                     (*monitors)[mi].name.c_str(),
+                                     (*monitors)[mi].width, (*monitors)[mi].height);
+                        }
+
+                        // Dim text for claimed monitors
+                        if (!claimedBy.empty()) {
+                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.6f));
+                        }
+                        bool sel = (az.outputDest == OutputDest::Fullscreen && az.outputMonitor == mi);
+                        if (ImGui::Selectable(label, sel)) {
+                            // Steal: set the other zone to None
+                            if (!claimedBy.empty()) {
+                                for (int zi = 0; zi < (int)zones->size(); zi++) {
+                                    if (zi == ai) continue;
+                                    auto& oz = *(*zones)[zi];
+                                    if (oz.outputDest == OutputDest::Fullscreen && oz.outputMonitor == mi) {
+                                        oz.outputDest = OutputDest::None;
+                                        oz.outputMonitor = -1;
+                                        break;
+                                    }
+                                }
+                            }
+                            az.outputDest = OutputDest::Fullscreen;
+                            az.outputMonitor = mi;
+                        }
+                        if (!claimedBy.empty()) {
+                            ImGui::PopStyleColor();
+                        }
+                        ImGui::PopID();
+                    }
+                }
+
+                if (ndiAvailable) {
+                    ImGui::Separator();
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.7f));
+                    ImGui::Text("  NDI");
+                    ImGui::PopStyleColor();
+                    char ndiLabel[256];
+                    std::string streamName = az.ndiStreamName.empty() ? az.name : az.ndiStreamName;
+                    snprintf(ndiLabel, sizeof(ndiLabel), "Easel - %s", streamName.c_str());
+                    bool sel = (az.outputDest == OutputDest::NDI);
+                    if (ImGui::Selectable(ndiLabel, sel)) {
+                        az.outputDest = OutputDest::NDI;
+                        if (az.ndiStreamName.empty()) az.ndiStreamName = az.name;
+                    }
+                }
+
+                ImGui::EndCombo();
+            }
+            ImGui::PopStyleColor(); // combo text color
+
+            ImGui::PopStyleVar(2);
+        }
+
+        ImGui::Unindent(6);
+
+        // Subtle separator line before preview
+        ImGui::Dummy(ImVec2(0, 2));
+        {
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            float w = ImGui::GetContentRegionAvail().x;
+            tabDraw->AddLine(ImVec2(p.x, p.y), ImVec2(p.x + w, p.y), IM_COL32(0, 200, 255, 25));
+        }
+        ImGui::Dummy(ImVec2(0, 2));
+    }
 
     ImVec2 avail = ImGui::GetContentRegionAvail();
     m_size = {avail.x, avail.y};
@@ -99,72 +366,113 @@ void ViewportPanel::render(GLuint texture, CornerPinWarp& cornerPin, MeshWarp& m
 
     // --- Always draw and handle warp (unless in mask mode) ---
     if (m_editMode != EditMode::Mask && m_imageSize.x > 0 && m_imageSize.y > 0) {
-        ImVec2 mousePos = ImGui::GetMousePos();
-        glm::vec2 mouseNDC = screenToNDC({mousePos.x, mousePos.y});
+        if (warpMode == WarpMode::ObjMesh && objMeshWarp) {
+            // --- Orbit camera interaction ---
+            auto& cam = objMeshWarp->camera();
 
-        // Only start warp drag if not already dragging a layer
-        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && m_hovered && !m_layerDragging) {
-            int hit = -1;
-            if (warpMode == WarpMode::CornerPin) {
-                hit = cornerPin.hitTest(mouseNDC);
-            } else {
-                hit = meshWarp.hitTest(mouseNDC);
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && m_hovered && !m_layerDragging) {
+                m_orbitDragging = true;
+                ImVec2 mp = ImGui::GetMousePos();
+                m_orbitDragStart = {mp.x, mp.y};
+                m_orbitStartAzimuth = cam.azimuth;
+                m_orbitStartElevation = cam.elevation;
             }
-            if (hit >= 0) {
-                m_warpDragIndex = hit;
-                m_warpDragging = true;
+
+            if (m_orbitDragging && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                ImVec2 mp = ImGui::GetMousePos();
+                float dx = mp.x - m_orbitDragStart.x;
+                float dy = mp.y - m_orbitDragStart.y;
+                cam.azimuth = m_orbitStartAzimuth - dx * 0.005f;
+                cam.elevation = std::max(-1.5f, std::min(1.5f,
+                    m_orbitStartElevation + dy * 0.005f));
             }
-        }
 
-        if (m_warpDragging && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-            glm::vec2 clamped(std::max(-1.5f, std::min(1.5f, mouseNDC.x)),
-                              std::max(-1.5f, std::min(1.5f, mouseNDC.y)));
-            if (warpMode == WarpMode::CornerPin) {
-                cornerPin.corners()[m_warpDragIndex] = clamped;
-            } else {
-                meshWarp.points()[m_warpDragIndex] = clamped;
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+                m_orbitDragging = false;
             }
-        }
 
-        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-            m_warpDragging = false;
-            m_warpDragIndex = -1;
-        }
-
-        // Draw warp handles
-        ImDrawList* draw = ImGui::GetWindowDrawList();
-        auto ndc2scr = [&](glm::vec2 ndc) -> ImVec2 { return toImVec2(ndcToScreen(ndc)); };
-
-        if (warpMode == WarpMode::CornerPin) {
-            const auto& corners = cornerPin.corners();
-            const char* labels[] = {"BL", "BR", "TR", "TL"};
-
-            for (int i = 0; i < 4; i++) {
-                draw->AddLine(ndc2scr(corners[i]), ndc2scr(corners[(i + 1) % 4]), kAccentGlow, 6.0f);
-                draw->AddLine(ndc2scr(corners[i]), ndc2scr(corners[(i + 1) % 4]), kAccent, 1.5f);
+            // Scroll zoom
+            if (m_hovered) {
+                float scroll = ImGui::GetIO().MouseWheel;
+                if (scroll != 0.0f) {
+                    cam.distance = std::max(0.5f, std::min(20.0f,
+                        cam.distance - scroll * 0.3f));
+                }
             }
-            for (int i = 0; i < 4; i++) {
-                ImVec2 p = ndc2scr(corners[i]);
-                bool active = (m_warpDragging && m_warpDragIndex == i);
-                draw->AddCircleFilled(p, active ? 14.0f : 10.0f, kAccentGlow);
-                draw->AddCircleFilled(p, active ? 8.0f : 6.0f, active ? kAccent : kAccentDim);
-                draw->AddCircle(p, active ? 8.0f : 6.0f, kHandleOuter, 0, 1.5f);
-                draw->AddText(ImVec2(p.x + 12, p.y - 8), kWhiteSoft, labels[i]);
-            }
+
+            // Overlay label
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            ImVec2 labelPos(m_imageOrigin.x + 8, m_imageOrigin.y + m_imageSize.y - 20);
+            draw->AddText(labelPos, kWhiteSoft, "Orbit | drag to rotate | scroll to zoom");
         } else {
-            const auto& points = meshWarp.points();
-            int cols = meshWarp.cols(), rows = meshWarp.rows();
-            for (int r = 0; r < rows; r++)
-                for (int c = 0; c < cols - 1; c++)
-                    draw->AddLine(ndc2scr(points[r*cols+c]), ndc2scr(points[r*cols+c+1]), kAccentSoft, 1.0f);
-            for (int c = 0; c < cols; c++)
-                for (int r = 0; r < rows - 1; r++)
-                    draw->AddLine(ndc2scr(points[r*cols+c]), ndc2scr(points[(r+1)*cols+c]), kAccentSoft, 1.0f);
-            for (int i = 0; i < (int)points.size(); i++) {
-                ImVec2 p = ndc2scr(points[i]);
-                bool active = (m_warpDragging && m_warpDragIndex == i);
-                draw->AddCircleFilled(p, active ? 6.0f : 4.0f, active ? kAccent : kPointFill);
-                draw->AddCircle(p, active ? 6.0f : 4.0f, kPointRing, 0, 1.2f);
+            // --- CornerPin / MeshWarp handle interaction ---
+            ImVec2 mousePos = ImGui::GetMousePos();
+            glm::vec2 mouseNDC = screenToNDC({mousePos.x, mousePos.y});
+
+            // Only start warp drag if not already dragging a layer
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && m_hovered && !m_layerDragging) {
+                int hit = -1;
+                if (warpMode == WarpMode::CornerPin) {
+                    hit = cornerPin.hitTest(mouseNDC);
+                } else {
+                    hit = meshWarp.hitTest(mouseNDC);
+                }
+                if (hit >= 0) {
+                    m_warpDragIndex = hit;
+                    m_warpDragging = true;
+                }
+            }
+
+            if (m_warpDragging && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                glm::vec2 clamped(std::max(-1.5f, std::min(1.5f, mouseNDC.x)),
+                                  std::max(-1.5f, std::min(1.5f, mouseNDC.y)));
+                if (warpMode == WarpMode::CornerPin) {
+                    cornerPin.corners()[m_warpDragIndex] = clamped;
+                } else {
+                    meshWarp.points()[m_warpDragIndex] = clamped;
+                }
+            }
+
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+                m_warpDragging = false;
+                m_warpDragIndex = -1;
+            }
+
+            // Draw warp handles
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            auto ndc2scr = [&](glm::vec2 ndc) -> ImVec2 { return toImVec2(ndcToScreen(ndc)); };
+
+            if (warpMode == WarpMode::CornerPin) {
+                const auto& corners = cornerPin.corners();
+                const char* labels[] = {"BL", "BR", "TR", "TL"};
+
+                for (int i = 0; i < 4; i++) {
+                    draw->AddLine(ndc2scr(corners[i]), ndc2scr(corners[(i + 1) % 4]), kAccentGlow, 6.0f);
+                    draw->AddLine(ndc2scr(corners[i]), ndc2scr(corners[(i + 1) % 4]), kAccent, 1.5f);
+                }
+                for (int i = 0; i < 4; i++) {
+                    ImVec2 p = ndc2scr(corners[i]);
+                    bool active = (m_warpDragging && m_warpDragIndex == i);
+                    draw->AddCircleFilled(p, active ? 14.0f : 10.0f, kAccentGlow);
+                    draw->AddCircleFilled(p, active ? 8.0f : 6.0f, active ? kAccent : kAccentDim);
+                    draw->AddCircle(p, active ? 8.0f : 6.0f, kHandleOuter, 0, 1.5f);
+                    draw->AddText(ImVec2(p.x + 12, p.y - 8), kWhiteSoft, labels[i]);
+                }
+            } else {
+                const auto& points = meshWarp.points();
+                int cols = meshWarp.cols(), rows = meshWarp.rows();
+                for (int r = 0; r < rows; r++)
+                    for (int c = 0; c < cols - 1; c++)
+                        draw->AddLine(ndc2scr(points[r*cols+c]), ndc2scr(points[r*cols+c+1]), kAccentSoft, 1.0f);
+                for (int c = 0; c < cols; c++)
+                    for (int r = 0; r < rows - 1; r++)
+                        draw->AddLine(ndc2scr(points[r*cols+c]), ndc2scr(points[(r+1)*cols+c]), kAccentSoft, 1.0f);
+                for (int i = 0; i < (int)points.size(); i++) {
+                    ImVec2 p = ndc2scr(points[i]);
+                    bool active = (m_warpDragging && m_warpDragIndex == i);
+                    draw->AddCircleFilled(p, active ? 6.0f : 4.0f, active ? kAccent : kPointFill);
+                    draw->AddCircle(p, active ? 6.0f : 4.0f, kPointRing, 0, 1.2f);
+                }
             }
         }
     }
@@ -177,7 +485,17 @@ void ViewportPanel::render(GLuint texture, CornerPinWarp& cornerPin, MeshWarp& m
 void ViewportPanel::renderLayerOverlay(LayerStack& stack, int& selectedLayer) {
     if (m_imageSize.x <= 0 || m_imageSize.y <= 0) return;
     if (m_editMode != EditMode::Normal) return;
-    if (stack.count() == 0) return;
+    if (stack.count() == 0) {
+        m_layerDragging = false;
+        m_handleDrag = HandleType::None;
+        return;
+    }
+    // Clamp selectedLayer to valid range (in case a layer was removed earlier this frame)
+    if (selectedLayer >= stack.count()) {
+        selectedLayer = stack.count() - 1;
+        m_layerDragging = false;
+        m_handleDrag = HandleType::None;
+    }
     // Don't interact if warp is being dragged
     bool warpBusy = m_warpDragging;
 

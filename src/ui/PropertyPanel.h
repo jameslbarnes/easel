@@ -18,9 +18,21 @@ struct SpeechState {
 #endif
 };
 
+struct MosaicAudioSource {
+    std::string name;
+    bool isMic = false;
+};
+
+struct MosaicAudioState {
+    int* selectedDevice = nullptr;       // -1 = system loopback
+    std::vector<MosaicAudioSource> devices;
+};
+
 class PropertyPanel {
 public:
-    void render(std::shared_ptr<Layer> layer, bool& maskEditMode, SpeechState* speech = nullptr);
+    void render(std::shared_ptr<Layer> layer, bool& maskEditMode,
+                SpeechState* speech = nullptr, MosaicAudioState* mosaicAudio = nullptr,
+                float appTime = 0.0f);
 
     // Set to true when a property widget is first activated (signals Application to push undo state)
     bool undoNeeded = false;

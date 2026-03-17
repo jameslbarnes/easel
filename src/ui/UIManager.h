@@ -11,7 +11,7 @@ public:
     void beginFrame();
     void endFrame();
 
-    void setupDockspace();
+    void setupDockspace(float bottomBarHeight = 0);
 
     ImFont* smallFont() const { return m_smallFont; }
     ImFont* boldFont() const { return m_boldFont; }

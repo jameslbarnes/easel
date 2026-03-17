@@ -34,7 +34,7 @@ bool UIManager::init(GLFWwindow* window) {
     };
 
     // Load Segoe UI from Windows for a clean, modern look
-    float fontSize = 14.0f * dpiScale;
+    float fontSize = 16.0f * dpiScale;
     ImFontConfig fontCfg;
     fontCfg.OversampleH = 2;
     fontCfg.OversampleV = 1;
@@ -46,7 +46,7 @@ bool UIManager::init(GLFWwindow* window) {
     }
 
     // Slightly smaller font for secondary text
-    float smallSize = 11.0f * dpiScale;
+    float smallSize = 14.0f * dpiScale;
     ImFontConfig smallCfg;
     smallCfg.OversampleH = 2;
     m_smallFont = io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeui.ttf", smallSize, &smallCfg, glyphRanges);
@@ -65,7 +65,7 @@ bool UIManager::init(GLFWwindow* window) {
     applyTheme(dpiScale);
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
-    ImGui_ImplOpenGL3_Init("#version 330");
+    ImGui_ImplOpenGL3_Init("#version 430");
 
     return true;
 }
@@ -75,9 +75,9 @@ void UIManager::applyTheme(float dpiScale) {
 
     // Geometry - compact but readable
     s.WindowPadding     = ImVec2(8, 8);
-    s.FramePadding      = ImVec2(6, 3);
+    s.FramePadding      = ImVec2(8, 5);
     s.CellPadding       = ImVec2(4, 2);
-    s.ItemSpacing       = ImVec2(6, 3);
+    s.ItemSpacing       = ImVec2(8, 5);
     s.ItemInnerSpacing  = ImVec2(4, 3);
     s.IndentSpacing     = 14.0f;
     s.ScrollbarSize     = 8.0f;
@@ -237,10 +237,12 @@ void UIManager::endFrame() {
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 }
 
-void UIManager::setupDockspace() {
+void UIManager::setupDockspace(float bottomBarHeight) {
     ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos);
-    ImGui::SetNextWindowSize(viewport->WorkSize);
+    ImVec2 dockSize = viewport->WorkSize;
+    dockSize.y -= bottomBarHeight;
+    ImGui::SetNextWindowSize(dockSize);
     ImGui::SetNextWindowViewport(viewport->ID);
 
     ImGuiWindowFlags flags =

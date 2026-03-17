@@ -1,5 +1,6 @@
 #include "ui/WarpEditor.h"
 #include <imgui.h>
+#include <filesystem>
 
 static const ImU32  kSectionLine = IM_COL32(0, 200, 255, 40);
 
@@ -22,40 +23,34 @@ static bool accentButton(const char* label, float width = 0) {
     return clicked;
 }
 
+static void modeButton(const char* label, int thisMode, int& currentMode, float width) {
+    bool active = (currentMode == thisMode);
+    if (active) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.25f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.90f, 1.0f, 1.0f));
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.11f, 0.125f, 0.165f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.60f, 0.68f, 1.0f));
+    }
+    if (ImGui::Button(label, ImVec2(width, 0))) currentMode = thisMode;
+    ImGui::PopStyleColor(2);
+}
+
 void WarpEditor::render(CornerPinWarp& cornerPin, MeshWarp& meshWarp,
-                        ViewportPanel::WarpMode& mode) {
+                        ObjMeshWarp& objMeshWarp, ViewportPanel::WarpMode& mode) {
+    m_wantsLoadOBJ = false;
+
     ImGui::Begin("Warp");
 
-    // Mode selector as styled radio buttons
+    // Mode selector — 3 buttons
     int modeInt = (int)mode;
+    float thirdW = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 2) / 3.0f;
 
-    float halfW = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
-
-    // Corner Pin button
-    bool cpActive = (modeInt == 0);
-    if (cpActive) {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.25f));
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.90f, 1.0f, 1.0f));
-    } else {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.11f, 0.125f, 0.165f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.60f, 0.68f, 1.0f));
-    }
-    if (ImGui::Button("Corner Pin", ImVec2(halfW, 0))) modeInt = 0;
-    ImGui::PopStyleColor(2);
-
+    modeButton("Corner Pin", 0, modeInt, thirdW);
     ImGui::SameLine();
-
-    // Mesh Warp button
-    bool mwActive = (modeInt == 1);
-    if (mwActive) {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.25f));
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.90f, 1.0f, 1.0f));
-    } else {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.11f, 0.125f, 0.165f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.60f, 0.68f, 1.0f));
-    }
-    if (ImGui::Button("Mesh Warp", ImVec2(halfW, 0))) modeInt = 1;
-    ImGui::PopStyleColor(2);
+    modeButton("Mesh Warp", 1, modeInt, thirdW);
+    ImGui::SameLine();
+    modeButton("OBJ Mesh", 2, modeInt, thirdW);
 
     mode = (ViewportPanel::WarpMode)modeInt;
 
@@ -79,7 +74,7 @@ void WarpEditor::render(CornerPinWarp& cornerPin, MeshWarp& meshWarp,
                 {-1.0f, -1.0f}, {1.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, 1.0f}
             }};
         }
-    } else {
+    } else if (mode == ViewportPanel::WarpMode::MeshWarp) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
         ImGui::Text("%d x %d", meshWarp.cols(), meshWarp.rows());
         ImGui::PopStyleColor();
@@ -95,6 +90,89 @@ void WarpEditor::render(CornerPinWarp& cornerPin, MeshWarp& meshWarp,
 
         if (accentButton("Reset", -1)) {
             meshWarp.resetGrid();
+        }
+    } else if (mode == ViewportPanel::WarpMode::ObjMesh) {
+        // Mesh file display
+        if (objMeshWarp.isLoaded()) {
+            std::string filename = std::filesystem::path(objMeshWarp.meshPath()).filename().string();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.78f, 1.0f, 0.7f));
+            ImGui::Text("%s", filename.c_str());
+            ImGui::PopStyleColor();
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.7f));
+            ImGui::Text("No mesh loaded");
+            ImGui::PopStyleColor();
+        }
+
+        if (accentButton("Load Mesh...", -1)) {
+            m_wantsLoadOBJ = true;
+        }
+
+        if (objMeshWarp.isLoaded()) {
+            sectionSep();
+
+            // Camera controls
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+            ImGui::Text("Camera");
+            ImGui::PopStyleColor();
+
+            auto& cam = objMeshWarp.camera();
+            ImGui::SetNextItemWidth(-1);
+            ImGui::SliderFloat("FOV", &cam.fovDeg, 10.0f, 120.0f, "%.0f");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::SliderFloat("Distance", &cam.distance, 0.5f, 20.0f, "%.1f");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::SliderFloat("Azimuth", &cam.azimuth, -3.14159f, 3.14159f, "%.2f");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::SliderFloat("Elevation", &cam.elevation, -1.5f, 1.5f, "%.2f");
+
+            ImGui::SetNextItemWidth(-1);
+            ImGui::DragFloat3("Target", &cam.target[0], 0.01f, -10.0f, 10.0f, "%.2f");
+
+            sectionSep();
+
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+            ImGui::Text("Model");
+            ImGui::PopStyleColor();
+
+            ImGui::SetNextItemWidth(-1);
+            ImGui::SliderFloat("Scale", &objMeshWarp.modelScale(), 0.01f, 10.0f, "%.2f");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::DragFloat3("Position", &objMeshWarp.modelPosition()[0], 0.01f, -10.0f, 10.0f, "%.2f");
+
+            if (accentButton("Reset Camera", -1)) {
+                cam = OrbitCamera{};
+                objMeshWarp.modelScale() = 1.0f;
+                objMeshWarp.modelPosition() = {0.0f, 0.0f, 0.0f};
+            }
+
+            // Material toggles
+            auto& mats = objMeshWarp.materials();
+            if (!mats.empty()) {
+                sectionSep();
+
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+                ImGui::Text("Materials");
+                ImGui::PopStyleColor();
+
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.70f, 0.73f, 0.78f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_CheckMark, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+                for (int mi = 0; mi < (int)mats.size(); mi++) {
+                    ImGui::PushID(5000 + mi);
+                    ImGui::Checkbox(mats[mi].name.c_str(), &mats[mi].textured);
+                    ImGui::PopID();
+                }
+                ImGui::PopStyleColor(2);
+
+                float halfBtnW = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+                if (accentButton("All On", halfBtnW)) {
+                    for (auto& m : mats) m.textured = true;
+                }
+                ImGui::SameLine();
+                if (accentButton("All Off", halfBtnW)) {
+                    for (auto& m : mats) m.textured = false;
+                }
+            }
         }
     }
 

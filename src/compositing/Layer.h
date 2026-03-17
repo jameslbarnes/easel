@@ -10,8 +10,19 @@
 #include <string>
 #include <memory>
 
+enum class MosaicMode { Mirror = 0, Hex, COUNT };
+
+inline const char* mosaicModeName(MosaicMode mode) {
+    switch (mode) {
+        case MosaicMode::Mirror: return "Mirror";
+        case MosaicMode::Hex:    return "Hex";
+        default: return "Mirror";
+    }
+}
+
 class Layer {
 public:
+    uint32_t id = 0; // stable ID for zone visibility sets
     std::string name = "Layer";
     bool visible = true;
     float opacity = 1.0f;
@@ -24,12 +35,24 @@ public:
     bool flipH = false;
     bool flipV = false;
 
-    // Tile/mirror: repeats with alternating mirror (1 = normal, 2+ = mirrored tiles)
-    int tileX = 1, tileY = 1;
+    // Mosaic mode
+    MosaicMode mosaicMode = MosaicMode::Mirror;
+    float tileX = 1.0f, tileY = 1.0f;     // Mirror grid (float for audio smoothing)
+    float mosaicDensity = 4.0f;            // Hex cell count
+    float mosaicSpin = 0.0f;               // Hex rotation
+    bool audioReactive = false;
+    float audioStrength = 0.15f;
+
+    // Mosaic transition (ephemeral — not serialized)
+    MosaicMode mosaicModeFrom = MosaicMode::Mirror;
+    float mosaicTransitionStart = -10.0f;
+    float mosaicTransitionDuration = 1.5f;
 
     // Source crop (0.0–0.49): trims edges before tiling
     float cropTop = 0.0f, cropBottom = 0.0f;
     float cropLeft = 0.0f, cropRight = 0.0f;
+    bool autoCrop = true;     // auto-detect and remove black borders
+    bool autoCropDone = false; // already ran for current source
 
     // Content source
     std::shared_ptr<ContentSource> source;
@@ -48,5 +71,6 @@ public:
 #ifdef HAS_NDI
     NDIOutput ndiSender;
     std::string ndiName;  // current NDI sender name (for rename detection)
+    bool ndiEnabled = false; // per-layer NDI broadcast (off by default for performance)
 #endif
 };

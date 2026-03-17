@@ -2,18 +2,29 @@
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 #include "compositing/LayerStack.h"
+#include <vector>
+#include <memory>
+#include <string>
 
 class CornerPinWarp;
 class MeshWarp;
+class ObjMeshWarp;
 class MaskPath;
+struct OutputZone;
+struct MonitorInfo;
 
 class ViewportPanel {
 public:
-    enum class WarpMode { CornerPin, MeshWarp };
+    enum class WarpMode { CornerPin, MeshWarp, ObjMesh };
     enum class EditMode { Normal, Mask };
 
     void render(GLuint texture, CornerPinWarp& cornerPin, MeshWarp& meshWarp,
-                WarpMode warpMode, float projectorAspect = 16.0f / 9.0f);
+                WarpMode warpMode, float projectorAspect = 16.0f / 9.0f,
+                std::vector<std::unique_ptr<OutputZone>>* zones = nullptr,
+                int* activeZone = nullptr,
+                const std::vector<MonitorInfo>* monitors = nullptr,
+                bool ndiAvailable = false,
+                ObjMeshWarp* objMeshWarp = nullptr);
 
     // Layer transform overlay — drag to move, handles to resize
     void renderLayerOverlay(LayerStack& stack, int& selectedLayer);
@@ -50,6 +61,17 @@ private:
     glm::vec2 m_dragStartMouse = {0, 0};
     glm::vec2 m_dragStartPos = {0, 0};
     glm::vec2 m_dragStartScale = {1, 1};
+
+    // Orbit camera drag state (ObjMesh mode)
+    bool m_orbitDragging = false;
+    glm::vec2 m_orbitDragStart = {0, 0};
+    float m_orbitStartAzimuth = 0;
+    float m_orbitStartElevation = 0;
+
+    // Zone tab rename state
+    bool m_renaming = false;
+    int m_renameIndex = -1;
+    char m_renameBuf[128] = {};
 
     // The image area within the panel
     glm::vec2 m_imageOrigin = {0, 0};

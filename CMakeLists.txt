@@ -34,15 +34,9 @@ else()
     message(STATUS "OpenCV not found at ${OPENCV_DIR} - scanning disabled")
 endif()
 
-# WebView2 (external NuGet SDK, same pattern as FFmpeg/OpenCV)
-set(WEBVIEW2_DIR "${CMAKE_SOURCE_DIR}/external/webview2")
-if(EXISTS "${WEBVIEW2_DIR}")
-    set(HAS_WEBVIEW2 TRUE)
-    message(STATUS "WebView2 SDK found at ${WEBVIEW2_DIR}")
-else()
-    set(HAS_WEBVIEW2 FALSE)
-    message(STATUS "WebView2 SDK not found at ${WEBVIEW2_DIR} - speech input disabled")
-endif()
+# Whisper.cpp (fetched via FetchContent - always available)
+set(HAS_WHISPER TRUE)
+message(STATUS "whisper.cpp enabled for speech-to-text")
 
 # NDI (headers only - runtime loaded dynamically)
 set(NDI_DIR "${CMAKE_SOURCE_DIR}/external/ndi")
@@ -68,9 +62,11 @@ endif()
 if(NOT HAS_OPENCV)
     list(FILTER SOURCES EXCLUDE REGEX ".*scanning.*")
 endif()
-if(NOT HAS_WEBVIEW2)
-    list(FILTER SOURCES EXCLUDE REGEX ".*speech.*")
+if(NOT HAS_WHISPER)
+    list(FILTER SOURCES EXCLUDE REGEX ".*WhisperSpeech.*")
 endif()
+# Exclude old WebView2 SpeechBridge (replaced by EthereaTranscript)
+list(FILTER SOURCES EXCLUDE REGEX ".*SpeechBridge.*")
 if(NOT HAS_NDI)
     list(FILTER SOURCES EXCLUDE REGEX ".*NDI.*")
 endif()
@@ -103,6 +99,8 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
     ${stb_SOURCE_DIR}
+    ${tinyobjloader_SOURCE_DIR}
+    ${tinygltf_SOURCE_DIR}
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
@@ -116,6 +114,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     d3d11
     dxgi
     comdlg32
+    ws2_32
+    runtimeobject
 )
 
 # FFmpeg linking
@@ -155,12 +155,12 @@ if(HAS_OPENCV)
     )
 endif()
 
-# WebView2 linking
-if(HAS_WEBVIEW2)
-    target_include_directories(${PROJECT_NAME} PRIVATE "${WEBVIEW2_DIR}/build/native/include")
-    target_link_directories(${PROJECT_NAME} PRIVATE "${WEBVIEW2_DIR}/build/native/x64")
-    target_link_libraries(${PROJECT_NAME} PRIVATE WebView2LoaderStatic)
-    target_compile_definitions(${PROJECT_NAME} PRIVATE HAS_WEBVIEW2=1)
+# Whisper.cpp linking
+if(HAS_WHISPER)
+    target_link_libraries(${PROJECT_NAME} PRIVATE whisper)
+    target_include_directories(${PROJECT_NAME} PRIVATE "${CMAKE_SOURCE_DIR}/external")
+    target_include_directories(${PROJECT_NAME} PRIVATE "${whisper_SOURCE_DIR}/include")
+    target_compile_definitions(${PROJECT_NAME} PRIVATE HAS_WHISPER=1)
 endif()
 
 # NDI (headers only, runtime loaded dynamically - no link libraries needed)
@@ -204,6 +204,14 @@ if(HAS_OPENCV)
     include(CTest)
     include(Catch)
     catch_discover_tests(test_scanning)
+endif()
+
+# Whisper benchmark
+if(HAS_WHISPER)
+    add_executable(bench_whisper tests/bench_whisper.cpp)
+    target_compile_definitions(bench_whisper PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(bench_whisper PRIVATE whisper)
+    target_include_directories(bench_whisper PRIVATE "${whisper_SOURCE_DIR}/include")
 endif()
 
 # Copy shaders to build directory

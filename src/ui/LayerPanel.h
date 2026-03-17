@@ -1,10 +1,15 @@
 #pragma once
+#include "app/OutputZone.h"
 #include "compositing/LayerStack.h"
 #include <string>
+#include <vector>
+#include <memory>
 
 class LayerPanel {
 public:
-    void render(LayerStack& stack, int& selectedLayer);
+    void render(LayerStack& stack, int& selectedLayer,
+                std::vector<std::unique_ptr<OutputZone>>* zones = nullptr,
+                int activeZone = 0);
 
 private:
     // Manual drag state

@@ -1,4 +1,5 @@
 #pragma once
+#include "app/OutputZone.h"
 #include "app/ProjectorOutput.h"
 #include "app/UndoStack.h"
 #include "compositing/CompositeEngine.h"
@@ -15,6 +16,7 @@
 #include "ui/LayerPanel.h"
 #include "ui/PropertyPanel.h"
 #include "ui/WarpEditor.h"
+#include <unordered_map>
 
 #include "sources/WindowCaptureSource.h"
 #include "sources/ShaderSource.h"
@@ -26,9 +28,11 @@
 #include "scanning/ScanPanel.h"
 #endif
 
-#ifdef HAS_WEBVIEW2
-#include "speech/SpeechBridge.h"
+#ifdef HAS_WHISPER
+#include "speech/WhisperSpeech.h"
 #endif
+
+#include "speech/EthereaTranscript.h"
 
 #ifdef HAS_NDI
 #include "sources/NDISource.h"
@@ -60,29 +64,41 @@ private:
     PropertyPanel m_propertyPanel;
     WarpEditor m_warpEditor;
 
-    CompositeEngine m_compositor;
+    // Output zones (replaces singular compositor/warp/FBO)
+    std::vector<std::unique_ptr<OutputZone>> m_zones;
+    int m_activeZone = 0;
+    uint32_t m_nextLayerId = 1;
+    OutputZone& activeZone() {
+        if (m_activeZone < 0 || m_activeZone >= (int)m_zones.size())
+            m_activeZone = 0;
+        return *m_zones[m_activeZone];
+    }
+
     LayerStack m_layerStack;
-    CornerPinWarp m_cornerPin;
-    MeshWarp m_meshWarp;
-    ProjectorOutput m_projector;
+    std::unordered_map<int, std::unique_ptr<ProjectorOutput>> m_projectors;
     MaskRenderer m_maskRenderer;
     UndoStack m_undoStack;
 
-    Framebuffer m_warpFBO;
     Mesh m_quad;
     ShaderProgram m_passthroughShader;
     Texture m_testPattern;
 
-    ViewportPanel::WarpMode m_warpMode = ViewportPanel::WarpMode::CornerPin;
     int m_selectedLayer = -1;
+    float m_audioRMS = 0; // smoothed audio level for mosaic reactivity
+    int m_mosaicAudioDevice = -1; // -1 = system loopback, >=0 = index into device list
     bool m_projectorAutoConnect = false;
     int m_lastMonitorCount = 0;
     bool m_maskEditMode = false;
 
     void updateSources();
     void compositeAndWarp();
+    void compositeZone(OutputZone& zone);
+    void presentOutputs();
     void renderUI();
     void renderMenuBar();
+    void addZone();
+    void removeZone(int index);
+    void duplicateZone(int index);
     void loadImage(const std::string& path);
     void loadVideo(const std::string& path);
     void addScreenCapture(int monitorIndex);
@@ -99,14 +115,18 @@ private:
 #endif
 
     SpeechState m_speechState;
-#ifdef HAS_WEBVIEW2
-    SpeechBridge m_speechBridge;
+    EthereaTranscript m_ethereaTranscript;
+    std::string m_prevTranscript;       // Last full_transcript for diffing
+    std::string m_textBuffer;           // Pending characters to drip to shader
+    std::string m_shaderDisplay;        // Current shader display text
+#ifdef HAS_WHISPER
+    WhisperSpeech m_whisperSpeech;
 #endif
 
 #ifdef HAS_NDI
     NDIOutput m_ndiOutput;
     std::vector<NDISenderInfo> m_ndiSources;
-    bool m_ndiOutputEnabled = false;
+    bool m_ndiOutputEnabled = true;
     void addNDISource(const std::string& senderName);
 #endif
 
@@ -115,6 +135,26 @@ private:
     char m_streamKeyBuf[128] = {};
     int m_streamAspect = 0; // 0=16:9, 1=4:3, 2=16:10, 3=Source
     VideoRecorder m_recorder;
+    std::vector<RecAudioDevice> m_audioDevices;
+    int m_selectedAudioDevice = -1; // -1 = default loopback
+    void renderTransportBar();
+
+    // Audio level meter (WASAPI IAudioMeterInformation)
+    void* m_audioMeterInfo = nullptr;
+    void* m_audioMeterDevice = nullptr;
+    int m_meterDeviceIdx = -2; // which device the meter is tracking (-2 = uninitialized)
+    float m_audioLevelPeak = 0.0f;
+    float m_audioLevelL = 0.0f, m_audioLevelR = 0.0f;
+    float m_audioLevelSmooth = 0.0f, m_audioLevelSmoothL = 0.0f, m_audioLevelSmoothR = 0.0f;
+    void updateAudioMeter();
+    void cleanupAudioMeter();
+
+    // Separate mosaic audio meter (can use different device than recording)
+    void* m_mosaicMeterInfo = nullptr;
+    void* m_mosaicMeterDevice = nullptr;
+    int m_mosaicMeterIdx = -2;
+    void updateMosaicMeter();
+    void cleanupMosaicMeter();
 #endif
 
     // JSON save/load
