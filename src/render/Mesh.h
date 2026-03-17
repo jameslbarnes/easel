@@ -28,6 +28,7 @@ public:
     void updateVertices(const std::vector<Vertex>& vertices);
 
     void draw() const;
+    void destroy();
 
     int indexCount() const { return m_indexCount; }
 
@@ -35,6 +36,4 @@ private:
     GLuint m_vao = 0, m_vbo = 0, m_ebo = 0;
     int m_indexCount = 0;
     int m_vertexCapacity = 0;
-
-    void destroy();
 };

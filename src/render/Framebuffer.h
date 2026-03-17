@@ -9,7 +9,7 @@ public:
     Framebuffer(const Framebuffer&) = delete;
     Framebuffer& operator=(const Framebuffer&) = delete;
 
-    bool create(int width, int height);
+    bool create(int width, int height, bool withDepth = false);
     void resize(int width, int height);
     void bind() const;
     static void unbind();
@@ -21,7 +21,9 @@ public:
 private:
     GLuint m_fbo = 0;
     GLuint m_texture = 0;
+    GLuint m_depth = 0;
     int m_width = 0, m_height = 0;
+    bool m_hasDepth = false;
 
     void destroy();
 };

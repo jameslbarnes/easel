@@ -26,9 +26,14 @@ bool ShaderProgram::compile(GLuint shader, const std::string& source) {
     GLint success;
     glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
     if (!success) {
-        char log[512];
-        glGetShaderInfoLog(shader, 512, nullptr, log);
+        char log[2048];
+        glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
         std::cerr << "Shader compile error:\n" << log << std::endl;
+        // Also log to file for debugging
+        {
+            FILE* f = fopen("etherea_debug.log", "a");
+            if (f) { fprintf(f, "SHADER COMPILE ERROR:\n%s\n---\n", log); fclose(f); }
+        }
         return false;
     }
     return true;

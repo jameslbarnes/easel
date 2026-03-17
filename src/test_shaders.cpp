@@ -31,7 +31,7 @@ int main(int argc, char* argv[]) {
     glfwSetErrorCallback([](int, const char* msg) { std::cerr << "GLFW: " << msg << std::endl; });
     if (!glfwInit()) { std::cerr << "glfwInit failed" << std::endl; return 1; }
 
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
