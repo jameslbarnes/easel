@@ -1,0 +1,169 @@
+{
+  "cornerPin": [
+    [
+      -1.0,
+      -1.0
+    ],
+    [
+      1.0,
+      -1.0
+    ],
+    [
+      1.0,
+      1.0
+    ],
+    [
+      -1.0,
+      1.0
+    ]
+  ],
+  "layers": [
+    {
+      "blendMode": 0,
+      "flipH": false,
+      "flipV": false,
+      "name": "Win: Etherea Projection (MediaMTX) - Google Chrome",
+      "ndiEnabled": true,
+      "opacity": 1.0,
+      "position": [
+        0.0,
+        0.0
+      ],
+      "rotation": 0.0,
+      "scale": [
+        1.0,
+        1.0
+      ],
+      "sourcePath": "Etherea Projection (MediaMTX) - Google Chrome",
+      "sourceType": "Window Capture",
+      "visible": true
+    },
+    {
+      "blendMode": 2,
+      "flipH": false,
+      "flipV": false,
+      "name": "NDI: LUNCHBOX2 (ShaderClaw)",
+      "ndiEnabled": true,
+      "opacity": 1.0,
+      "position": [
+        0.0,
+        0.0
+      ],
+      "rotation": 0.0,
+      "scale": [
+        1.0,
+        1.0
+      ],
+      "sourcePath": "LUNCHBOX2 (ShaderClaw)",
+      "sourceType": "NDI",
+      "visible": true
+    }
+  ],
+  "meshWarp": {
+    "cols": 5,
+    "points": [
+      [
+        -1.0,
+        -1.0
+      ],
+      [
+        -0.5,
+        -1.0
+      ],
+      [
+        0.0,
+        -1.0
+      ],
+      [
+        0.5,
+        -1.0
+      ],
+      [
+        1.0,
+        -1.0
+      ],
+      [
+        -1.0,
+        -0.5
+      ],
+      [
+        -0.5,
+        -0.5
+      ],
+      [
+        0.0,
+        -0.5
+      ],
+      [
+        0.5,
+        -0.5
+      ],
+      [
+        1.0,
+        -0.5
+      ],
+      [
+        -1.0,
+        0.0
+      ],
+      [
+        -0.5,
+        0.0
+      ],
+      [
+        0.0,
+        0.0
+      ],
+      [
+        0.5,
+        0.0
+      ],
+      [
+        1.0,
+        0.0
+      ],
+      [
+        -1.0,
+        0.5
+      ],
+      [
+        -0.5,
+        0.5
+      ],
+      [
+        0.0,
+        0.5
+      ],
+      [
+        0.5,
+        0.5
+      ],
+      [
+        1.0,
+        0.5
+      ],
+      [
+        -1.0,
+        1.0
+      ],
+      [
+        -0.5,
+        1.0
+      ],
+      [
+        0.0,
+        1.0
+      ],
+      [
+        0.5,
+        1.0
+      ],
+      [
+        1.0,
+        1.0
+      ]
+    ],
+    "rows": 5
+  },
+  "warpMode": 0
+}
