@@ -17,9 +17,20 @@ struct AVPacket;
 struct SwsContext;
 struct SwrContext;
 
+struct RecAudioDevice {
+    std::string name;
+    std::string id;       // WASAPI endpoint ID
+    bool isCapture;       // true = microphone, false = output (loopback)
+};
+
 class VideoRecorder {
 public:
     ~VideoRecorder();
+
+    static std::vector<RecAudioDevice> enumerateAudioDevices();
+
+    void setAudioDevice(int index) { m_selectedAudioDevice = index; }
+    int audioDevice() const { return m_selectedAudioDevice; }
 
     bool start(const std::string& path, int width, int height, int fps = 30);
     void stop();
@@ -43,6 +54,7 @@ private:
     std::string m_path;
     std::atomic<bool> m_active{false};
     std::atomic<bool> m_stopRequested{false};
+    int m_selectedAudioDevice = -1; // -1 = default output loopback
 
     // Video
     AVFormatContext* m_fmtCtx = nullptr;

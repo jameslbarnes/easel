@@ -19,6 +19,8 @@ extern "C" {
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <combaseapi.h>
+#include <propidl.h>
+#include <ksmedia.h>
 
 VideoRecorder::~VideoRecorder() {
     stop();
@@ -64,7 +66,110 @@ double VideoRecorder::uptimeSeconds() const {
     return av_gettime_relative() / 1000000.0 - m_startTime;
 }
 
-// ─── WASAPI loopback ────────────────────────────────────────────────
+// ─── WASAPI audio device enumeration ────────────────────────────────
+
+std::vector<RecAudioDevice> VideoRecorder::enumerateAudioDevices() {
+    std::vector<RecAudioDevice> result;
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+
+    IMMDeviceEnumerator* enumerator = nullptr;
+    HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
+                                   CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
+                                   (void**)&enumerator);
+    if (FAILED(hr)) return result;
+
+    // Enumerate render devices (output loopback)
+    IMMDeviceCollection* collection = nullptr;
+    hr = enumerator->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &collection);
+    if (SUCCEEDED(hr) && collection) {
+        UINT count = 0;
+        collection->GetCount(&count);
+        for (UINT i = 0; i < count; i++) {
+            IMMDevice* dev = nullptr;
+            if (SUCCEEDED(collection->Item(i, &dev))) {
+                RecAudioDevice info;
+                info.isCapture = false;
+
+                LPWSTR wid = nullptr;
+                if (SUCCEEDED(dev->GetId(&wid))) {
+                    char buf[512];
+                    wcstombs(buf, wid, sizeof(buf));
+                    info.id = buf;
+                    CoTaskMemFree(wid);
+                }
+
+                IPropertyStore* props = nullptr;
+                if (SUCCEEDED(dev->OpenPropertyStore(STGM_READ, &props))) {
+                    PROPVARIANT pv;
+                    PropVariantInit(&pv);
+                    // PKEY_Device_FriendlyName = {a45c254e-df1c-4efd-8020-67d146a850e0}, 14
+                    PROPERTYKEY key;
+                    key.fmtid = {0xa45c254e, 0xdf1c, 0x4efd, {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}};
+                    key.pid = 14;
+                    if (SUCCEEDED(props->GetValue(key, &pv)) && pv.vt == VT_LPWSTR) {
+                        char buf[512];
+                        wcstombs(buf, pv.pwszVal, sizeof(buf));
+                        info.name = buf;
+                    }
+                    PropVariantClear(&pv);
+                    props->Release();
+                }
+                if (info.name.empty()) info.name = "Output " + std::to_string(i);
+                info.name += " (loopback)";
+                result.push_back(info);
+                dev->Release();
+            }
+        }
+        collection->Release();
+    }
+
+    // Enumerate capture devices (microphones)
+    hr = enumerator->EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE, &collection);
+    if (SUCCEEDED(hr) && collection) {
+        UINT count = 0;
+        collection->GetCount(&count);
+        for (UINT i = 0; i < count; i++) {
+            IMMDevice* dev = nullptr;
+            if (SUCCEEDED(collection->Item(i, &dev))) {
+                RecAudioDevice info;
+                info.isCapture = true;
+
+                LPWSTR wid = nullptr;
+                if (SUCCEEDED(dev->GetId(&wid))) {
+                    char buf[512];
+                    wcstombs(buf, wid, sizeof(buf));
+                    info.id = buf;
+                    CoTaskMemFree(wid);
+                }
+
+                IPropertyStore* props = nullptr;
+                if (SUCCEEDED(dev->OpenPropertyStore(STGM_READ, &props))) {
+                    PROPVARIANT pv;
+                    PropVariantInit(&pv);
+                    PROPERTYKEY key;
+                    key.fmtid = {0xa45c254e, 0xdf1c, 0x4efd, {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}};
+                    key.pid = 14;
+                    if (SUCCEEDED(props->GetValue(key, &pv)) && pv.vt == VT_LPWSTR) {
+                        char buf[512];
+                        wcstombs(buf, pv.pwszVal, sizeof(buf));
+                        info.name = buf;
+                    }
+                    PropVariantClear(&pv);
+                    props->Release();
+                }
+                if (info.name.empty()) info.name = "Microphone " + std::to_string(i);
+                result.push_back(info);
+                dev->Release();
+            }
+        }
+        collection->Release();
+    }
+
+    enumerator->Release();
+    return result;
+}
+
+// ─── WASAPI capture ─────────────────────────────────────────────────
 
 bool VideoRecorder::initAudioCapture() {
     HRESULT hr;
@@ -73,39 +178,96 @@ bool VideoRecorder::initAudioCapture() {
     hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
                           CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
                           (void**)&enumerator);
-    if (FAILED(hr)) return false;
+    if (FAILED(hr)) {
+        std::cerr << "[REC] Audio: failed to create device enumerator" << std::endl;
+        return false;
+    }
 
     IMMDevice* device = nullptr;
-    hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
+    auto devices = enumerateAudioDevices();
+    bool isCapture = false;
+
+    if (m_selectedAudioDevice >= 0 && m_selectedAudioDevice < (int)devices.size()) {
+        auto& info = devices[m_selectedAudioDevice];
+        isCapture = info.isCapture;
+        int idLen = (int)info.id.size() + 1;
+        std::vector<wchar_t> wid(idLen);
+        mbstowcs(wid.data(), info.id.c_str(), idLen);
+        hr = enumerator->GetDevice(wid.data(), &device);
+        std::cout << "[REC] Audio: opening device '" << info.name << "'" << std::endl;
+    } else {
+        hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
+        std::cout << "[REC] Audio: using default output (loopback)" << std::endl;
+    }
     enumerator->Release();
-    if (FAILED(hr)) return false;
+    if (FAILED(hr) || !device) {
+        std::cerr << "[REC] Audio: failed to get device (hr=0x" << std::hex << hr << std::dec << ")" << std::endl;
+        return false;
+    }
     m_audioDevice = device;
 
     IAudioClient* audioClient = nullptr;
     hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&audioClient);
-    if (FAILED(hr)) return false;
+    if (FAILED(hr)) {
+        std::cerr << "[REC] Audio: failed to activate IAudioClient (hr=0x" << std::hex << hr << std::dec << ")" << std::endl;
+        return false;
+    }
     m_audioClient = audioClient;
 
     WAVEFORMATEX* mixFmt = nullptr;
     hr = audioClient->GetMixFormat(&mixFmt);
-    if (FAILED(hr)) return false;
+    if (FAILED(hr)) {
+        std::cerr << "[REC] Audio: GetMixFormat failed" << std::endl;
+        return false;
+    }
 
     m_wasapiSampleRate = mixFmt->nSamplesPerSec;
     m_wasapiChannels = mixFmt->nChannels;
 
-    REFERENCE_TIME bufferDuration = 500000;
+    // Verify format is IEEE float
+    bool isFloat = false;
+    if (mixFmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
+        isFloat = true;
+    } else if (mixFmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE && mixFmt->cbSize >= 22) {
+        WAVEFORMATEXTENSIBLE* ext = (WAVEFORMATEXTENSIBLE*)mixFmt;
+        isFloat = (ext->SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT);
+    }
+
+    std::cout << "[REC] Audio: format=" << mixFmt->wFormatTag
+              << " rate=" << m_wasapiSampleRate
+              << " ch=" << m_wasapiChannels
+              << " bits=" << mixFmt->wBitsPerSample
+              << " float=" << isFloat << std::endl;
+
+    if (!isFloat) {
+        std::cerr << "[REC] Audio: device format is not IEEE float — audio may not work correctly" << std::endl;
+    }
+
+    // For loopback, use the device's default period for minimum latency
+    REFERENCE_TIME defaultPeriod = 0, minPeriod = 0;
+    audioClient->GetDevicePeriod(&defaultPeriod, &minPeriod);
+    REFERENCE_TIME bufferDuration = defaultPeriod > 0 ? defaultPeriod * 4 : 2000000; // 4x period or 200ms
+
+    DWORD streamFlags = isCapture ? 0 : AUDCLNT_STREAMFLAGS_LOOPBACK;
     hr = audioClient->Initialize(AUDCLNT_SHAREMODE_SHARED,
-                                  AUDCLNT_STREAMFLAGS_LOOPBACK,
+                                  streamFlags,
                                   bufferDuration, 0, mixFmt, nullptr);
     CoTaskMemFree(mixFmt);
-    if (FAILED(hr)) return false;
+    if (FAILED(hr)) {
+        std::cerr << "[REC] Audio: Initialize failed (hr=0x" << std::hex << hr << std::dec << ")" << std::endl;
+        return false;
+    }
 
     IAudioCaptureClient* captureClient = nullptr;
     hr = audioClient->GetService(__uuidof(IAudioCaptureClient), (void**)&captureClient);
-    if (FAILED(hr)) return false;
+    if (FAILED(hr)) {
+        std::cerr << "[REC] Audio: GetService(IAudioCaptureClient) failed" << std::endl;
+        return false;
+    }
     m_captureClient = captureClient;
 
     audioClient->Start();
+    std::cout << "[REC] Audio capture started successfully" << std::endl;
     return true;
 }
 
@@ -213,27 +375,30 @@ bool VideoRecorder::initEncoder(const std::string& path, int width, int height, 
             m_audioFrame->nb_samples = m_audioFrameSize;
             av_frame_get_buffer(m_audioFrame, 0);
 
+            // Setup resampler: WASAPI interleaved float -> AAC planar float
+            // Always use actual WASAPI channel count as input
+            AVChannelLayout inLayout;
+            av_channel_layout_default(&inLayout, m_wasapiChannels);
             ret = swr_alloc_set_opts2(&m_swrCtx,
                 &m_audioCodecCtx->ch_layout, AV_SAMPLE_FMT_FLTP, m_wasapiSampleRate,
-                &m_audioCodecCtx->ch_layout, AV_SAMPLE_FMT_FLT,  m_wasapiSampleRate,
+                &inLayout, AV_SAMPLE_FMT_FLT, m_wasapiSampleRate,
                 0, nullptr);
-
-            if (m_wasapiChannels != 2) {
-                AVChannelLayout inLayout;
-                av_channel_layout_default(&inLayout, m_wasapiChannels);
-                swr_alloc_set_opts2(&m_swrCtx,
-                    &m_audioCodecCtx->ch_layout, AV_SAMPLE_FMT_FLTP, m_wasapiSampleRate,
-                    &inLayout, AV_SAMPLE_FMT_FLT, m_wasapiSampleRate,
-                    0, nullptr);
-                av_channel_layout_uninit(&inLayout);
-            }
+            av_channel_layout_uninit(&inLayout);
 
             if (!m_swrCtx || swr_init(m_swrCtx) < 0) {
+                std::cerr << "[REC] Audio: swr_init failed" << std::endl;
                 cleanupAudio();
                 hasAudio = false;
+            } else {
+                std::cout << "[REC] Audio encoder ready: AAC " << m_wasapiSampleRate << "Hz, "
+                          << m_wasapiChannels << "ch -> stereo" << std::endl;
             }
             m_audioAccum.clear();
         }
+    }
+
+    if (!hasAudio) {
+        std::cerr << "[REC] WARNING: Recording without audio!" << std::endl;
     }
 
     // ── Open file and write header ──
@@ -295,25 +460,31 @@ void VideoRecorder::drainAudio() {
 
     IAudioCaptureClient* capture = (IAudioCaptureClient*)m_captureClient;
     UINT32 packetLength = 0;
-    capture->GetNextPacketSize(&packetLength);
+    HRESULT hr = capture->GetNextPacketSize(&packetLength);
+    if (FAILED(hr)) return;
 
     while (packetLength > 0) {
         BYTE* data = nullptr;
         UINT32 numFrames = 0;
         DWORD flags = 0;
 
-        HRESULT hr = capture->GetBuffer(&data, &numFrames, &flags, nullptr, nullptr);
+        hr = capture->GetBuffer(&data, &numFrames, &flags, nullptr, nullptr);
         if (FAILED(hr)) break;
+
+        if (m_audioSamplesWritten == 0 && numFrames > 0 && !(flags & AUDCLNT_BUFFERFLAGS_SILENT)) {
+            std::cout << "[REC] Audio: first non-silent packet (" << numFrames << " frames)" << std::endl;
+        }
 
         if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
             std::vector<float> silence(numFrames * m_wasapiChannels, 0.0f);
             encodeAudioSamples(silence.data(), numFrames, m_wasapiChannels);
-        } else {
+        } else if (data) {
             encodeAudioSamples((const float*)data, numFrames, m_wasapiChannels);
         }
 
         capture->ReleaseBuffer(numFrames);
-        capture->GetNextPacketSize(&packetLength);
+        hr = capture->GetNextPacketSize(&packetLength);
+        if (FAILED(hr)) break;
     }
 }
 
@@ -360,19 +531,23 @@ void VideoRecorder::encodeThread() {
 
     while (!m_stopRequested) {
         std::unique_lock<std::mutex> lock(m_mutex);
-        m_cv.wait_for(lock, std::chrono::milliseconds(20), [this] {
+        m_cv.wait_for(lock, std::chrono::milliseconds(10), [this] {
             return m_frameReady || m_stopRequested.load();
         });
-
-        if (m_stopRequested) break;
 
         bool hasVideo = m_frameReady;
         if (hasVideo) m_frameReady = false;
         lock.unlock();
 
+        // Always drain audio, even on the stop iteration
         drainAudio();
         if (hasVideo) encodeVideoFrame(m_encodeBuf.data());
     }
+
+    // Final audio drain
+    drainAudio();
+
+    std::cout << "[REC] Flushing encoders (audio samples written: " << m_audioSamplesWritten << ")" << std::endl;
 
     // Flush encoders
     if (m_videoCodecCtx) {
