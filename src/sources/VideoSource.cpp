@@ -195,6 +195,10 @@ bool VideoSource::load(const std::string& path) {
     close();
     m_path = path;
 
+    // Detect live streams (RTMP, SRT, etc.)
+    m_isLive = (path.rfind("rtmp://", 0) == 0 || path.rfind("srt://", 0) == 0 ||
+                path.rfind("rtsp://", 0) == 0);
+
     if (avformat_open_input(&m_formatCtx, path.c_str(), nullptr, nullptr) < 0) {
         std::cerr << "Failed to open video: " << path << std::endl;
         return false;
@@ -432,10 +436,17 @@ void VideoSource::decodeLoop() {
 
         // If we have a pending video frame, check if it's time to display
         if (hasPendingVideo) {
-            double elapsed = glfwGetTime() - m_playbackStart + m_playbackOffset;
-            double waitTime = pendingPts - elapsed;
-            if (waitTime <= 0.001) {
-                // Time to display — write to triple buffer
+            bool shouldDisplay = m_isLive; // Live streams: display immediately
+            if (!shouldDisplay) {
+                double elapsed = glfwGetTime() - m_playbackStart + m_playbackOffset;
+                double waitTime = pendingPts - elapsed;
+                shouldDisplay = (waitTime <= 0.001);
+                if (!shouldDisplay && waitTime > 0.002) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    continue;
+                }
+            }
+            if (shouldDisplay) {
                 int wi = -1;
                 for (int i = 0; i < 3; i++) {
                     if (!m_buffers[i].ready.load()) { wi = i; break; }
@@ -445,16 +456,17 @@ void VideoSource::decodeLoop() {
                 m_buffers[wi].pts = pendingPts;
                 m_buffers[wi].ready = true;
                 hasPendingVideo = false;
-            } else if (waitTime > 0.002) {
-                // Not yet time — sleep briefly then keep processing audio
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                continue;
             }
         }
 
         // Read next packet
         int ret = av_read_frame(m_formatCtx, pkt);
         if (ret < 0) {
+            if (m_isLive) {
+                // Live stream: brief pause then retry (network hiccup)
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
             // End of file - loop
             av_seek_frame(m_formatCtx, m_videoStreamIndex, 0, AVSEEK_FLAG_BACKWARD);
             avcodec_flush_buffers(m_codecCtx);

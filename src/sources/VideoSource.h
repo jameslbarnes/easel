@@ -103,6 +103,7 @@ private:
 
     Texture m_texture;
     bool m_hasNewFrame = false;
+    bool m_isLive = false;  // true for RTMP/live streams — bypass PTS scheduling
     double m_playbackStart = 0.0;
     double m_playbackOffset = 0.0;
 
