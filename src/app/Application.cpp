@@ -10,6 +10,9 @@
 #include "sources/NDIRuntime.h"
 #include "sources/NDISource.h"
 #endif
+#ifdef HAS_WHEP
+#include "sources/WHEPSource.h"
+#endif
 #include <nlohmann/json.hpp>
 #include <imgui.h>
 #include "stb_image.h"
@@ -149,20 +152,22 @@ bool Application::init() {
         m_testPattern.updateData(pixels.data(), tw, th);
     }
 
-    // Etherea transcript via SSE — diff full_transcript and buffer new text
-    m_ethereaTranscript.setCallback([this](const std::string& text, bool isFinal) {
-        // Only buffer genuinely new text (transcript grew as prefix match)
-        if (text.size() > m_prevTranscript.size() &&
-            text.substr(0, m_prevTranscript.size()) == m_prevTranscript) {
-            m_textBuffer += text.substr(m_prevTranscript.size());
+    // Etherea client — WebSocket for real-time transcript, SSE for hints
+    m_ethereaClient.setTranscriptCallback([this](const std::string& text, bool isFinal) {
+        // Update data bus with latest transcript segment
+        m_dataBus.set("etherea.latest", text);
+        if (isFinal && !text.empty()) {
+            // Accumulate full transcript
+            std::string prev = m_dataBus.get("etherea.transcript");
+            if (!prev.empty()) prev += " ";
+            prev += text;
+            m_dataBus.set("etherea.transcript", prev);
         }
-        // Always track latest transcript (even revisions) so next diff is correct
-        m_prevTranscript = text;
     });
     m_speechState.available = true;
 
     // Auto-connect to Etherea (no session ID — server gives us the active session)
-    m_ethereaTranscript.connect("http://localhost:7860");
+    m_ethereaClient.connect("http://localhost:7860");
 
     // Record initial monitor count and auto-connect if secondary exists
     m_lastMonitorCount = (int)ProjectorOutput::enumerateMonitors().size();
@@ -274,9 +279,18 @@ void Application::run() {
         }
 
         updateSources();
-#ifdef HAS_FFMPEG
-        updateMosaicMeter();
-#endif
+
+        // Update audio analyzer (dt-based)
+        {
+            static double lastTime = glfwGetTime();
+            double now = glfwGetTime();
+            float dt = (float)(now - lastTime);
+            lastTime = now;
+            m_audioAnalyzer.setDevice(m_mosaicAudioDevice);
+            m_audioAnalyzer.update(dt);
+            m_audioRMS = m_audioAnalyzer.smoothedRMS();
+        }
+
         compositeAndWarp();
         presentOutputs();
 
@@ -291,22 +305,36 @@ void Application::run() {
         // Check for agent screenshot trigger (after UI is rendered)
         pollScreenshotTrigger();
 
-        // Dispatch Etherea transcript results on main thread
-        m_ethereaTranscript.poll();
+        // Dispatch Etherea events on main thread
+        m_ethereaClient.poll();
 
-        // Drip buffered text to shader
-        if (!m_textBuffer.empty() && m_speechState.listening &&
-            m_speechState.targetSource && !m_speechState.targetParam.empty()) {
-            try {
-                // Drain chars: 1 per frame normally, more if buffer is backing up
-                int charsThisFrame = 1 + (int)m_textBuffer.size() / 10;
-                charsThisFrame = std::min(charsThisFrame, (int)m_textBuffer.size());
-                m_shaderDisplay += m_textBuffer.substr(0, charsThisFrame);
-                m_textBuffer = m_textBuffer.substr(charsThisFrame);
-                m_speechState.targetSource->setText(m_speechState.targetParam, m_shaderDisplay);
-            } catch (...) {
-                // Safety: clear state if anything goes wrong
-                m_textBuffer.clear();
+        // Push hints and prompt from Etherea into data bus
+        {
+            auto hints = m_ethereaClient.hints();
+            for (int i = 0; i < 3 && i < (int)hints.size(); i++)
+                m_dataBus.set("etherea.hint." + std::to_string(i), hints[i]);
+            std::string prompt = m_ethereaClient.prompt();
+            if (!prompt.empty())
+                m_dataBus.set("etherea.prompt", prompt);
+        }
+
+        // Apply data bus bindings to shader text params
+        for (auto& [bindKey, dataKey] : m_dataBus.bindings()) {
+            if (dataKey.empty()) continue;
+            auto sep = bindKey.find(':');
+            if (sep == std::string::npos) continue;
+            uint32_t layerId = (uint32_t)std::stoul(bindKey.substr(0, sep));
+            std::string paramName = bindKey.substr(sep + 1);
+            for (int i = 0; i < m_layerStack.count(); i++) {
+                auto& layer = m_layerStack[i];
+                if (layer->id == layerId && layer->source && layer->source->isShader()) {
+                    auto* shader = static_cast<ShaderSource*>(layer->source.get());
+                    std::string val = m_dataBus.get(dataKey);
+                    // Uppercase for shader text encoding
+                    for (auto& c : val) c = (char)toupper((unsigned char)c);
+                    shader->setText(paramName, val);
+                    break;
+                }
             }
         }
 
@@ -319,7 +347,6 @@ void Application::shutdown() {
     m_recorder.stop();
     m_rtmpOutput.stop();
     cleanupAudioMeter();
-    cleanupMosaicMeter();
 #endif
 #ifdef HAS_NDI
     // Destroy per-layer NDI senders before shutting down runtime
@@ -333,7 +360,7 @@ void Application::shutdown() {
     m_ndiOutput.destroy();
     NDIRuntime::instance().shutdown();
 #endif
-    m_ethereaTranscript.disconnect();
+    m_ethereaClient.disconnect();
 #ifdef HAS_OPENCV
     m_scanner.cancelScan();
     m_webcam.close();
@@ -352,6 +379,18 @@ void Application::updateSources() {
     for (int i = 0; i < m_layerStack.count(); i++) {
         auto& layer = m_layerStack[i];
         if (layer->source) {
+            // Pass audio state to ShaderSource layers for ISF uniforms
+            if (layer->source->isShader()) {
+                auto* shaderSrc = static_cast<ShaderSource*>(layer->source.get());
+                shaderSrc->setAudioState(
+                    m_audioAnalyzer.smoothedRMS(),
+                    m_audioAnalyzer.bass(),
+                    (m_audioAnalyzer.lowMid() + m_audioAnalyzer.highMid()) * 0.5f,
+                    m_audioAnalyzer.treble(),
+                    m_audioAnalyzer.fftTexture()
+                );
+            }
+
             layer->source->update();
 
             // Auto-crop: detect black borders once when source first has a valid texture
@@ -497,7 +536,19 @@ void Application::compositeZone(OutputZone& zone) {
         }
     }
 
-    zone.compositor.setAudioState(m_audioRMS, (float)glfwGetTime());
+    {
+        AudioState audio;
+        audio.rms = m_audioAnalyzer.smoothedRMS();
+        audio.bass = m_audioAnalyzer.bass();
+        audio.lowMid = m_audioAnalyzer.lowMid();
+        audio.highMid = m_audioAnalyzer.highMid();
+        audio.treble = m_audioAnalyzer.treble();
+        audio.beatDecay = m_audioAnalyzer.beatDecay();
+        audio.beatDetected = m_audioAnalyzer.beatDetected();
+        audio.fftTexture = m_audioAnalyzer.fftTexture();
+        audio.time = (float)glfwGetTime();
+        zone.compositor.setAudioState(audio);
+    }
     zone.compositor.composite(layers);
 
     GLuint sourceTex = zone.compositor.resultTexture();
@@ -752,6 +803,11 @@ void Application::renderUI() {
     }
     MosaicAudioState mosaicAudio;
     mosaicAudio.selectedDevice = &m_mosaicAudioDevice;
+    mosaicAudio.bass = m_audioAnalyzer.bass();
+    mosaicAudio.lowMid = m_audioAnalyzer.lowMid();
+    mosaicAudio.highMid = m_audioAnalyzer.highMid();
+    mosaicAudio.treble = m_audioAnalyzer.treble();
+    mosaicAudio.beatDecay = m_audioAnalyzer.beatDecay();
 #ifdef HAS_FFMPEG
     if (m_audioDevices.empty()) {
         m_audioDevices = VideoRecorder::enumerateAudioDevices();
@@ -760,6 +816,8 @@ void Application::renderUI() {
         mosaicAudio.devices.push_back({d.name, d.isCapture});
     }
 #endif
+    m_speechState.dataBus = &m_dataBus;
+    m_speechState.activeLayerId = selectedLayer ? selectedLayer->id : 0;
     m_propertyPanel.render(selectedLayer, m_maskEditMode, &m_speechState, &mosaicAudio, (float)glfwGetTime());
 
     // Push undo state if a property widget was just activated (before the edit takes effect next frame)
@@ -1065,7 +1123,7 @@ void Application::renderUI() {
     // Etherea panel — SSE connection for transcript + data
     ImGui::Begin("Etherea");
     {
-        if (!m_ethereaTranscript.isRunning()) {
+        if (!m_ethereaClient.isRunning()) {
             static char etUrl[256] = "http://localhost:7860";
             static std::vector<EthereaSession> sessions;
             static int selectedSession = -1;
@@ -1085,7 +1143,7 @@ void Application::renderUI() {
             ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.45f));
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
             if (ImGui::Button("Refresh Sessions", ImVec2(-1, 0))) {
-                sessions = EthereaTranscript::fetchSessions(etUrl);
+                sessions = EthereaClient::fetchSessions(etUrl);
                 // Sort: active with transcript first, then by idle time
                 std::sort(sessions.begin(), sessions.end(), [](const EthereaSession& a, const EthereaSession& b) {
                     // Non-paused with transcript wins
@@ -1134,18 +1192,24 @@ void Application::renderUI() {
             if (ImGui::Button("Connect", ImVec2(-1, 0))) {
                 std::string sid = (selectedSession >= 0 && selectedSession < (int)sessions.size())
                     ? sessions[selectedSession].id : "";
-                m_ethereaTranscript.connect(etUrl, sid);
+                m_ethereaClient.connect(etUrl, sid);
             }
             ImGui::PopStyleColor(4);
         } else {
-            // Connected state
-            if (m_ethereaTranscript.isConnected()) {
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
-                ImGui::Text("Connected");
-                ImGui::PopStyleColor();
-            } else {
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.65f, 0.13f, 1.0f));
-                ImGui::Text("Connecting...");
+            // Connected state — show WS + SSE status
+            {
+                bool ws = m_ethereaClient.wsConnected();
+                bool sse = m_ethereaClient.sseConnected();
+                if (ws && sse) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
+                    ImGui::Text("WS + SSE");
+                } else if (ws || sse) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.65f, 0.13f, 1.0f));
+                    ImGui::Text("%s only", ws ? "WS" : "SSE");
+                } else {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.65f, 0.13f, 1.0f));
+                    ImGui::Text("Connecting...");
+                }
                 ImGui::PopStyleColor();
             }
 
@@ -1155,11 +1219,11 @@ void Application::renderUI() {
             ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 0.25f, 0.25f, 0.60f));
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
             if (ImGui::SmallButton("Disconnect")) {
-                m_ethereaTranscript.disconnect();
+                m_ethereaClient.disconnect();
             }
             ImGui::PopStyleColor(4);
 
-            // Show latest transcript snippet
+            // Transcript
             ImGui::Dummy(ImVec2(0, 4));
             ImDrawList* dl = ImGui::GetWindowDrawList();
             ImVec2 p = ImGui::GetCursorScreenPos();
@@ -1171,9 +1235,8 @@ void Application::renderUI() {
             ImGui::Text("Transcript");
             ImGui::PopStyleColor();
 
-            std::string transcript = m_ethereaTranscript.lastTranscript();
+            std::string transcript = m_ethereaClient.fullTranscript();
             if (!transcript.empty()) {
-                // Show last ~200 chars
                 if (transcript.size() > 200) transcript = "..." + transcript.substr(transcript.size() - 197);
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.88f, 0.92f, 0.9f));
                 ImGui::TextWrapped("%s", transcript.c_str());
@@ -1184,11 +1247,30 @@ void Application::renderUI() {
                 ImGui::PopStyleColor();
             }
 
-            // Mic target info
-            if (m_speechState.listening && m_speechState.targetSource) {
+            // Hints
+            auto hints = m_ethereaClient.hints();
+            if (!hints.empty()) {
                 ImGui::Dummy(ImVec2(0, 4));
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
-                ImGui::Text("-> %s", m_speechState.targetParam.c_str());
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+                ImGui::Text("Hints");
+                ImGui::PopStyleColor();
+                for (int i = 0; i < (int)hints.size() && i < 3; i++) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.82f, 1.0f, 0.85f));
+                    ImGui::TextWrapped("%d. %s", i + 1, hints[i].c_str());
+                    ImGui::PopStyleColor();
+                }
+            }
+
+            // Prompt
+            std::string prompt = m_ethereaClient.prompt();
+            if (!prompt.empty()) {
+                ImGui::Dummy(ImVec2(0, 4));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+                ImGui::Text("Prompt");
+                ImGui::PopStyleColor();
+                if (prompt.size() > 120) prompt = prompt.substr(0, 117) + "...";
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.78f, 0.55f, 0.9f));
+                ImGui::TextWrapped("%s", prompt.c_str());
                 ImGui::PopStyleColor();
             }
         }
@@ -1287,6 +1369,23 @@ void Application::renderUI() {
 
                     ImGui::PopID();
                 }
+
+#ifdef HAS_WHEP
+                ImGui::Dummy(ImVec2(0, 4));
+                ImGui::Separator();
+                ImGui::Dummy(ImVec2(0, 2));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.88f, 0.92f, 1.0f));
+                ImGui::Text("Scope (WHEP)");
+                ImGui::PopStyleColor();
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.0f, 1.0f, 0.15f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.6f, 0.0f, 1.0f, 0.30f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.0f, 1.0f, 0.50f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.8f, 0.5f, 1.0f, 1.0f));
+                if (ImGui::Button("Connect Scope", ImVec2(-1, 0))) {
+                    addWHEPSource(WHEPSource::discoverUrl());
+                }
+                ImGui::PopStyleColor(4);
+#endif
             }
         }
         ImGui::End();
@@ -1439,62 +1538,7 @@ void Application::updateAudioMeter() {
     smooth(m_audioLevelSmoothR, m_audioLevelR);
 }
 
-void Application::cleanupMosaicMeter() {
-    if (m_mosaicMeterInfo) {
-        ((IAudioMeterInformation*)m_mosaicMeterInfo)->Release();
-        m_mosaicMeterInfo = nullptr;
-    }
-    if (m_mosaicMeterDevice) {
-        ((IMMDevice*)m_mosaicMeterDevice)->Release();
-        m_mosaicMeterDevice = nullptr;
-    }
-    m_mosaicMeterIdx = -2;
-}
-
-void Application::updateMosaicMeter() {
-    if (m_mosaicMeterIdx != m_mosaicAudioDevice) {
-        cleanupMosaicMeter();
-        m_mosaicMeterIdx = m_mosaicAudioDevice;
-
-        IMMDeviceEnumerator* enumerator = nullptr;
-        HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
-                                       CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
-                                       (void**)&enumerator);
-        if (SUCCEEDED(hr) && enumerator) {
-            IMMDevice* device = nullptr;
-            if (m_mosaicAudioDevice == -1) {
-                hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
-            } else if (m_mosaicAudioDevice >= 0 && m_mosaicAudioDevice < (int)m_audioDevices.size()) {
-                auto& dev = m_audioDevices[m_mosaicAudioDevice];
-                std::wstring wid(dev.id.begin(), dev.id.end());
-                hr = enumerator->GetDevice(wid.c_str(), &device);
-            }
-            if (SUCCEEDED(hr) && device) {
-                IAudioMeterInformation* meter = nullptr;
-                hr = device->Activate(__uuidof(IAudioMeterInformation), CLSCTX_ALL, nullptr, (void**)&meter);
-                if (SUCCEEDED(hr) && meter) {
-                    m_mosaicMeterInfo = meter;
-                    m_mosaicMeterDevice = device;
-                } else {
-                    device->Release();
-                }
-            }
-            enumerator->Release();
-        }
-    }
-
-    // Poll peak level
-    float peak = 0.0f;
-    if (m_mosaicMeterInfo) {
-        ((IAudioMeterInformation*)m_mosaicMeterInfo)->GetPeakValue(&peak);
-    }
-
-    // Smooth: fast attack, slow release
-    float attack = 0.3f, release = 0.08f;
-    m_audioRMS = peak > m_audioRMS
-        ? m_audioRMS + (peak - m_audioRMS) * attack
-        : m_audioRMS + (peak - m_audioRMS) * release;
-}
+// Old cleanupMosaicMeter/updateMosaicMeter removed — replaced by AudioAnalyzer
 
 void Application::renderTransportBar() {
     ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -1971,6 +2015,13 @@ void Application::renderMenuBar() {
                 ImGui::EndMenu();
             }
 #endif
+#ifdef HAS_WHEP
+            if (ImGui::MenuItem("Add Scope Stream (WHEP)")) {
+                std::string url = WHEPSource::discoverUrl(
+                    m_ethereaClient.isConnected() ? "http://localhost:7860" : "http://localhost:7860");
+                addWHEPSource(url);
+            }
+#endif
             ImGui::Separator();
             if (ImGui::MenuItem("Save Project...")) {
                 std::string path = saveFileDialog("Easel Project\0*.easel\0", "easel");
@@ -2149,6 +2200,71 @@ void Application::addNDISource(const std::string& senderName) {
     // Extract just the sender name part (after "MACHINE/")
     size_t slash = senderName.find('/');
     layer->name = "NDI: " + ((slash != std::string::npos) ? senderName.substr(slash + 1) : senderName);
+
+    m_layerStack.addLayer(layer);
+    m_selectedLayer = m_layerStack.count() - 1;
+}
+#endif
+
+#ifdef HAS_WHEP
+void Application::addWHEPSource(const std::string& whepUrl) {
+    m_undoStack.pushState(m_layerStack, m_selectedLayer);
+    auto source = std::make_shared<WHEPSource>();
+    if (!source->connect(whepUrl)) {
+        std::cerr << "[Scope] WHEP failed, falling back to RTMP\n";
+        addScopeRTMP();
+        return;
+    }
+
+    auto layer = std::make_shared<Layer>();
+    layer->id = m_nextLayerId++;
+    layer->source = source;
+    layer->name = "Scope Stream";
+
+    m_layerStack.addLayer(layer);
+    m_selectedLayer = m_layerStack.count() - 1;
+}
+
+void Application::addScopeRTMP() {
+    // Query Etherea status API for RTMP URL
+    std::string statusJson = winHttpRequest("GET", "http://localhost:7860/api/scope/status", "", "");
+    if (statusJson.empty()) {
+        std::cerr << "[Scope] Failed to query Etherea status API\n";
+        return;
+    }
+
+    // Extract rtmp_url from JSON
+    std::string rtmpUrl;
+    size_t pos = statusJson.find("\"rtmp_url\"");
+    if (pos != std::string::npos) {
+        size_t valStart = statusJson.find('"', pos + 10);
+        if (valStart != std::string::npos) {
+            size_t valEnd = statusJson.find('"', valStart + 1);
+            if (valEnd != std::string::npos) {
+                rtmpUrl = statusJson.substr(valStart + 1, valEnd - valStart - 1);
+            }
+        }
+    }
+
+    if (rtmpUrl.empty()) {
+        std::cerr << "[Scope] No RTMP URL found in status response\n";
+        return;
+    }
+
+    std::cout << "[Scope] Connecting via RTMP: " << rtmpUrl << std::endl;
+
+    m_undoStack.pushState(m_layerStack, m_selectedLayer);
+    auto source = std::make_shared<VideoSource>();
+    if (!source->load(rtmpUrl)) {
+        std::cerr << "[Scope] Failed to open RTMP stream: " << rtmpUrl << std::endl;
+        return;
+    }
+    source->play();
+
+    auto layer = std::make_shared<Layer>();
+    layer->id = m_nextLayerId++;
+    layer->source = source;
+    layer->name = "Scope Stream";
 
     m_layerStack.addLayer(layer);
     m_selectedLayer = m_layerStack.count() - 1;
@@ -2518,6 +2634,13 @@ void Application::loadProject(const std::string& path) {
 #ifdef HAS_NDI
             } else if (sourceType == "NDI" && !sourcePath.empty()) {
                 auto src = std::make_shared<NDISource>();
+                if (src->connect(sourcePath)) {
+                    layer->source = src;
+                }
+#endif
+#ifdef HAS_WHEP
+            } else if (sourceType == "WHEP" && !sourcePath.empty()) {
+                auto src = std::make_shared<WHEPSource>();
                 if (src->connect(sourcePath)) {
                     layer->source = src;
                 }

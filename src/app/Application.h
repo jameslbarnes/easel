@@ -32,11 +32,17 @@
 #include "speech/WhisperSpeech.h"
 #endif
 
-#include "speech/EthereaTranscript.h"
+#include "speech/EthereaClient.h"
+#include "app/AudioAnalyzer.h"
+#include "app/DataBus.h"
 
 #ifdef HAS_NDI
 #include "sources/NDISource.h"
 #include "app/NDIOutput.h"
+#endif
+
+#ifdef HAS_WHEP
+#include "sources/WHEPSource.h"
 #endif
 
 #ifdef HAS_FFMPEG
@@ -84,7 +90,8 @@ private:
     Texture m_testPattern;
 
     int m_selectedLayer = -1;
-    float m_audioRMS = 0; // smoothed audio level for mosaic reactivity
+    AudioAnalyzer m_audioAnalyzer;
+    float m_audioRMS = 0; // backward compat: smoothed audio level
     int m_mosaicAudioDevice = -1; // -1 = system loopback, >=0 = index into device list
     bool m_projectorAutoConnect = false;
     int m_lastMonitorCount = 0;
@@ -115,10 +122,9 @@ private:
 #endif
 
     SpeechState m_speechState;
-    EthereaTranscript m_ethereaTranscript;
+    EthereaClient m_ethereaClient;
+    DataBus m_dataBus;
     std::string m_prevTranscript;       // Last full_transcript for diffing
-    std::string m_textBuffer;           // Pending characters to drip to shader
-    std::string m_shaderDisplay;        // Current shader display text
 #ifdef HAS_WHISPER
     WhisperSpeech m_whisperSpeech;
 #endif
@@ -128,6 +134,11 @@ private:
     std::vector<NDISenderInfo> m_ndiSources;
     bool m_ndiOutputEnabled = true;
     void addNDISource(const std::string& senderName);
+#endif
+
+#ifdef HAS_WHEP
+    void addWHEPSource(const std::string& whepUrl);
+    void addScopeRTMP();
 #endif
 
 #ifdef HAS_FFMPEG
@@ -149,12 +160,7 @@ private:
     void updateAudioMeter();
     void cleanupAudioMeter();
 
-    // Separate mosaic audio meter (can use different device than recording)
-    void* m_mosaicMeterInfo = nullptr;
-    void* m_mosaicMeterDevice = nullptr;
-    int m_mosaicMeterIdx = -2;
-    void updateMosaicMeter();
-    void cleanupMosaicMeter();
+    // Old mosaic meter removed — replaced by AudioAnalyzer
 #endif
 
     // JSON save/load

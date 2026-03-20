@@ -107,17 +107,5 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(Catch2)
 
-# whisper.cpp (local speech-to-text)
-set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(WHISPER_BUILD_SERVER OFF CACHE BOOL "" FORCE)
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-set(GGML_CUDA ON CACHE BOOL "" FORCE)
-set(CMAKE_CUDA_ARCHITECTURES "89" CACHE STRING "" FORCE)
-FetchContent_Declare(
-    whisper
-    GIT_REPOSITORY https://github.com/ggerganov/whisper.cpp.git
-    GIT_TAG        v1.7.4
-    GIT_SHALLOW    TRUE
-)
-FetchContent_MakeAvailable(whisper)
+# whisper.cpp disabled — CUDA compilation too slow for iterative builds
+

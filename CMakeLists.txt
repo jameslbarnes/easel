@@ -34,9 +34,9 @@ else()
     message(STATUS "OpenCV not found at ${OPENCV_DIR} - scanning disabled")
 endif()
 
-# Whisper.cpp (fetched via FetchContent - always available)
-set(HAS_WHISPER TRUE)
-message(STATUS "whisper.cpp enabled for speech-to-text")
+# Whisper.cpp disabled (CUDA compilation too slow)
+set(HAS_WHISPER FALSE)
+message(STATUS "whisper.cpp disabled")
 
 # NDI (headers only - runtime loaded dynamically)
 set(NDI_DIR "${CMAKE_SOURCE_DIR}/external/ndi")
@@ -71,7 +71,15 @@ if(NOT HAS_NDI)
     list(FILTER SOURCES EXCLUDE REGEX ".*NDI.*")
 endif()
 
-add_executable(${PROJECT_NAME} WIN32 ${SOURCES})
+# WHEP disabled — WebRTC NAT traversal to remote pods unreliable without server-side TURN
+set(HAS_WHEP FALSE)
+list(FILTER SOURCES EXCLUDE REGEX ".*WHEP.*")
+message(STATUS "WHEP source disabled")
+
+# kiss_fft (public domain FFT library for AudioAnalyzer)
+set(KISS_FFT_SRC "${CMAKE_SOURCE_DIR}/external/kiss_fft/kiss_fft.c")
+
+add_executable(${PROJECT_NAME} WIN32 ${SOURCES} ${KISS_FFT_SRC})
 
 # Shader test harness (console app)
 add_executable(test_shaders
@@ -101,6 +109,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${stb_SOURCE_DIR}
     ${tinyobjloader_SOURCE_DIR}
     ${tinygltf_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/external/kiss_fft
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
@@ -169,6 +178,7 @@ if(HAS_NDI)
     target_compile_definitions(${PROJECT_NAME} PRIVATE HAS_NDI=1)
 endif()
 
+
 # Scanning test suite (requires OpenCV)
 if(HAS_OPENCV)
     add_executable(test_scanning
@@ -206,13 +216,26 @@ if(HAS_OPENCV)
     catch_discover_tests(test_scanning)
 endif()
 
-# Whisper benchmark
-if(HAS_WHISPER)
-    add_executable(bench_whisper tests/bench_whisper.cpp)
-    target_compile_definitions(bench_whisper PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_link_libraries(bench_whisper PRIVATE whisper)
-    target_include_directories(bench_whisper PRIVATE "${whisper_SOURCE_DIR}/include")
-endif()
+# AudioAnalyzer test suite
+add_executable(test_audio_analyzer
+    tests/test_audio_analyzer.cpp
+    src/app/AudioAnalyzer.cpp
+    src/render/Texture.cpp
+    src/render/Framebuffer.cpp
+    src/render/Mesh.cpp
+    src/render/ShaderProgram.cpp
+    external/kiss_fft/kiss_fft.c
+)
+target_compile_definitions(test_audio_analyzer PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_include_directories(test_audio_analyzer PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/external/kiss_fft
+    ${stb_SOURCE_DIR}
+)
+target_link_libraries(test_audio_analyzer PRIVATE
+    Catch2::Catch2WithMain
+    glfw glad glm::glm nlohmann_json::nlohmann_json opengl32
+)
 
 # Copy shaders to build directory
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
