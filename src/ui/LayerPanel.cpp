@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdio>
+#include <set>
 
 // Theme
 static const ImU32 kAccent       = IM_COL32(0, 200, 255, 255);
@@ -145,10 +146,32 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
                         int activeZone) {
     ImGui::Begin("Layers");
 
+    wantsAddImage = wantsAddVideo = wantsAddShader = false;
+
     ImDrawList* draw = ImGui::GetWindowDrawList();
     ImDrawList* fg = ImGui::GetForegroundDrawList();
     float panelWidth = ImGui::GetContentRegionAvail().x;
     if (panelWidth < 10.0f) { ImGui::End(); return; }
+
+    // "+" add layer button (full width)
+    {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.08f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.25f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.40f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 0.85f));
+        if (ImGui::Button("+ Add Layer", ImVec2(-1, 0))) {
+            ImGui::OpenPopup("##AddLayer");
+        }
+        ImGui::PopStyleColor(4);
+
+        if (ImGui::BeginPopup("##AddLayer")) {
+            if (ImGui::MenuItem("Image...")) wantsAddImage = true;
+            if (ImGui::MenuItem("Video...")) wantsAddVideo = true;
+            if (ImGui::MenuItem("Shader...")) wantsAddShader = true;
+            ImGui::EndPopup();
+        }
+        ImGui::Dummy(ImVec2(0, 2));
+    }
 
     float thumbSize = 30.0f;
     float rowHeight = 42.0f;
@@ -161,9 +184,9 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
         ImGui::SetCursorPosX((panelWidth - tw) * 0.5f);
         ImGui::TextDisabled("No layers");
         ImGui::Dummy(ImVec2(0, 6));
-        float hw = ImGui::CalcTextSize("Use File menu to add layers").x;
+        float hw = ImGui::CalcTextSize("Drop files or click +").x;
         ImGui::SetCursorPosX((panelWidth - hw) * 0.5f);
-        ImGui::TextDisabled("Use File menu to add layers");
+        ImGui::TextDisabled("Drop files or click +");
         ImGui::End();
         return;
     }
@@ -414,6 +437,61 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
         }
     }
 
+    // --- GROUP HEADERS ---
+    // Draw group headers above their first member (visual only, lightweight)
+    {
+        std::set<uint32_t> drawnGroups;
+        for (int displayIdx = 0; displayIdx < layerCount; displayIdx++) {
+            int stackIdx = layerCount - 1 - displayIdx;
+            auto& layer = stack[stackIdx];
+            if (layer->groupId == 0) continue;
+            if (drawnGroups.count(layer->groupId)) continue;
+            drawnGroups.insert(layer->groupId);
+
+            auto* grp = stack.group(layer->groupId);
+            if (!grp) continue;
+
+            float rowY = listStart.y + displayIdx * rowHeight;
+            // Draw a subtle group bar above the first grouped layer
+            float barY = rowY - 2;
+            ImU32 grpCol = IM_COL32(0, 200, 255, 100);
+            draw->AddRectFilled(ImVec2(listStart.x, barY - 14),
+                                ImVec2(listStart.x + panelWidth, barY),
+                                IM_COL32(0, 180, 235, 20), 2.0f);
+            draw->AddLine(ImVec2(listStart.x + 4, barY), ImVec2(listStart.x + panelWidth - 4, barY), grpCol, 1.0f);
+
+            // Group name
+            ImVec2 textPos(listStart.x + 8, barY - 13);
+            draw->AddText(textPos, grpCol, grp->name.c_str());
+
+            // Count members
+            int memberCount = 0;
+            for (int i = 0; i < layerCount; i++) {
+                if (stack[i]->groupId == layer->groupId) memberCount++;
+            }
+            char countBuf[16];
+            snprintf(countBuf, sizeof(countBuf), "(%d)", memberCount);
+            ImVec2 countSize = ImGui::CalcTextSize(countBuf);
+            ImVec2 nameSize = ImGui::CalcTextSize(grp->name.c_str());
+            draw->AddText(ImVec2(textPos.x + nameSize.x + 6, barY - 13), kTextMuted, countBuf);
+        }
+    }
+
+    // Draw group bracket on left edge for grouped layers
+    {
+        for (int displayIdx = 0; displayIdx < layerCount; displayIdx++) {
+            int stackIdx = layerCount - 1 - displayIdx;
+            auto& layer = stack[stackIdx];
+            if (layer->groupId == 0) continue;
+
+            float rowY = listStart.y + displayIdx * rowHeight;
+            // Left accent line for group membership
+            draw->AddRectFilled(ImVec2(listStart.x, rowY),
+                                ImVec2(listStart.x + 2, rowY + rowHeight),
+                                IM_COL32(0, 200, 255, 60));
+        }
+    }
+
     // --- CONTEXT MENU ---
     if (ImGui::BeginPopup("LayerMenu")) {
         int ci = selectedLayer;
@@ -465,6 +543,38 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
             ImGui::Separator();
             if (ImGui::MenuItem(stack[ci]->visible ? "Hide" : "Show")) {
                 stack[ci]->visible = !stack[ci]->visible;
+            }
+            ImGui::Separator();
+            // Group operations
+            if (stack[ci]->groupId == 0) {
+                if (ImGui::MenuItem("Create Group", "Ctrl+G")) {
+                    uint32_t gid = stack.createGroup("Group");
+                    stack[ci]->groupId = gid;
+                }
+            } else {
+                if (ImGui::MenuItem("Ungroup")) {
+                    uint32_t gid = stack[ci]->groupId;
+                    stack.removeGroup(gid);
+                }
+                if (ImGui::BeginMenu("Add to Group")) {
+                    for (auto& [gid, grp] : stack.groups()) {
+                        if (ImGui::MenuItem(grp.name.c_str())) {
+                            stack[ci]->groupId = gid;
+                        }
+                    }
+                    ImGui::EndMenu();
+                }
+            }
+            // Show available groups to join
+            if (stack[ci]->groupId == 0 && !stack.groups().empty()) {
+                if (ImGui::BeginMenu("Add to Group")) {
+                    for (auto& [gid, grp] : stack.groups()) {
+                        if (ImGui::MenuItem(grp.name.c_str())) {
+                            stack[ci]->groupId = gid;
+                        }
+                    }
+                    ImGui::EndMenu();
+                }
             }
             ImGui::Separator();
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));

@@ -25,6 +25,7 @@ public:
     uint32_t id = 0; // stable ID for zone visibility sets
     std::string name = "Layer";
     bool visible = true;
+    uint32_t groupId = 0; // 0 = ungrouped
     float opacity = 1.0f;
     BlendMode blendMode = BlendMode::Normal;
 

@@ -277,22 +277,22 @@ void UIManager::setupDockspace(float bottomBarHeight) {
             ImGui::DockBuilderAddNode(dockspaceId, ImGuiDockNodeFlags_DockSpace);
             ImGui::DockBuilderSetNodeSize(dockspaceId, ImGui::GetMainViewport()->WorkSize);
 
-            // Split: left 70% = preview, right 30% = panels
+            // Split: left 65% = preview, right 35% = panels
             ImGuiID leftId, rightId;
-            ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Left, 0.7f, &leftId, &rightId);
+            ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Left, 0.65f, &leftId, &rightId);
 
-            // Split right side: top 50% = layers+properties, bottom 50% = warp+projector
+            // Split right side: top half = Layers, bottom half = Properties
             ImGuiID rightTopId, rightBottomId;
             ImGui::DockBuilderSplitNode(rightId, ImGuiDir_Up, 0.5f, &rightTopId, &rightBottomId);
 
             // Dock windows into regions
             ImGui::DockBuilderDockWindow("Projector Preview", leftId);
             ImGui::DockBuilderDockWindow("Layers", rightTopId);
-            ImGui::DockBuilderDockWindow("Properties", rightTopId);
-            ImGui::DockBuilderDockWindow("Warp", rightBottomId);
-            ImGui::DockBuilderDockWindow("Projector", rightBottomId);
-            ImGui::DockBuilderDockWindow("Capture", rightBottomId);
-            ImGui::DockBuilderDockWindow("ShaderClaw", rightBottomId);
+            ImGui::DockBuilderDockWindow("Properties", rightBottomId);
+            ImGui::DockBuilderDockWindow("Warp", rightTopId);
+            ImGui::DockBuilderDockWindow("Projector", rightTopId);
+            ImGui::DockBuilderDockWindow("Capture", rightTopId);
+            ImGui::DockBuilderDockWindow("ShaderClaw", rightTopId);
 
             ImGui::DockBuilderFinish(dockspaceId);
         }

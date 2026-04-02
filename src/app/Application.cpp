@@ -100,6 +100,9 @@ bool Application::init() {
         }
     }
 
+    glfwSetWindowUserPointer(m_window, this);
+    glfwSetDropCallback(m_window, Application::dropCallback);
+
     glfwMakeContextCurrent(m_window);
     glfwSwapInterval(0); // uncapped — NDI needs low-latency updates
 
@@ -210,14 +213,8 @@ bool Application::init() {
         }
     }
 
-    // Auto-load default project if it exists
-    {
-        std::string defaultPath = "default.easel";
-        if (std::filesystem::exists(defaultPath)) {
-            loadProject(defaultPath);
-            std::cout << "[Easel] Auto-loaded default project" << std::endl;
-        }
-    }
+    // Start with a blank project (no auto-load)
+    std::cout << "[Easel] Starting with blank project" << std::endl;
 
     return true;
 }
@@ -865,6 +862,8 @@ void Application::duplicateZone(int index) {
 }
 
 void Application::renderUI() {
+    handleDroppedFiles();
+
 #ifdef HAS_FFMPEG
     float transportBarH = 110.0f;
 #else
@@ -924,6 +923,20 @@ void Application::renderUI() {
     auto& zone = activeZone();
     m_layerPanel.render(m_layerStack, m_selectedLayer, &m_zones, m_activeZone);
 
+    // Handle "+" button signals from layer panel
+    if (m_layerPanel.wantsAddImage) {
+        std::string path = openFileDialog("Images\0*.png;*.jpg;*.jpeg;*.bmp;*.tga\0All Files\0*.*\0");
+        if (!path.empty()) loadImage(path);
+    }
+    if (m_layerPanel.wantsAddVideo) {
+        std::string path = openFileDialog("Videos\0*.mp4;*.avi;*.mkv;*.mov;*.webm\0All Files\0*.*\0");
+        if (!path.empty()) loadVideo(path);
+    }
+    if (m_layerPanel.wantsAddShader) {
+        std::string path = openFileDialog("ISF Shaders\0*.fs;*.frag;*.glsl\0All Files\0*.*\0");
+        if (!path.empty()) loadShader(path);
+    }
+
     std::shared_ptr<Layer> selectedLayer;
     if (m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count()) {
         selectedLayer = m_layerStack[m_selectedLayer];
@@ -970,8 +983,20 @@ void Application::renderUI() {
         m_viewportPanel.renderMaskOverlay(selectedLayer->maskPath);
     } else {
         m_viewportPanel.setEditMode(ViewportPanel::EditMode::Normal);
-        m_viewportPanel.renderLayerOverlay(m_layerStack, m_selectedLayer);
+        m_viewportPanel.renderLayerOverlay(m_layerStack, m_selectedLayer, zone.width, zone.height);
         m_maskEditMode = false;
+
+        // Double-click corner/edge: enter mask edit mode
+        if (m_viewportPanel.wantsMaskEdit() && selectedLayer) {
+            m_viewportPanel.clearMaskEditSignal();
+            selectedLayer->maskEnabled = true;
+            m_maskEditMode = true;
+            // If edge-click had a UV, add initial point
+            glm::vec2 uv = m_viewportPanel.maskEditClickUV();
+            if (uv.x > 0.001f || uv.y > 0.001f) {
+                selectedLayer->maskPath.addPoint(uv);
+            }
+        }
     }
 
     auto prevWarpMode = zone.warpMode;
@@ -2136,6 +2161,21 @@ void Application::renderMenuBar() {
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("File")) {
+            if (ImGui::MenuItem("New Project")) {
+                m_undoStack.pushState(m_layerStack, m_selectedLayer);
+                while (m_layerStack.count() > 0) {
+                    m_layerStack.removeLayer(m_layerStack.count() - 1);
+                }
+                m_selectedLayer = -1;
+                // Reset zones to single default
+                m_zones.clear();
+                auto zone = std::make_unique<OutputZone>();
+                zone->init();
+                m_zones.push_back(std::move(zone));
+                m_activeZone = 0;
+                m_viewportPanel.resetZoom();
+            }
+            ImGui::Separator();
             if (ImGui::MenuItem("Add Image Layer...")) {
                 std::string path = openFileDialog(
                     "Images\0*.png;*.jpg;*.jpeg;*.bmp;*.tga\0All Files\0*.*\0");
@@ -2213,6 +2253,19 @@ void Application::renderMenuBar() {
                 m_undoStack.pushState(m_layerStack, m_selectedLayer);
                 m_layerStack.moveLayer(m_selectedLayer, m_selectedLayer - 1);
                 m_selectedLayer--;
+            }
+            ImGui::Separator();
+            if (m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count()) {
+                if (m_layerStack[m_selectedLayer]->groupId == 0) {
+                    if (ImGui::MenuItem("Create Group", "Ctrl+G")) {
+                        uint32_t gid = m_layerStack.createGroup("Group");
+                        m_layerStack[m_selectedLayer]->groupId = gid;
+                    }
+                } else {
+                    if (ImGui::MenuItem("Ungroup")) {
+                        m_layerStack.removeGroup(m_layerStack[m_selectedLayer]->groupId);
+                    }
+                }
             }
             ImGui::EndMenu();
         }
@@ -2426,6 +2479,39 @@ void Application::addScopeRTMP() {
 }
 #endif
 
+// --- File Drop ---
+
+void Application::dropCallback(GLFWwindow* window, int count, const char** paths) {
+    auto* app = static_cast<Application*>(glfwGetWindowUserPointer(window));
+    if (!app) return;
+    for (int i = 0; i < count; i++) {
+        app->m_pendingDrops.push_back(paths[i]);
+    }
+}
+
+void Application::handleDroppedFiles() {
+    if (m_pendingDrops.empty()) return;
+
+    for (const auto& path : m_pendingDrops) {
+        // Determine file type by extension
+        std::string lower = path;
+        for (auto& c : lower) c = (char)tolower((unsigned char)c);
+
+        size_t dot = lower.rfind('.');
+        if (dot == std::string::npos) continue;
+        std::string ext = lower.substr(dot);
+
+        if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tga") {
+            loadImage(path);
+        } else if (ext == ".mp4" || ext == ".avi" || ext == ".mkv" || ext == ".mov" || ext == ".webm") {
+            loadVideo(path);
+        } else if (ext == ".fs" || ext == ".frag" || ext == ".glsl") {
+            loadShader(path);
+        }
+    }
+    m_pendingDrops.clear();
+}
+
 // --- Save/Load ---
 
 void Application::saveProject(const std::string& path) {
@@ -2521,6 +2607,7 @@ void Application::saveProject(const std::string& path) {
         layerJson["audioReactive"] = layer->audioReactive;
         layerJson["audioStrength"] = layer->audioStrength;
         layerJson["feather"] = layer->feather;
+        if (layer->groupId != 0) layerJson["groupId"] = layer->groupId;
 #ifdef HAS_NDI
         layerJson["ndiEnabled"] = layer->ndiEnabled;
 #endif
@@ -2592,6 +2679,20 @@ void Application::saveProject(const std::string& path) {
         layers.push_back(layerJson);
     }
     j["layers"] = layers;
+
+    // Save layer groups
+    if (!m_layerStack.groups().empty()) {
+        json groupsJson = json::array();
+        for (const auto& [gid, grp] : m_layerStack.groups()) {
+            json gj;
+            gj["id"] = gid;
+            gj["name"] = grp.name;
+            gj["collapsed"] = grp.collapsed;
+            gj["visible"] = grp.visible;
+            groupsJson.push_back(gj);
+        }
+        j["groups"] = groupsJson;
+    }
 
     // Write to file
     std::ofstream file(path);
@@ -2763,6 +2864,7 @@ void Application::loadProject(const std::string& path) {
             layer->audioReactive = layerJson.value("audioReactive", false);
             layer->audioStrength = layerJson.value("audioStrength", 0.15f);
             layer->feather = layerJson.value("feather", 0.0f);
+            layer->groupId = layerJson.value("groupId", (uint32_t)0);
 #ifdef HAS_NDI
             layer->ndiEnabled = layerJson.value("ndiEnabled", false);
 #endif
@@ -2892,6 +2994,18 @@ void Application::loadProject(const std::string& path) {
                 }
             }
             idx++;
+        }
+    }
+
+    // Load layer groups
+    if (j.contains("groups")) {
+        for (const auto& gj : j["groups"]) {
+            uint32_t gid = gj["id"].get<uint32_t>();
+            LayerGroup grp;
+            grp.name = gj.value("name", "Group");
+            grp.collapsed = gj.value("collapsed", false);
+            grp.visible = gj.value("visible", true);
+            m_layerStack.groups()[gid] = grp;
         }
     }
 

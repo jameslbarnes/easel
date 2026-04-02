@@ -27,7 +27,7 @@ public:
                 ObjMeshWarp* objMeshWarp = nullptr);
 
     // Layer transform overlay — drag to move, handles to resize
-    void renderLayerOverlay(LayerStack& stack, int& selectedLayer);
+    void renderLayerOverlay(LayerStack& stack, int& selectedLayer, int canvasW = 1920, int canvasH = 1080);
 
     // Mask editing overlay
     void renderMaskOverlay(MaskPath& mask);
@@ -35,10 +35,19 @@ public:
     void setEditMode(EditMode m) { m_editMode = m; }
     EditMode editMode() const { return m_editMode; }
 
+    // Signals from overlay to application
+    bool wantsMaskEdit() const { return m_wantsMaskEdit; }
+    void clearMaskEditSignal() { m_wantsMaskEdit = false; }
+    glm::vec2 maskEditClickUV() const { return m_maskEditClickUV; }  // where the edge click happened
+
     bool isHovered() const { return m_hovered; }
     glm::vec2 size() const { return m_size; }
     glm::vec2 imageOrigin() const { return m_imageOrigin; }
     glm::vec2 imageSize() const { return m_imageSize; }
+
+    // Canvas zoom
+    float zoom() const { return m_zoom; }
+    void resetZoom() { m_zoom = 1.0f; m_pan = {0, 0}; }
 
 private:
     glm::vec2 m_size = {800, 600};
@@ -61,6 +70,11 @@ private:
     glm::vec2 m_dragStartMouse = {0, 0};
     glm::vec2 m_dragStartPos = {0, 0};
     glm::vec2 m_dragStartScale = {1, 1};
+    float m_dragStartRatio = 1.0f;  // aspect ratio at drag start (for shift-constrain)
+
+    // Signal: double-click corner or edge-click to enter mask edit
+    bool m_wantsMaskEdit = false;
+    glm::vec2 m_maskEditClickUV = {0, 0};
 
     // Orbit camera drag state (ObjMesh mode)
     bool m_orbitDragging = false;
@@ -72,6 +86,13 @@ private:
     bool m_renaming = false;
     int m_renameIndex = -1;
     char m_renameBuf[128] = {};
+
+    // Canvas zoom & pan
+    float m_zoom = 1.0f;
+    glm::vec2 m_pan = {0, 0};
+    bool m_panDragging = false;
+    glm::vec2 m_panDragStart = {0, 0};
+    glm::vec2 m_panStart = {0, 0};
 
     // The image area within the panel
     glm::vec2 m_imageOrigin = {0, 0};

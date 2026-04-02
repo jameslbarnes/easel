@@ -171,6 +171,17 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
         layer->cropTop = layer->cropBottom = layer->cropLeft = layer->cropRight = 0.0f;
     }
 
+    thinSep();
+
+    // --- Effects ---
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.0f, 0.78f, 1.0f, 0.08f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.0f, 0.78f, 1.0f, 0.22f));
+    bool effectsOpen = ImGui::CollapsingHeader("Effects", ImGuiTreeNodeFlags_DefaultOpen);
+    ImGui::PopStyleColor(3);
+
+    if (effectsOpen) {
+
     // --- Mosaic mode ---
     {
         float halfW = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
@@ -456,6 +467,8 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
         maskEditMode = false;
     }
 
+    } // end Effects section
+
     // --- Video controls ---
     if (layer->source && layer->source->isVideo()) {
         thinSep();
@@ -473,6 +486,25 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
         auto* vidSrc = static_cast<VideoSource*>(layer->source.get());
         if (vidSrc->hasAudio()) {
             float vol = vidSrc->volume();
+            bool muted = (vol == 0.0f);
+
+            // Mute toggle button
+            ImGui::PushStyleColor(ImGuiCol_Button, muted ? ImVec4(0.6f, 0.1f, 0.1f, 0.25f) : ImVec4(0.0f, 0.78f, 1.0f, 0.10f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, muted ? ImVec4(0.8f, 0.15f, 0.15f, 0.40f) : ImVec4(0.0f, 0.78f, 1.0f, 0.22f));
+            ImGui::PushStyleColor(ImGuiCol_Text, muted ? ImVec4(1.0f, 0.4f, 0.4f, 1.0f) : ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+            if (ImGui::Button(muted ? "Unmute" : "Mute", ImVec2(54, 0))) {
+                static float s_preMuteVol = 1.0f;
+                if (muted) {
+                    vidSrc->setVolume(s_preMuteVol > 0.01f ? s_preMuteVol : 1.0f);
+                } else {
+                    s_preMuteVol = vol;
+                    vidSrc->setVolume(0.0f);
+                }
+                vol = vidSrc->volume();
+            }
+            ImGui::PopStyleColor(3);
+
+            ImGui::SameLine();
             ImGui::SetNextItemWidth(-1);
             if (ImGui::SliderFloat("##Volume", &vol, 0.0f, 1.0f, "Vol %.0f%%")) {
                 vidSrc->setVolume(vol);
