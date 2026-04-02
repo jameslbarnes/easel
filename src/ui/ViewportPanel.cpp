@@ -335,15 +335,20 @@ void ViewportPanel::render(GLuint texture, CornerPinWarp& cornerPin, MeshWarp& m
     m_size = {avail.x, avail.y};
 
     if (texture && avail.x > 1 && avail.y > 1) {
+        // Base image size (fit to panel)
         float panelAspect = avail.x / avail.y;
-        float imgW, imgH;
+        float baseW, baseH;
         if (projectorAspect > panelAspect) {
-            imgW = avail.x; imgH = avail.x / projectorAspect;
+            baseW = avail.x; baseH = avail.x / projectorAspect;
         } else {
-            imgH = avail.y; imgW = avail.y * projectorAspect;
+            baseH = avail.y; baseW = avail.y * projectorAspect;
         }
-        float offsetX = (avail.x - imgW) * 0.5f;
-        float offsetY = (avail.y - imgH) * 0.5f;
+
+        // Apply zoom
+        float imgW = baseW * m_zoom;
+        float imgH = baseH * m_zoom;
+        float offsetX = (avail.x - imgW) * 0.5f + m_pan.x;
+        float offsetY = (avail.y - imgH) * 0.5f + m_pan.y;
 
         ImVec2 cursor = ImGui::GetCursorPos();
         ImGui::SetCursorPos(ImVec2(cursor.x + offsetX, cursor.y + offsetY));
@@ -363,6 +368,43 @@ void ViewportPanel::render(GLuint texture, CornerPinWarp& cornerPin, MeshWarp& m
     }
 
     m_hovered = ImGui::IsWindowHovered();
+
+    // --- Canvas zoom (scroll wheel) and pan (middle-mouse drag) ---
+    if (m_hovered && warpMode != WarpMode::ObjMesh) {
+        float scroll = ImGui::GetIO().MouseWheel;
+        if (scroll != 0.0f) {
+            float oldZoom = m_zoom;
+            m_zoom = std::max(0.25f, std::min(8.0f, m_zoom + scroll * 0.15f * m_zoom));
+            // Scale pan to keep view centered at same point
+            if (oldZoom > 0.0f) {
+                float ratio = m_zoom / oldZoom;
+                m_pan.x *= ratio;
+                m_pan.y *= ratio;
+            }
+        }
+    }
+
+    // Middle-mouse pan
+    if (m_hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) {
+        m_panDragging = true;
+        ImVec2 mp = ImGui::GetMousePos();
+        m_panDragStart = {mp.x, mp.y};
+        m_panStart = m_pan;
+    }
+    if (m_panDragging && ImGui::IsMouseDown(ImGuiMouseButton_Middle)) {
+        ImVec2 mp = ImGui::GetMousePos();
+        m_pan.x = m_panStart.x + (mp.x - m_panDragStart.x);
+        m_pan.y = m_panStart.y + (mp.y - m_panDragStart.y);
+    }
+    if (ImGui::IsMouseReleased(ImGuiMouseButton_Middle)) {
+        m_panDragging = false;
+    }
+
+    // Double-click middle mouse to reset zoom/pan
+    if (m_hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Middle)) {
+        m_zoom = 1.0f;
+        m_pan = {0, 0};
+    }
 
     // --- Always draw and handle warp (unless in mask mode) ---
     if (m_editMode != EditMode::Mask && m_imageSize.x > 0 && m_imageSize.y > 0) {
@@ -482,30 +524,42 @@ void ViewportPanel::render(GLuint texture, CornerPinWarp& cornerPin, MeshWarp& m
 
 // ======== LAYER TRANSFORM OVERLAY ========
 
-void ViewportPanel::renderLayerOverlay(LayerStack& stack, int& selectedLayer) {
+// Distance from point to line segment
+static float pointToSegmentDist(ImVec2 p, ImVec2 a, ImVec2 b) {
+    float abx = b.x-a.x, aby = b.y-a.y;
+    float apx = p.x-a.x, apy = p.y-a.y;
+    float t = (abx*apx + aby*apy) / (abx*abx + aby*aby + 1e-8f);
+    t = std::max(0.0f, std::min(1.0f, t));
+    float cx = a.x + t*abx, cy = a.y + t*aby;
+    float dx = p.x-cx, dy = p.y-cy;
+    return sqrtf(dx*dx + dy*dy);
+}
+
+void ViewportPanel::renderLayerOverlay(LayerStack& stack, int& selectedLayer, int canvasW, int canvasH) {
     if (m_imageSize.x <= 0 || m_imageSize.y <= 0) return;
     if (m_editMode != EditMode::Normal) return;
     if (stack.count() == 0) {
         m_layerDragging = false;
         m_handleDrag = HandleType::None;
+        selectedLayer = -1;
         return;
     }
-    // Clamp selectedLayer to valid range (in case a layer was removed earlier this frame)
     if (selectedLayer >= stack.count()) {
         selectedLayer = stack.count() - 1;
         m_layerDragging = false;
         m_handleDrag = HandleType::None;
     }
-    // Don't interact if warp is being dragged
+
     bool warpBusy = m_warpDragging;
-
     ImDrawList* draw = ImGui::GetForegroundDrawList();
-    ImVec2 mouseImGui = ImGui::GetMousePos();
-    glm::vec2 mouseNDC = screenToNDC({mouseImGui.x, mouseImGui.y});
-    float handleRadius = 5.0f;
-    float handleHitRadius = 10.0f;
+    ImVec2 mouse = ImGui::GetMousePos();
+    glm::vec2 mouseNDC = screenToNDC({mouse.x, mouse.y});
+    const float handleR = 5.0f;
+    const float hitR = 10.0f;
+    const float edgeHitDist = 6.0f;
 
-    auto getLayerCorners = [&](const std::shared_ptr<Layer>& layer, ImVec2 out[4]) {
+    // --- Helpers ---
+    auto getCorners = [&](const std::shared_ptr<Layer>& layer, ImVec2 out[4]) {
         float sx = layer->scale.x * (layer->flipH ? -1.0f : 1.0f);
         float sy = layer->scale.y * (layer->flipV ? -1.0f : 1.0f);
         float rad = glm::radians(layer->rotation);
@@ -518,164 +572,254 @@ void ViewportPanel::renderLayerOverlay(LayerStack& stack, int& selectedLayer) {
             out[i] = toImVec2(ndcToScreen({rx + px, ry + py}));
         }
     };
-
-    auto mid = [](ImVec2 a, ImVec2 b) -> ImVec2 {
-        return ImVec2((a.x+b.x)*0.5f, (a.y+b.y)*0.5f);
+    auto midPt = [](ImVec2 a, ImVec2 b) -> ImVec2 { return ImVec2((a.x+b.x)*0.5f, (a.y+b.y)*0.5f); };
+    auto distPt = [](ImVec2 a, ImVec2 b) -> float { float dx=a.x-b.x, dy=a.y-b.y; return sqrtf(dx*dx+dy*dy); };
+    auto cross2d = [](ImVec2 o, ImVec2 a, ImVec2 b) -> float { return (a.x-o.x)*(b.y-o.y)-(a.y-o.y)*(b.x-o.x); };
+    auto inQuad = [&](ImVec2 c[4], ImVec2 pt) -> bool {
+        bool pos=true, neg=true;
+        for (int j=0; j<4; j++) { float cp=cross2d(c[j],c[(j+1)%4],pt); if(cp<0)pos=false; if(cp>0)neg=false; }
+        return pos||neg;
     };
-    auto dist = [](ImVec2 a, ImVec2 b) -> float {
-        float dx = a.x-b.x, dy = a.y-b.y; return sqrtf(dx*dx+dy*dy);
+    HandleType handleTypes[8] = {
+        HandleType::TopLeft, HandleType::Top, HandleType::TopRight, HandleType::Right,
+        HandleType::BottomRight, HandleType::Bottom, HandleType::BottomLeft, HandleType::Left
     };
-    auto cross2d = [](ImVec2 o, ImVec2 a, ImVec2 b) -> float {
-        return (a.x-o.x)*(b.y-o.y)-(a.y-o.y)*(b.x-o.x);
-    };
-    auto pointInQuad = [&](ImVec2 corners[4], ImVec2 pt) -> bool {
-        bool pos = true, neg = true;
-        for (int j = 0; j < 4; j++) {
-            float cp = cross2d(corners[j], corners[(j+1)%4], pt);
-            if (cp < 0) pos = false;
-            if (cp > 0) neg = false;
-        }
-        return pos || neg;
+    auto getHandles = [&](ImVec2 c[4], ImVec2 out[8]) {
+        out[0]=c[0]; out[1]=midPt(c[0],c[1]); out[2]=c[1]; out[3]=midPt(c[1],c[2]);
+        out[4]=c[2]; out[5]=midPt(c[2],c[3]); out[6]=c[3]; out[7]=midPt(c[3],c[0]);
     };
 
-    // Draw dim bounding boxes for non-selected visible layers
+    // --- Draw dim bboxes for non-selected layers ---
     for (int i = 0; i < stack.count(); i++) {
         if (!stack[i]->visible || !stack[i]->source || i == selectedLayer) continue;
-        ImVec2 c[4]; getLayerCorners(stack[i], c);
+        ImVec2 c[4]; getCorners(stack[i], c);
+        // Subtle hover highlight when mouse is near
+        bool hovering = inQuad(c, mouse) && m_hovered;
+        ImU32 col = hovering ? IM_COL32(255, 255, 255, 80) : kBBoxDim;
         for (int j = 0; j < 4; j++)
-            draw->AddLine(c[j], c[(j+1)%4], kBBoxDim, 1.0f);
+            draw->AddLine(c[j], c[(j+1)%4], col, hovering ? 1.5f : 1.0f);
     }
 
-    // Selected layer handles
+    // --- Handle mouse-down for selection ---
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && m_hovered && !warpBusy && !m_layerDragging) {
+        bool hitSomething = false;
+
+        // If there's a selected layer, check its handles first
+        if (selectedLayer >= 0 && selectedLayer < stack.count() && stack[selectedLayer]->source) {
+            ImVec2 selCorners[4], selHandles[8];
+            getCorners(stack[selectedLayer], selCorners);
+            getHandles(selCorners, selHandles);
+
+            for (int h = 0; h < 8; h++) {
+                if (distPt(mouse, selHandles[h]) < hitR) {
+                    m_handleDrag = handleTypes[h];
+                    m_layerDragging = true;
+                    m_dragStartMouse = mouseNDC;
+                    m_dragStartPos = stack[selectedLayer]->position;
+                    m_dragStartScale = stack[selectedLayer]->scale;
+                    m_dragStartRatio = stack[selectedLayer]->scale.x / std::max(0.001f, stack[selectedLayer]->scale.y);
+                    hitSomething = true;
+                    break;
+                }
+            }
+
+            // Check body for move
+            if (!hitSomething && inQuad(selCorners, mouse)) {
+                m_handleDrag = HandleType::Move;
+                m_layerDragging = true;
+                m_dragStartMouse = mouseNDC;
+                m_dragStartPos = stack[selectedLayer]->position;
+                m_dragStartScale = stack[selectedLayer]->scale;
+                hitSomething = true;
+            }
+        }
+
+        // Try selecting a different layer (top-to-bottom)
+        if (!hitSomething) {
+            bool found = false;
+            for (int idx = stack.count()-1; idx >= 0; idx--) {
+                if (!stack[idx]->visible || !stack[idx]->source) continue;
+                ImVec2 c2[4]; getCorners(stack[idx], c2);
+                if (inQuad(c2, mouse)) {
+                    selectedLayer = idx;
+                    m_handleDrag = HandleType::Move;
+                    m_layerDragging = true;
+                    m_dragStartMouse = mouseNDC;
+                    m_dragStartPos = stack[idx]->position;
+                    m_dragStartScale = stack[idx]->scale;
+                    found = true;
+                    break;
+                }
+            }
+            // Clicked empty space: deselect
+            if (!found) {
+                selectedLayer = -1;
+                m_layerDragging = false;
+                m_handleDrag = HandleType::None;
+            }
+        }
+    }
+
+    // --- Double-click corner: enter mask edit mode ---
+    if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && m_hovered && !warpBusy) {
+        if (selectedLayer >= 0 && selectedLayer < stack.count() && stack[selectedLayer]->source) {
+            ImVec2 selCorners[4];
+            getCorners(stack[selectedLayer], selCorners);
+            for (int j = 0; j < 4; j++) {
+                if (distPt(mouse, selCorners[j]) < hitR * 1.5f) {
+                    m_wantsMaskEdit = true;
+                    m_layerDragging = false;
+                    m_handleDrag = HandleType::None;
+                    break;
+                }
+            }
+            // Double-click on edge: enter mask and add point there
+            if (!m_wantsMaskEdit) {
+                for (int j = 0; j < 4; j++) {
+                    float d = pointToSegmentDist(mouse, selCorners[j], selCorners[(j+1)%4]);
+                    if (d < edgeHitDist * 2.0f) {
+                        m_wantsMaskEdit = true;
+                        // Convert click position to UV for mask point
+                        m_maskEditClickUV = screenToUV({mouse.x, mouse.y});
+                        m_layerDragging = false;
+                        m_handleDrag = HandleType::None;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Dragging ---
+    if (m_layerDragging && ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+        selectedLayer >= 0 && selectedLayer < stack.count()) {
+        auto& dl = stack[selectedLayer];
+        glm::vec2 delta = mouseNDC - m_dragStartMouse;
+        bool shift = ImGui::GetIO().KeyShift;
+
+        if (m_handleDrag == HandleType::Move) {
+            dl->position = m_dragStartPos + delta;
+        } else {
+            float dx = delta.x, dy = delta.y;
+            glm::vec2 ns = m_dragStartScale;
+
+            switch (m_handleDrag) {
+            case HandleType::TopLeft:     ns.x = std::max(0.05f, ns.x - dx*0.5f); ns.y = std::max(0.05f, ns.y + dy*0.5f); break;
+            case HandleType::TopRight:    ns.x = std::max(0.05f, ns.x + dx*0.5f); ns.y = std::max(0.05f, ns.y + dy*0.5f); break;
+            case HandleType::BottomLeft:  ns.x = std::max(0.05f, ns.x - dx*0.5f); ns.y = std::max(0.05f, ns.y - dy*0.5f); break;
+            case HandleType::BottomRight: ns.x = std::max(0.05f, ns.x + dx*0.5f); ns.y = std::max(0.05f, ns.y - dy*0.5f); break;
+            case HandleType::Top:    ns.y = std::max(0.05f, ns.y + dy*0.5f); break;
+            case HandleType::Bottom: ns.y = std::max(0.05f, ns.y - dy*0.5f); break;
+            case HandleType::Left:   ns.x = std::max(0.05f, ns.x - dx*0.5f); break;
+            case HandleType::Right:  ns.x = std::max(0.05f, ns.x + dx*0.5f); break;
+            default: break;
+            }
+
+            // Shift: constrain aspect ratio (lock to drag-start ratio)
+            if (shift && m_dragStartRatio > 0.001f) {
+                bool isCornerHandle = (m_handleDrag == HandleType::TopLeft || m_handleDrag == HandleType::TopRight ||
+                                       m_handleDrag == HandleType::BottomLeft || m_handleDrag == HandleType::BottomRight);
+                if (isCornerHandle) {
+                    // Use the axis with the larger delta to drive both
+                    float adx = fabsf(ns.x - m_dragStartScale.x);
+                    float ady = fabsf(ns.y - m_dragStartScale.y);
+                    if (adx > ady) {
+                        ns.y = std::max(0.05f, ns.x / m_dragStartRatio);
+                    } else {
+                        ns.x = std::max(0.05f, ns.y * m_dragStartRatio);
+                    }
+                }
+            }
+
+            dl->scale = ns;
+        }
+    }
+
+    if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+        m_layerDragging = false;
+        m_handleDrag = HandleType::None;
+    }
+
+    // --- Draw selected layer ---
     if (selectedLayer >= 0 && selectedLayer < stack.count()) {
         auto& layer = stack[selectedLayer];
         if (layer->source) {
             ImVec2 corners[4];
-            getLayerCorners(layer, corners);
+            getCorners(layer, corners);
 
-            HandleType handleTypes[8] = {
-                HandleType::TopLeft, HandleType::Top, HandleType::TopRight, HandleType::Right,
-                HandleType::BottomRight, HandleType::Bottom, HandleType::BottomLeft, HandleType::Left
-            };
+            // Bbox glow + line
+            for (int j = 0; j < 4; j++)
+                draw->AddLine(corners[j], corners[(j+1)%4], kBBoxGlow, 4.0f);
+            for (int j = 0; j < 4; j++)
+                draw->AddLine(corners[j], corners[(j+1)%4], kBBoxLine, 1.5f);
 
-            auto getHandles = [&](ImVec2 c[4], ImVec2 out[8]) {
-                out[0]=c[0]; out[1]=mid(c[0],c[1]); out[2]=c[1]; out[3]=mid(c[1],c[2]);
-                out[4]=c[2]; out[5]=mid(c[2],c[3]); out[6]=c[3]; out[7]=mid(c[3],c[0]);
-            };
+            // Edge hover highlight
+            if (!m_layerDragging && m_hovered) {
+                for (int j = 0; j < 4; j++) {
+                    float d = pointToSegmentDist(mouse, corners[j], corners[(j+1)%4]);
+                    if (d < edgeHitDist) {
+                        draw->AddLine(corners[j], corners[(j+1)%4], IM_COL32(0, 220, 255, 160), 3.0f);
+                    }
+                }
+            }
 
+            // Handles
             ImVec2 handles[8];
             getHandles(corners, handles);
 
-            // Click to start interaction
-            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && m_hovered && !warpBusy) {
-                m_handleDrag = HandleType::None;
-                m_layerDragging = false;
+            for (int h = 0; h < 8; h++) {
+                bool isCorner = (h % 2 == 0);
+                float r = isCorner ? handleR : (handleR - 1.5f);
+                bool active = (m_layerDragging && m_handleDrag == handleTypes[h]);
+                bool hovered = (!m_layerDragging && distPt(mouse, handles[h]) < hitR && m_hovered);
 
-                // Check resize handles
+                ImU32 fillCol = (active || hovered) ? IM_COL32(0, 230, 255, 255) : kLHandleFill;
+                ImU32 strokeCol = active ? kLHandleActive : (hovered ? IM_COL32(0, 230, 255, 255) : kLHandleStroke);
+                float drawR = (active || hovered) ? r + 1.5f : r;
+
+                if (isCorner) {
+                    ImVec2 hMin(handles[h].x-drawR, handles[h].y-drawR);
+                    ImVec2 hMax(handles[h].x+drawR, handles[h].y+drawR);
+                    draw->AddRectFilled(hMin, hMax, fillCol, 1.5f);
+                    draw->AddRect(hMin, hMax, strokeCol, 1.5f, 0, 1.5f);
+                } else {
+                    draw->AddCircleFilled(handles[h], drawR, fillCol);
+                    draw->AddCircle(handles[h], drawR, strokeCol, 0, 1.5f);
+                }
+            }
+
+            // Cursor hints
+            if (!m_layerDragging && !warpBusy && m_hovered) {
+                bool setCursor = false;
                 for (int h = 0; h < 8; h++) {
-                    if (dist(mouseImGui, handles[h]) < handleHitRadius) {
-                        m_handleDrag = handleTypes[h];
-                        m_layerDragging = true;
-                        m_dragStartMouse = mouseNDC;
-                        m_dragStartPos = layer->position;
-                        m_dragStartScale = layer->scale;
+                    if (distPt(mouse, handles[h]) < hitR) {
+                        if (h==0||h==4) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNWSE);
+                        else if (h==2||h==6) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNESW);
+                        else if (h==1||h==5) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+                        else if (h==3||h==7) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+                        setCursor = true;
                         break;
                     }
                 }
-
-                // Check body move
-                if (!m_layerDragging && pointInQuad(corners, mouseImGui)) {
-                    m_handleDrag = HandleType::Move;
-                    m_layerDragging = true;
-                    m_dragStartMouse = mouseNDC;
-                    m_dragStartPos = layer->position;
-                    m_dragStartScale = layer->scale;
-                }
-
-                // Click outside: try selecting another layer
-                if (!m_layerDragging) {
-                    for (int idx = stack.count()-1; idx >= 0; idx--) {
-                        if (!stack[idx]->visible || !stack[idx]->source) continue;
-                        ImVec2 c2[4]; getLayerCorners(stack[idx], c2);
-                        if (pointInQuad(c2, mouseImGui)) {
-                            selectedLayer = idx;
-                            m_handleDrag = HandleType::Move;
-                            m_layerDragging = true;
-                            m_dragStartMouse = mouseNDC;
-                            m_dragStartPos = stack[idx]->position;
-                            m_dragStartScale = stack[idx]->scale;
+                // Edge hover cursor (crosshair for "add mask point")
+                if (!setCursor) {
+                    for (int j = 0; j < 4; j++) {
+                        if (pointToSegmentDist(mouse, corners[j], corners[(j+1)%4]) < edgeHitDist) {
+                            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
                             break;
                         }
                     }
                 }
             }
 
-            // Dragging
-            if (m_layerDragging && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-                auto& dl = stack[selectedLayer];
-                glm::vec2 delta = mouseNDC - m_dragStartMouse;
-
-                if (m_handleDrag == HandleType::Move) {
-                    dl->position = m_dragStartPos + delta;
-                } else {
-                    float dx = delta.x, dy = delta.y;
-                    glm::vec2 ns = m_dragStartScale;
-
-                    switch (m_handleDrag) {
-                    case HandleType::TopLeft:     ns.x = std::max(0.05f, ns.x - dx*0.5f); ns.y = std::max(0.05f, ns.y + dy*0.5f); break;
-                    case HandleType::TopRight:    ns.x = std::max(0.05f, ns.x + dx*0.5f); ns.y = std::max(0.05f, ns.y + dy*0.5f); break;
-                    case HandleType::BottomLeft:  ns.x = std::max(0.05f, ns.x - dx*0.5f); ns.y = std::max(0.05f, ns.y - dy*0.5f); break;
-                    case HandleType::BottomRight: ns.x = std::max(0.05f, ns.x + dx*0.5f); ns.y = std::max(0.05f, ns.y - dy*0.5f); break;
-                    case HandleType::Top:    ns.y = std::max(0.05f, ns.y + dy*0.5f); break;
-                    case HandleType::Bottom: ns.y = std::max(0.05f, ns.y - dy*0.5f); break;
-                    case HandleType::Left:   ns.x = std::max(0.05f, ns.x - dx*0.5f); break;
-                    case HandleType::Right:  ns.x = std::max(0.05f, ns.x + dx*0.5f); break;
-                    default: break;
-                    }
-                    dl->scale = ns;
-                }
-            }
-
-            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-                m_layerDragging = false;
-                m_handleDrag = HandleType::None;
-            }
-
-            // Draw selected bbox (re-get after potential drag)
-            getLayerCorners(stack[selectedLayer], corners);
-            for (int j = 0; j < 4; j++)
-                draw->AddLine(corners[j], corners[(j+1)%4], kBBoxGlow, 4.0f);
-            for (int j = 0; j < 4; j++)
-                draw->AddLine(corners[j], corners[(j+1)%4], kBBoxLine, 1.5f);
-
-            getHandles(corners, handles);
-            for (int h = 0; h < 8; h++) {
-                bool isCorner = (h % 2 == 0);
-                float r = isCorner ? handleRadius : (handleRadius - 1.5f);
-                bool active = (m_layerDragging && m_handleDrag == handleTypes[h]);
-
-                if (isCorner) {
-                    ImVec2 hMin(handles[h].x-r, handles[h].y-r);
-                    ImVec2 hMax(handles[h].x+r, handles[h].y+r);
-                    draw->AddRectFilled(hMin, hMax, kLHandleFill, 1.5f);
-                    draw->AddRect(hMin, hMax, active ? kLHandleActive : kLHandleStroke, 1.5f, 0, 1.5f);
-                } else {
-                    draw->AddCircleFilled(handles[h], r, kLHandleFill);
-                    draw->AddCircle(handles[h], r, active ? kLHandleActive : kLHandleStroke, 0, 1.5f);
-                }
-            }
-
-            // Cursor hints
-            if (!m_layerDragging && !warpBusy) {
-                for (int h = 0; h < 8; h++) {
-                    if (dist(mouseImGui, handles[h]) < handleHitRadius) {
-                        if (h==0||h==4) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNWSE);
-                        else if (h==2||h==6) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNESW);
-                        else if (h==1||h==5) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
-                        else if (h==3||h==7) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
-                        break;
-                    }
-                }
+            // Arrow key nudge (1 canvas pixel)
+            if (!ImGui::GetIO().WantTextInput) {
+                float nudgeX = 2.0f / (float)canvasW;
+                float nudgeY = 2.0f / (float)canvasH;
+                if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))  layer->position.x -= nudgeX;
+                if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) layer->position.x += nudgeX;
+                if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))    layer->position.y += nudgeY;
+                if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))  layer->position.y -= nudgeY;
             }
         }
     }

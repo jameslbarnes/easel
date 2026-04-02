@@ -170,6 +170,11 @@ private:
     // Old mosaic meter removed — replaced by AudioAnalyzer
 #endif
 
+    // File drop handling
+    std::vector<std::string> m_pendingDrops;
+    void handleDroppedFiles();
+    static void dropCallback(GLFWwindow* window, int count, const char** paths);
+
     // JSON save/load
     void saveProject(const std::string& path);
     void loadProject(const std::string& path);

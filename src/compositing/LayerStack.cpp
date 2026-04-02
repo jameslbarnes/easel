@@ -26,3 +26,23 @@ void LayerStack::moveLayer(int from, int to) {
     m_layers.erase(m_layers.begin() + from);
     m_layers.insert(m_layers.begin() + to, layer);
 }
+
+uint32_t LayerStack::createGroup(const std::string& name) {
+    uint32_t id = m_nextGroupId++;
+    m_groups[id] = {name, false, true};
+    return id;
+}
+
+void LayerStack::removeGroup(uint32_t groupId) {
+    for (auto& layer : m_layers) {
+        if (layer->groupId == groupId) {
+            layer->groupId = 0;
+        }
+    }
+    m_groups.erase(groupId);
+}
+
+LayerGroup* LayerStack::group(uint32_t groupId) {
+    auto it = m_groups.find(groupId);
+    return (it != m_groups.end()) ? &it->second : nullptr;
+}

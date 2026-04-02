@@ -11,6 +11,11 @@ public:
                 std::vector<std::unique_ptr<OutputZone>>* zones = nullptr,
                 int activeZone = 0);
 
+    // Signals: checked by Application after render
+    bool wantsAddImage = false;
+    bool wantsAddVideo = false;
+    bool wantsAddShader = false;
+
 private:
     // Manual drag state
     bool m_dragActive = false;

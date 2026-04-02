@@ -30,6 +30,7 @@ public:
     std::string sourcePath() const override { return m_path; }
 
     bool isVideo() const override { return true; }
+    bool isFlippedV() const override { return true; }
     void play() override;
     void pause() override;
     void seek(double seconds) override;
