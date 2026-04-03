@@ -228,6 +228,9 @@ bool Application::init() {
     // Start with a blank project (no auto-load)
     std::cout << "[Easel] Starting with blank project" << std::endl;
 
+    // Init 3D stage view
+    m_stageView.init();
+
     // Auto-start OSC receiver on port 9000
     m_oscManager.startReceiver(9000);
     m_oscManager.setSendTarget("127.0.0.1", 9001);
@@ -1175,6 +1178,25 @@ void Application::renderUI() {
         std::string path = openFileDialog("3D Models\0*.obj;*.gltf;*.glb\0OBJ Files\0*.obj\0glTF Files\0*.gltf;*.glb\0All Files\0*.*\0");
         if (!path.empty()) {
             zone.objMeshWarp.loadModel(path);
+        }
+    }
+
+    // Stage View (3D pre-viz)
+    {
+        // Collect zone textures for the stage view
+        std::vector<GLuint> zoneTextures;
+        for (auto& zp : m_zones) {
+            zoneTextures.push_back(zp->warpFBO.textureId());
+        }
+        m_stageView.render(zoneTextures);
+
+        // Handle import request from StageView
+        if (m_stageView.wantsImport()) {
+            m_stageView.clearImportSignal();
+            std::string path = openFileDialog("3D Models\0*.obj;*.gltf;*.glb\0All Files\0*.*\0");
+            if (!path.empty()) {
+                m_stageView.loadModel(path);
+            }
         }
     }
 
