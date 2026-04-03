@@ -5,6 +5,7 @@
 #include "compositing/Layer.h"
 #include <vector>
 #include <memory>
+#include <unordered_map>
 #include <glad/glad.h>
 
 struct AudioState {
@@ -39,6 +40,9 @@ public:
     int width() const { return m_width; }
     int height() const { return m_height; }
 
+    // Apply per-layer effect chain, returns texture ID to use for compositing
+    GLuint applyEffects(const std::shared_ptr<Layer>& layer, GLuint srcTex);
+
 private:
     AudioState m_audio;
     Framebuffer m_fbo[2]; // ping-pong
@@ -47,7 +51,13 @@ private:
 
     ShaderProgram m_compositeShader;
     ShaderProgram m_passthroughShader;
+    ShaderProgram m_effectShader;
     Mesh m_quad;
+
+    // Effect chain temp FBOs (ping-pong)
+    Framebuffer m_effectFBO[2];
+    // Per-layer feedback FBO (keyed by layer pointer)
+    std::unordered_map<Layer*, Framebuffer> m_feedbackFBOs;
 
     void clear();
     void setAudioUniforms(ShaderProgram& shader, float audioStrength);

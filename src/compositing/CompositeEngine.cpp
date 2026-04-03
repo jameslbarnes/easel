@@ -21,6 +21,11 @@ bool CompositeEngine::init(int width, int height) {
         return false;
     }
 
+    if (!m_effectShader.loadFromFiles("shaders/passthrough.vert", "shaders/effect.frag")) {
+        std::cerr << "Failed to load effect shader" << std::endl;
+        return false;
+    }
+
     m_quad.createQuad();
     return true;
 }
@@ -57,6 +62,140 @@ void CompositeEngine::setAudioUniforms(ShaderProgram& shader, float audioStrengt
     shader.setFloat("uBPM", m_audio.bpm);
 }
 
+GLuint CompositeEngine::applyEffects(const std::shared_ptr<Layer>& layer, GLuint srcTex) {
+    if (layer->effects.empty()) return srcTex;
+
+    // Check if any effect is enabled
+    bool anyEnabled = false;
+    for (auto& fx : layer->effects) {
+        if (fx.enabled) { anyEnabled = true; break; }
+    }
+    if (!anyEnabled) return srcTex;
+
+    // Ensure effect FBOs match size
+    for (int i = 0; i < 2; i++) {
+        if (m_effectFBO[i].width() != m_width || m_effectFBO[i].height() != m_height) {
+            m_effectFBO[i].create(m_width, m_height);
+        }
+    }
+
+    GLuint currentTex = srcTex;
+    int pingpong = 0;
+
+    for (auto& fx : layer->effects) {
+        if (!fx.enabled) continue;
+
+        if (fx.type == EffectType::Blur && fx.blurRadius > 0.1f) {
+            // Two-pass separable blur
+            for (int pass = 0; pass < 2; pass++) {
+                m_effectFBO[pingpong].bind();
+                glViewport(0, 0, m_width, m_height);
+                glClear(GL_COLOR_BUFFER_BIT);
+                m_effectShader.use();
+                m_effectShader.setInt("uEffectType", 0);
+                m_effectShader.setInt("uBlurPass", pass);
+                m_effectShader.setFloat("uBlurRadius", fx.blurRadius);
+                m_effectShader.setVec2("uResolution", glm::vec2(m_width, m_height));
+                m_effectShader.setInt("uTexture", 0);
+                m_effectShader.setMat3("uTransform", glm::mat3(1.0f));
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, currentTex);
+                m_quad.draw();
+                currentTex = m_effectFBO[pingpong].textureId();
+                pingpong = 1 - pingpong;
+            }
+        } else if (fx.type == EffectType::ColorAdjust) {
+            m_effectFBO[pingpong].bind();
+            glViewport(0, 0, m_width, m_height);
+            glClear(GL_COLOR_BUFFER_BIT);
+            m_effectShader.use();
+            m_effectShader.setInt("uEffectType", 1);
+            m_effectShader.setFloat("uBrightness", fx.brightness);
+            m_effectShader.setFloat("uContrast", fx.contrast);
+            m_effectShader.setFloat("uSaturation", fx.saturation);
+            m_effectShader.setFloat("uHueShift", fx.hueShift);
+            m_effectShader.setInt("uTexture", 0);
+            m_effectShader.setMat3("uTransform", glm::mat3(1.0f));
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, currentTex);
+            m_quad.draw();
+            currentTex = m_effectFBO[pingpong].textureId();
+            pingpong = 1 - pingpong;
+        } else if (fx.type == EffectType::Invert) {
+            m_effectFBO[pingpong].bind();
+            glViewport(0, 0, m_width, m_height);
+            glClear(GL_COLOR_BUFFER_BIT);
+            m_effectShader.use();
+            m_effectShader.setInt("uEffectType", 2);
+            m_effectShader.setInt("uTexture", 0);
+            m_effectShader.setMat3("uTransform", glm::mat3(1.0f));
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, currentTex);
+            m_quad.draw();
+            currentTex = m_effectFBO[pingpong].textureId();
+            pingpong = 1 - pingpong;
+        } else if (fx.type == EffectType::Pixelate && fx.pixelSize > 1.0f) {
+            m_effectFBO[pingpong].bind();
+            glViewport(0, 0, m_width, m_height);
+            glClear(GL_COLOR_BUFFER_BIT);
+            m_effectShader.use();
+            m_effectShader.setInt("uEffectType", 3);
+            m_effectShader.setFloat("uPixelSize", fx.pixelSize);
+            m_effectShader.setVec2("uResolution", glm::vec2(m_width, m_height));
+            m_effectShader.setInt("uTexture", 0);
+            m_effectShader.setMat3("uTransform", glm::mat3(1.0f));
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, currentTex);
+            m_quad.draw();
+            currentTex = m_effectFBO[pingpong].textureId();
+            pingpong = 1 - pingpong;
+        } else if (fx.type == EffectType::Feedback) {
+            // Get or create feedback FBO for this layer
+            auto& fbFBO = m_feedbackFBOs[layer.get()];
+            if (fbFBO.width() != m_width || fbFBO.height() != m_height) {
+                fbFBO.create(m_width, m_height);
+            }
+            m_effectFBO[pingpong].bind();
+            glViewport(0, 0, m_width, m_height);
+            glClear(GL_COLOR_BUFFER_BIT);
+            m_effectShader.use();
+            m_effectShader.setInt("uEffectType", 4);
+            m_effectShader.setFloat("uFeedbackMix", fx.feedbackMix);
+            m_effectShader.setFloat("uFeedbackZoom", fx.feedbackZoom);
+            m_effectShader.setInt("uTexture", 0);
+            m_effectShader.setInt("uFeedback", 1);
+            m_effectShader.setMat3("uTransform", glm::mat3(1.0f));
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, currentTex);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, fbFBO.textureId());
+            m_quad.draw();
+            currentTex = m_effectFBO[pingpong].textureId();
+            pingpong = 1 - pingpong;
+
+            // Copy result to feedback FBO for next frame
+            fbFBO.bind();
+            glViewport(0, 0, m_width, m_height);
+            m_passthroughShader.use();
+            m_passthroughShader.setInt("uTexture", 0);
+            m_passthroughShader.setFloat("uOpacity", 1.0f);
+            m_passthroughShader.setMat3("uTransform", glm::mat3(1.0f));
+            m_passthroughShader.setFloat("uTileX", 1.0f);
+            m_passthroughShader.setFloat("uTileY", 1.0f);
+            m_passthroughShader.setInt("uMosaicMode", 0);
+            m_passthroughShader.setFloat("uFeather", 0.0f);
+            m_passthroughShader.setBool("uHasMask", false);
+            m_passthroughShader.setBool("uFlipV", false);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, currentTex);
+            m_quad.draw();
+        }
+    }
+
+    Framebuffer::unbind();
+    return currentTex;
+}
+
 void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layers) {
     clear();
 
@@ -86,8 +225,37 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
         if (effectiveOpacity <= 0.0f || !layer->textureId()) continue;
         if (!layer->visible && !layer->transitionActive) continue;
 
+        // Apply audio bindings to layer properties (temporary modulation)
+        float savedOpacity = layer->opacity;
+        glm::vec2 savedPos = layer->position;
+        glm::vec2 savedScale = layer->scale;
+        float savedRot = layer->rotation;
+        for (const auto& ab : layer->audioBindings) {
+            if (ab.target == Layer::AudioTarget::None) continue;
+            float sig = 0;
+            switch (ab.signal) {
+                case 0: sig = m_audio.bass; break;
+                case 1: sig = (m_audio.lowMid + m_audio.highMid) * 0.5f; break;
+                case 2: sig = m_audio.treble; break;
+                case 3: sig = m_audio.beatDecay; break;
+            }
+            float mod = sig * ab.strength;
+            switch (ab.target) {
+                case Layer::AudioTarget::Opacity: effectiveOpacity *= (1.0f - mod + mod * sig); break;
+                case Layer::AudioTarget::PositionX: layer->position.x += mod * 0.5f; break;
+                case Layer::AudioTarget::PositionY: layer->position.y += mod * 0.5f; break;
+                case Layer::AudioTarget::Scale: layer->scale *= (1.0f + mod); break;
+                case Layer::AudioTarget::Rotation: layer->rotation += mod * 45.0f; break;
+                default: break;
+            }
+        }
+
+        // Apply per-layer effects chain
+        GLuint layerTex = applyEffects(layer, layer->textureId());
+
         int next = 1 - m_current;
         m_fbo[next].bind();
+        glViewport(0, 0, m_width, m_height);
         glClearColor(0, 0, 0, 0);
         glClear(GL_COLOR_BUFFER_BIT);
 
@@ -135,7 +303,7 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
                 m_passthroughShader.setFloat("uMosaicTransition", mt);
             }
             glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, layer->textureId());
+            glBindTexture(GL_TEXTURE_2D, layerTex);
 
             // Mask support for first layer
             if (layer->mask && layer->mask->id()) {
@@ -180,7 +348,7 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
 
             // Current layer
             glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, layer->textureId());
+            glBindTexture(GL_TEXTURE_2D, layerTex);
 
             // Mask
             if (layer->mask && layer->mask->id()) {
@@ -200,6 +368,12 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
 
         m_current = next;
         firstLayer = false;
+
+        // Restore audio-modulated properties
+        layer->opacity = savedOpacity;
+        layer->position = savedPos;
+        layer->scale = savedScale;
+        layer->rotation = savedRot;
     }
 
     Framebuffer::unbind();

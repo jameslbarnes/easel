@@ -1,5 +1,6 @@
 #include "ui/PropertyPanel.h"
 #include "app/BPMSync.h"
+#include "app/SceneManager.h"
 #include "compositing/BlendMode.h"
 #include "compositing/LayerStack.h"
 #include "sources/ShaderSource.h"
@@ -62,7 +63,7 @@ static bool dragPair(const char* idA, const char* labelA, float* a,
 void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                            SpeechState* speech, MosaicAudioState* mosaicAudio,
                            float appTime, LayerStack* layerStack,
-                           BPMSync* bpmSync) {
+                           BPMSync* bpmSync, SceneManager* sceneManager) {
     ImGui::SetNextWindowSizeConstraints(ImVec2(250, 200), ImVec2(FLT_MAX, FLT_MAX));
     ImGui::Begin("Properties");
 
@@ -137,6 +138,51 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             }
 
             ImGui::Dummy(ImVec2(0, 2));
+        }
+
+        thinSep();
+    }
+
+    // --- Scenes (always visible) ---
+    if (sceneManager && layerStack) {
+        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.0f, 0.78f, 1.0f, 0.08f));
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
+        ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.0f, 0.78f, 1.0f, 0.22f));
+        bool scenesOpen = ImGui::CollapsingHeader("Scenes", ImGuiTreeNodeFlags_DefaultOpen);
+        ImGui::PopStyleColor(3);
+
+        if (scenesOpen) {
+            // Save current state as scene
+            if (accentBtn("Save Scene", -1)) {
+                char name[32];
+                snprintf(name, sizeof(name), "Scene %d", sceneManager->count() + 1);
+                sceneManager->saveScene(name, *layerStack);
+            }
+
+            // Scene list
+            int removeIdx = -1;
+            for (int s = 0; s < sceneManager->count(); s++) {
+                ImGui::PushID(30000 + s);
+                auto& scene = (*sceneManager)[s];
+
+                // Recall button (full width minus delete button)
+                float w = ImGui::GetContentRegionAvail().x - 24;
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.06f, 0.07f, 0.10f, 0.9f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.20f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.35f));
+                if (ImGui::Button(scene.name.c_str(), ImVec2(w, 0))) {
+                    sceneManager->recallScene(s, *layerStack);
+                }
+                ImGui::PopStyleColor(3);
+
+                ImGui::SameLine();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.3f, 0.3f, 0.7f));
+                if (ImGui::SmallButton("x")) removeIdx = s;
+                ImGui::PopStyleColor();
+
+                ImGui::PopID();
+            }
+            if (removeIdx >= 0) sceneManager->removeScene(removeIdx);
         }
 
         thinSep();
@@ -271,6 +317,63 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
         layer->cropTop = layer->cropBottom = layer->cropLeft = layer->cropRight = 0.0f;
     }
 
+    // --- Audio Reactivity Bindings ---
+    {
+        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.0f, 0.78f, 1.0f, 0.08f));
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
+        ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.0f, 0.78f, 1.0f, 0.22f));
+        bool audioOpen = ImGui::CollapsingHeader("Audio Reactive");
+        ImGui::PopStyleColor(3);
+
+        if (audioOpen) {
+            static const char* targetNames[] = { "None", "Opacity", "Pos X", "Pos Y", "Scale", "Rotation" };
+            static const char* signalNames[] = { "Bass", "Mid", "High", "Beat" };
+
+            if (accentBtn("+ Add Binding", -1)) {
+                Layer::AudioBinding ab;
+                ab.target = Layer::AudioTarget::Scale;
+                ab.signal = 0;
+                ab.strength = 0.3f;
+                layer->audioBindings.push_back(ab);
+            }
+
+            int removeIdx = -1;
+            for (int b = 0; b < (int)layer->audioBindings.size(); b++) {
+                auto& ab = layer->audioBindings[b];
+                ImGui::PushID(40000 + b);
+
+                float w = ImGui::GetContentRegionAvail().x;
+                float third = (w - ImGui::GetStyle().ItemSpacing.x * 2 - 20) / 3.0f;
+
+                // Target dropdown
+                ImGui::SetNextItemWidth(third);
+                int tgt = (int)ab.target;
+                if (ImGui::Combo("##tgt", &tgt, targetNames, (int)Layer::AudioTarget::COUNT)) {
+                    ab.target = (Layer::AudioTarget)tgt;
+                }
+                ImGui::SameLine();
+
+                // Signal dropdown
+                ImGui::SetNextItemWidth(third);
+                ImGui::Combo("##sig", &ab.signal, signalNames, 4);
+                ImGui::SameLine();
+
+                // Strength
+                ImGui::SetNextItemWidth(third);
+                ImGui::SliderFloat("##str", &ab.strength, 0.0f, 2.0f, "%.2f");
+                ImGui::SameLine();
+
+                // Remove
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.3f, 0.3f, 0.7f));
+                if (ImGui::SmallButton("x")) removeIdx = b;
+                ImGui::PopStyleColor();
+
+                ImGui::PopID();
+            }
+            if (removeIdx >= 0) layer->audioBindings.erase(layer->audioBindings.begin() + removeIdx);
+        }
+    }
+
     thinSep();
 
     // --- Effects ---
@@ -281,6 +384,95 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
     ImGui::PopStyleColor(3);
 
     if (effectsOpen) {
+
+    // --- Layer Effects Chain ---
+    {
+        // Add effect button
+        if (accentBtn("+ Add Effect", -1)) {
+            ImGui::OpenPopup("##AddEffect");
+        }
+        if (ImGui::BeginPopup("##AddEffect")) {
+            for (int t = 0; t < (int)EffectType::COUNT; t++) {
+                if (ImGui::MenuItem(effectTypeName((EffectType)t))) {
+                    LayerEffect fx;
+                    fx.type = (EffectType)t;
+                    layer->effects.push_back(fx);
+                    undoNeeded = true;
+                }
+            }
+            ImGui::EndPopup();
+        }
+
+        // Render each effect
+        int removeIdx = -1;
+        for (int e = 0; e < (int)layer->effects.size(); e++) {
+            auto& fx = layer->effects[e];
+            ImGui::PushID(20000 + e);
+
+            // Effect header row: checkbox + name + remove
+            ImGui::Checkbox("##en", &fx.enabled);
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Text, fx.enabled ? ImVec4(0.85f, 0.90f, 0.95f, 1.0f) : ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+            ImGui::Text("%s", effectTypeName(fx.type));
+            ImGui::PopStyleColor();
+            ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - 20);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.3f, 0.3f, 0.7f));
+            if (ImGui::SmallButton("x")) removeIdx = e;
+            ImGui::PopStyleColor();
+
+            if (fx.enabled) {
+                float w = ImGui::GetContentRegionAvail().x;
+                switch (fx.type) {
+                case EffectType::Blur:
+                    ImGui::SetNextItemWidth(w);
+                    ImGui::SliderFloat("##blur", &fx.blurRadius, 0.0f, 20.0f, "Blur %.1f");
+                    break;
+                case EffectType::ColorAdjust: {
+                    float half = (w - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+                    ImGui::SetNextItemWidth(half);
+                    ImGui::SliderFloat("##brt", &fx.brightness, -1.0f, 1.0f, "Brt %.2f");
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(half);
+                    ImGui::SliderFloat("##ctr", &fx.contrast, -1.0f, 1.0f, "Ctr %.2f");
+                    ImGui::SetNextItemWidth(half);
+                    ImGui::SliderFloat("##sat", &fx.saturation, -1.0f, 1.0f, "Sat %.2f");
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(half);
+                    ImGui::SliderFloat("##hue", &fx.hueShift, 0.0f, 360.0f, "Hue %.0f");
+                    break;
+                }
+                case EffectType::Invert:
+                    // No params
+                    break;
+                case EffectType::Pixelate:
+                    ImGui::SetNextItemWidth(w);
+                    ImGui::SliderFloat("##pix", &fx.pixelSize, 1.0f, 64.0f, "Size %.0f");
+                    break;
+                case EffectType::Feedback: {
+                    float half = (w - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+                    ImGui::SetNextItemWidth(half);
+                    ImGui::SliderFloat("##fbmix", &fx.feedbackMix, 0.0f, 0.99f, "Mix %.2f");
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(half);
+                    ImGui::SliderFloat("##fbzm", &fx.feedbackZoom, 0.95f, 1.1f, "Zoom %.3f");
+                    break;
+                }
+                default: break;
+                }
+            }
+
+            ImGui::PopID();
+        }
+
+        if (removeIdx >= 0) {
+            layer->effects.erase(layer->effects.begin() + removeIdx);
+            undoNeeded = true;
+        }
+
+        if (!layer->effects.empty()) {
+            ImGui::Dummy(ImVec2(0, 2));
+        }
+    }
 
     // --- Mosaic mode ---
     {

@@ -1,5 +1,6 @@
 #pragma once
 #include "compositing/BlendMode.h"
+#include "compositing/LayerEffect.h"
 #include "compositing/MaskPath.h"
 #include "sources/ContentSource.h"
 #include "render/Texture.h"
@@ -78,6 +79,19 @@ public:
     float cropLeft = 0.0f, cropRight = 0.0f;
     bool autoCrop = true;     // auto-detect and remove black borders
     bool autoCropDone = false; // already ran for current source
+
+    // Per-layer effects chain
+    std::vector<LayerEffect> effects;
+
+    // Audio-reactive property bindings
+    // Each binding modulates a property by an audio signal
+    enum class AudioTarget { None=0, Opacity, PositionX, PositionY, Scale, Rotation, COUNT };
+    struct AudioBinding {
+        AudioTarget target = AudioTarget::None;
+        int signal = 0;       // 0=bass, 1=mid, 2=high, 3=beat
+        float strength = 0.5f; // how much to modulate
+    };
+    std::vector<AudioBinding> audioBindings;
 
     // Content source
     std::shared_ptr<ContentSource> source;
