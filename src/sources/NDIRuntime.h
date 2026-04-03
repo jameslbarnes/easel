@@ -11,7 +11,7 @@ public:
     static NDIRuntime& instance();
 
     bool isAvailable() const { return m_loaded; }
-    const NDIlib_api* api() const { return m_loaded ? m_pApi : nullptr; }
+    const NDIlib_v6* api() const { return m_loaded ? m_pApi : nullptr; }
 
     bool init();
     void shutdown();
@@ -22,7 +22,7 @@ private:
     NDIRuntime(const NDIRuntime&) = delete;
     NDIRuntime& operator=(const NDIRuntime&) = delete;
 
-    const NDIlib_api* m_pApi = nullptr;
+    const NDIlib_v6* m_pApi = nullptr;
     bool m_loaded = false;
     bool m_initialized = false;
 };

@@ -769,8 +769,6 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
         maskEditMode = false;
     }
 
-    } // end Effects section
-
     // --- Video controls ---
     if (layer->source && layer->source->isVideo()) {
         thinSep();

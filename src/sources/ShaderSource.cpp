@@ -213,6 +213,7 @@ std::string ShaderSource::translateFragment(const std::string& isfBody) {
 
     // ISF built-in uniforms
     out << "uniform float TIME;\n";
+    out << "uniform float TIMEDELTA;\n";
     out << "uniform vec2 RENDERSIZE;\n";
     out << "uniform int PASSINDEX;\n";
     out << "uniform int FRAMEINDEX;\n";
@@ -610,7 +611,10 @@ void ShaderSource::uploadUniforms(int passIndex, int passWidth, int passHeight) 
     if (passHeight <= 0) passHeight = m_height;
 
     // ISF built-ins
-    m_shader.setFloat("TIME", (float)glfwGetTime());
+    float now = (float)glfwGetTime();
+    m_shader.setFloat("TIME", now);
+    m_shader.setFloat("TIMEDELTA", now - m_lastTime);
+    m_lastTime = now;
     m_shader.setVec2("RENDERSIZE", glm::vec2((float)passWidth, (float)passHeight));
     m_shader.setInt("PASSINDEX", passIndex);
     m_shader.setInt("FRAMEINDEX", m_frameIndex);

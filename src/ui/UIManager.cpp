@@ -1,4 +1,5 @@
 #include "ui/UIManager.h"
+#include <algorithm>
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <imgui_impl_glfw.h>
@@ -282,11 +283,14 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         ImGuiID rightTopId, rightBottomId;
         ImGui::DockBuilderSplitNode(rightId, ImGuiDir_Up, 0.45f, &rightTopId, &rightBottomId);
 
-        // Set minimum sizes on right panels
+        // Set panel sizes proportionally (responsive to window size)
+        float rightW = dockSize.x * 0.30f;
+        float rightTopH = dockSize.y * 0.45f;
+        float rightBotH = dockSize.y * 0.55f;
         ImGuiDockNode* rightTopNode = ImGui::DockBuilderGetNode(rightTopId);
         ImGuiDockNode* rightBottomNode = ImGui::DockBuilderGetNode(rightBottomId);
-        if (rightTopNode) rightTopNode->SizeRef = ImVec2(320, 200);
-        if (rightBottomNode) rightBottomNode->SizeRef = ImVec2(320, 250);
+        if (rightTopNode) rightTopNode->SizeRef = ImVec2(std::max(280.0f, rightW), rightTopH);
+        if (rightBottomNode) rightBottomNode->SizeRef = ImVec2(std::max(280.0f, rightW), rightBotH);
 
         // Dock windows into regions
         ImGui::DockBuilderDockWindow("Projector Preview", leftId);

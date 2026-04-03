@@ -16,14 +16,55 @@ NDIRuntime& NDIRuntime::instance() {
     return s;
 }
 
-// Load NDI runtime via our custom dynamic loader (Processing.NDI.DynamicLoad.h)
-static NDIlib_api s_ndiApi;
+// Manually load NDI runtime DLL and get the v6 API struct
+static const NDIlib_v6* loadNDIRuntime() {
+#ifdef _WIN32
+    // Try to find NDI runtime DLL
+    const char* paths[] = {
+        "Processing.NDI.Lib.x64.dll",
+        "C:\\Program Files\\NDI\\NDI 6 Runtime\\Processing.NDI.Lib.x64.dll",
+        "C:\\Program Files\\NDI\\NDI 5 Runtime\\Processing.NDI.Lib.x64.dll",
+    };
 
-static const NDIlib_api* loadNDIRuntime() {
-    if (NDIlib_load(&s_ndiApi)) {
-        return &s_ndiApi;
+    // Also check NDI_RUNTIME_DIR environment variable
+    HMODULE hNDI = nullptr;
+    char envBuf[512] = {};
+    if (GetEnvironmentVariableA("NDI_RUNTIME_DIR_V6", envBuf, sizeof(envBuf)) > 0 ||
+        GetEnvironmentVariableA("NDI_RUNTIME_DIR_V5", envBuf, sizeof(envBuf)) > 0) {
+        std::string dllPath = std::string(envBuf) + "\\Processing.NDI.Lib.x64.dll";
+        hNDI = LoadLibraryA(dllPath.c_str());
     }
+
+    if (!hNDI) {
+        for (const char* path : paths) {
+            hNDI = LoadLibraryA(path);
+            if (hNDI) break;
+        }
+    }
+
+    if (!hNDI) {
+        std::cout << "[NDI] Could not load Processing.NDI.Lib.x64.dll" << std::endl;
+        return nullptr;
+    }
+
+    // Get the load function
+    typedef const NDIlib_v6* (*NDIlib_v6_load_fn)(void);
+    auto loadFn = (NDIlib_v6_load_fn)GetProcAddress(hNDI, "NDIlib_v6_load");
+    if (!loadFn) {
+        // Try v5
+        typedef const NDIlib_v6* (*NDIlib_v5_load_fn)(void);
+        loadFn = (NDIlib_v6_load_fn)GetProcAddress(hNDI, "NDIlib_v5_load");
+    }
+
+    if (!loadFn) {
+        std::cout << "[NDI] Could not find NDIlib_v6_load in DLL" << std::endl;
+        return nullptr;
+    }
+
+    return loadFn();
+#else
     return nullptr;
+#endif
 }
 
 bool NDIRuntime::init() {
@@ -48,12 +89,11 @@ bool NDIRuntime::init() {
 }
 
 void NDIRuntime::shutdown() {
-    if (m_loaded && m_pApi && m_pApi->destroy) {
+    if (m_loaded && m_pApi) {
         m_pApi->destroy();
     }
-    m_pApi = nullptr;
     m_loaded = false;
-    m_initialized = false;
+    m_pApi = nullptr;
 }
 
 #endif // HAS_NDI

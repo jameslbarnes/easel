@@ -156,6 +156,7 @@ private:
     std::string m_path;
     bool m_initialized = false;
     int m_frameIndex = 0;
+    float m_lastTime = 0;
 
     // ISF metadata
     std::string m_description;
