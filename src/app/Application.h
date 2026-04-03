@@ -39,6 +39,7 @@
 #include "app/OSCManager.h"
 #include "app/MIDIManager.h"
 #include "app/DataBus.h"
+#include "stage/StageView.h"
 
 #ifdef HAS_NDI
 #include "sources/NDISource.h"
@@ -101,6 +102,7 @@ private:
     SceneManager m_sceneManager;
     OSCManager m_oscManager;
     MIDIManager m_midiManager;
+    StageView m_stageView;
     float m_audioRMS = 0; // backward compat: smoothed audio level
     int m_mosaicAudioDevice = -1; // -1 = system loopback, >=0 = index into device list
     bool m_projectorAutoConnect = false;

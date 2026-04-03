@@ -290,6 +290,7 @@ void UIManager::setupDockspace(float bottomBarHeight) {
 
         // Dock windows into regions
         ImGui::DockBuilderDockWindow("Projector Preview", leftId);
+        ImGui::DockBuilderDockWindow("Stage", leftId);
         ImGui::DockBuilderDockWindow("Stream", leftId);
         ImGui::DockBuilderDockWindow("Capture", leftId);
         ImGui::DockBuilderDockWindow("Warp", leftId);
