@@ -264,3 +264,20 @@ void MaskPath::makeStar(glm::vec2 center, float outerRadius, float innerRadius, 
     m_closed = true;
     m_dirty = true;
 }
+
+void MaskPath::makePolygon(glm::vec2 center, float radius, int sides) {
+    m_points.clear();
+    const float pi = 3.14159265f;
+    for (int i = 0; i < sides; i++) {
+        float angle = (float)i * (2.0f * pi / sides) - pi * 0.5f;
+        MaskPoint pt;
+        pt.position = {center.x + cosf(angle) * radius,
+                       center.y + sinf(angle) * radius};
+        pt.handleIn = glm::vec2(0.0f);
+        pt.handleOut = glm::vec2(0.0f);
+        pt.smooth = false;
+        m_points.push_back(pt);
+    }
+    m_closed = true;
+    m_dirty = true;
+}

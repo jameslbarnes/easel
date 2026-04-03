@@ -265,37 +265,42 @@ void UIManager::setupDockspace(float bottomBarHeight) {
     ImGuiID dockspaceId = ImGui::GetID("EaselDockSpace");
     ImGui::DockSpace(dockspaceId, ImVec2(0, 0), ImGuiDockNodeFlags_PassthruCentralNode);
 
-    // Build default layout on first frame (or when no layout saved)
+    // Build default layout on first frame
     if (m_firstFrame) {
         m_firstFrame = false;
 
-        // Only build if the dockspace has no saved layout
-        if (ImGui::DockBuilderGetNode(dockspaceId) == nullptr ||
-            ImGui::DockBuilderGetNode(dockspaceId)->IsLeafNode()) {
+        // Always rebuild layout to ensure clean state
+        ImGui::DockBuilderRemoveNode(dockspaceId);
+        ImGui::DockBuilderAddNode(dockspaceId, ImGuiDockNodeFlags_DockSpace);
+        ImGui::DockBuilderSetNodeSize(dockspaceId, dockSize);
 
-            ImGui::DockBuilderRemoveNode(dockspaceId);
-            ImGui::DockBuilderAddNode(dockspaceId, ImGuiDockNodeFlags_DockSpace);
-            ImGui::DockBuilderSetNodeSize(dockspaceId, ImGui::GetMainViewport()->WorkSize);
+        // Split: left 70% = preview, right 30% = panels
+        ImGuiID leftId, rightId;
+        ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Left, 0.70f, &leftId, &rightId);
 
-            // Split: left 65% = preview, right 35% = panels
-            ImGuiID leftId, rightId;
-            ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Left, 0.65f, &leftId, &rightId);
+        // Split right side: top 45% = Layers, bottom 55% = Properties
+        ImGuiID rightTopId, rightBottomId;
+        ImGui::DockBuilderSplitNode(rightId, ImGuiDir_Up, 0.45f, &rightTopId, &rightBottomId);
 
-            // Split right side: top half = Layers, bottom half = Properties
-            ImGuiID rightTopId, rightBottomId;
-            ImGui::DockBuilderSplitNode(rightId, ImGuiDir_Up, 0.5f, &rightTopId, &rightBottomId);
+        // Set minimum sizes on right panels
+        ImGuiDockNode* rightTopNode = ImGui::DockBuilderGetNode(rightTopId);
+        ImGuiDockNode* rightBottomNode = ImGui::DockBuilderGetNode(rightBottomId);
+        if (rightTopNode) rightTopNode->SizeRef = ImVec2(320, 200);
+        if (rightBottomNode) rightBottomNode->SizeRef = ImVec2(320, 250);
 
-            // Dock windows into regions
-            ImGui::DockBuilderDockWindow("Projector Preview", leftId);
-            ImGui::DockBuilderDockWindow("Layers", rightTopId);
-            ImGui::DockBuilderDockWindow("Properties", rightBottomId);
-            ImGui::DockBuilderDockWindow("Warp", rightTopId);
-            ImGui::DockBuilderDockWindow("Projector", rightTopId);
-            ImGui::DockBuilderDockWindow("Capture", rightTopId);
-            ImGui::DockBuilderDockWindow("ShaderClaw", rightTopId);
+        // Dock windows into regions
+        ImGui::DockBuilderDockWindow("Projector Preview", leftId);
+        ImGui::DockBuilderDockWindow("Stream", leftId);
+        ImGui::DockBuilderDockWindow("Capture", leftId);
+        ImGui::DockBuilderDockWindow("Warp", leftId);
+        ImGui::DockBuilderDockWindow("Layers", rightTopId);
+        ImGui::DockBuilderDockWindow("ShaderClaw", rightTopId);
+        ImGui::DockBuilderDockWindow("Etherea", rightTopId);
+        ImGui::DockBuilderDockWindow("NDI", rightTopId);
+        ImGui::DockBuilderDockWindow("Projector", leftId);
+        ImGui::DockBuilderDockWindow("Properties", rightBottomId);
 
-            ImGui::DockBuilderFinish(dockspaceId);
-        }
+        ImGui::DockBuilderFinish(dockspaceId);
     }
 
     ImGui::End();

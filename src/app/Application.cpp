@@ -89,10 +89,19 @@ bool Application::init() {
         return false;
     }
 
-    // Set window icon
+    // Set window icon (search multiple paths since exe may be in build/Release/)
     {
         int iw, ih, ic;
-        unsigned char* iconData = stbi_load("resources/icon.png", &iw, &ih, &ic, 4);
+        const char* iconPaths[] = {
+            "resources/icon.png",
+            "../../resources/icon.png",   // from build/Release/
+            "../resources/icon.png",      // from build/
+        };
+        unsigned char* iconData = nullptr;
+        for (const char* path : iconPaths) {
+            iconData = stbi_load(path, &iw, &ih, &ic, 4);
+            if (iconData) break;
+        }
         if (iconData) {
             GLFWimage icon = { iw, ih, iconData };
             glfwSetWindowIcon(m_window, 1, &icon);
@@ -920,7 +929,7 @@ void Application::renderUI() {
     handleDroppedFiles();
 
 #ifdef HAS_FFMPEG
-    float transportBarH = 110.0f;
+    float transportBarH = 56.0f;
 #else
     float transportBarH = 0.0f;
 #endif
@@ -1022,7 +1031,7 @@ void Application::renderUI() {
         capturedPre = true;
     }
 
-    m_propertyPanel.render(selectedLayer, m_maskEditMode, &m_speechState, &mosaicAudio, (float)glfwGetTime(), &m_layerStack);
+    m_propertyPanel.render(selectedLayer, m_maskEditMode, &m_speechState, &mosaicAudio, (float)glfwGetTime(), &m_layerStack, &m_bpmSync);
 
     // If a property widget was just activated, push the pre-edit state (before the widget changed it)
     if (m_propertyPanel.undoNeeded) {
@@ -1809,17 +1818,28 @@ void Application::updateAudioMeter() {
 
 void Application::renderTransportBar() {
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    float barH = 110.0f;
+    float barH = 56.0f;
     ImVec2 barPos(vp->WorkPos.x, vp->WorkPos.y + vp->WorkSize.y - barH);
     ImVec2 barSize(vp->WorkSize.x, barH);
 
+    // Color palette: cyan accent + neutral gray
+    const ImU32 kAccent     = IM_COL32(0, 200, 255, 255);
+    const ImU32 kAccentDim  = IM_COL32(0, 200, 255, 100);
+    const ImU32 kAccentBg   = IM_COL32(0, 200, 255, 15);
+    const ImU32 kAccentHov  = IM_COL32(0, 200, 255, 30);
+    const ImU32 kText       = IM_COL32(200, 210, 225, 255);
+    const ImU32 kTextDim    = IM_COL32(100, 115, 140, 180);
+    const ImU32 kDivider    = IM_COL32(255, 255, 255, 15);
+    const ImU32 kRed        = IM_COL32(255, 70, 70, 255);
+    const ImU32 kRedDim     = IM_COL32(255, 70, 70, 100);
+
     ImGui::SetNextWindowPos(barPos);
     ImGui::SetNextWindowSize(barSize);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(20, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(16, 6));
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.035f, 0.040f, 0.055f, 1.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(12, 4));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.028f, 0.032f, 0.045f, 1.0f));
 
     ImGui::Begin("##TransportBar", nullptr,
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
@@ -1829,69 +1849,41 @@ void Application::renderTransportBar() {
     ImDrawList* draw = ImGui::GetWindowDrawList();
     auto& zone = activeZone();
     float time = (float)ImGui::GetTime();
-
-    // Update audio levels
     updateAudioMeter();
 
-    // Top edge — subtle gradient line
-    for (int i = 0; i < (int)barSize.x; i++) {
-        float t = (float)i / barSize.x;
-        int alpha = (int)(20.0f + 15.0f * sinf(t * 3.14159f));
-        draw->AddLine(ImVec2(barPos.x + i, barPos.y),
-                      ImVec2(barPos.x + i + 1, barPos.y),
-                      IM_COL32(0, 200, 255, alpha));
-    }
-    draw->AddLine(ImVec2(barPos.x, barPos.y + 1),
-                  ImVec2(barPos.x + barSize.x, barPos.y + 1),
-                  IM_COL32(0, 0, 0, 100));
+    // Top border line
+    draw->AddLine(ImVec2(barPos.x, barPos.y), ImVec2(barPos.x + barSize.x, barPos.y), kDivider);
 
-    // Sizes for the big buttons
-    float bigBtnH = 60.0f;
-    float bigBtnRound = 8.0f;
-    float padTop = (barH - bigBtnH) * 0.5f;
+    float btnH = 32.0f;
+    float btnR = 5.0f;
+    float cy = barPos.y + (barH - btnH) * 0.5f;
 
-    // ════════════════════════════════════════════════
-    //  RECORD BUTTON (left)
-    // ════════════════════════════════════════════════
-    ImGui::SetCursorPos(ImVec2(20, padTop));
+    // Helper: draw a transport button
+    auto transportBtn = [&](const char* id, const char* label, float x, float w,
+                            ImU32 borderCol, ImU32 textCol, bool enabled = true) -> bool {
+        ImGui::SetCursorScreenPos(ImVec2(x, cy));
+        if (!enabled) ImGui::BeginDisabled();
+        ImGui::InvisibleButton(id, ImVec2(w, btnH));
+        bool hov = ImGui::IsItemHovered(), clicked = ImGui::IsItemClicked();
+        if (!enabled) ImGui::EndDisabled();
+        ImVec2 mn(x, cy), mx(x + w, cy + btnH);
+        draw->AddRectFilled(mn, mx, hov ? kAccentHov : kAccentBg, btnR);
+        draw->AddRect(mn, mx, borderCol, btnR, 0, 1.0f);
+        ImVec2 ts = ImGui::CalcTextSize(label);
+        draw->AddText(ImVec2(x + (w - ts.x) * 0.5f, cy + (btnH - ts.y) * 0.5f), textCol, label);
+        return clicked && enabled;
+    };
 
+    // Helper: vertical divider
+    auto divider = [&](float x) {
+        draw->AddLine(ImVec2(x, barPos.y + 12), ImVec2(x, barPos.y + barH - 12), kDivider);
+    };
+
+    float curX = barPos.x + 16;
+
+    // ── REC ──
     if (!m_recorder.isActive()) {
-        float btnW = 140.0f;
-        ImVec2 btnMin = ImGui::GetCursorScreenPos();
-        ImVec2 btnMax(btnMin.x + btnW, btnMin.y + bigBtnH);
-        ImGui::InvisibleButton("##RecBtn", ImVec2(btnW, bigBtnH));
-        bool hovered = ImGui::IsItemHovered();
-        bool held = ImGui::IsItemActive();
-
-        // Gradient-like background
-        ImU32 btnBg = held ? IM_COL32(180, 30, 30, 80) :
-                      hovered ? IM_COL32(150, 25, 25, 55) :
-                                IM_COL32(100, 12, 12, 35);
-        draw->AddRectFilled(btnMin, btnMax, btnBg, bigBtnRound);
-        draw->AddRect(btnMin, btnMax,
-                      IM_COL32(220, 60, 60, hovered ? 140 : 70), bigBtnRound, 0, 1.5f);
-
-        // Glow on hover
-        if (hovered) {
-            draw->AddRect(ImVec2(btnMin.x - 1, btnMin.y - 1), ImVec2(btnMax.x + 1, btnMax.y + 1),
-                          IM_COL32(255, 60, 60, 25), bigBtnRound + 1, 0, 3.0f);
-        }
-
-        // Big red circle icon
-        float iconX = btnMin.x + 30;
-        float iconY = btnMin.y + bigBtnH * 0.5f;
-        draw->AddCircleFilled(ImVec2(iconX, iconY), 12.0f, IM_COL32(220, 45, 45, 230));
-        draw->AddCircle(ImVec2(iconX, iconY), 12.0f, IM_COL32(255, 100, 100, 80), 0, 1.5f);
-        draw->AddCircle(ImVec2(iconX, iconY), 15.0f, IM_COL32(255, 60, 60, 30), 0, 1.0f);
-
-        // Label
-        const char* recLabel = "REC";
-        ImVec2 textSize = ImGui::CalcTextSize(recLabel);
-        draw->AddText(ImGui::GetFont(), ImGui::GetFontSize() * 1.1f,
-                      ImVec2(btnMin.x + 52, btnMin.y + (bigBtnH - ImGui::GetFontSize() * 1.1f) * 0.5f),
-                      IM_COL32(230, 85, 85, 255), recLabel);
-
-        if (ImGui::IsItemClicked()) {
+        if (transportBtn("##Rec", "REC", curX, 64, kRedDim, kRed)) {
             auto now = std::chrono::system_clock::now();
             auto t = std::chrono::system_clock::to_time_t(now);
             struct tm tm_buf;
@@ -1901,420 +1893,98 @@ void Application::renderTransportBar() {
             m_recorder.setAudioDevice(m_selectedAudioDevice);
             m_recorder.start(fname, zone.warpFBO.width(), zone.warpFBO.height(), 30);
         }
+        // Rec dot
+        draw->AddCircleFilled(ImVec2(curX + 14, cy + btnH * 0.5f), 4.0f, kRed);
     } else {
-        // ── Recording active ──
+        // Recording active: show timer + stop
         float pulse = 0.5f + 0.5f * sinf(time * 4.0f);
-
-        // Flashing rec indicator
-        float dotX = barPos.x + 35, dotY = barPos.y + barH * 0.5f;
-        draw->AddCircleFilled(ImVec2(dotX, dotY), 10.0f, IM_COL32(255, 40, 40, (int)(pulse * 255)));
-        draw->AddCircle(ImVec2(dotX, dotY), 13.0f, IM_COL32(255, 40, 40, (int)(pulse * 70)), 0, 1.5f);
-        draw->AddCircle(ImVec2(dotX, dotY), 17.0f, IM_COL32(255, 40, 40, (int)(pulse * 25)), 0, 1.0f);
-
-        // Timer text (large)
+        draw->AddCircleFilled(ImVec2(curX + 8, cy + btnH * 0.5f), 5.0f, IM_COL32(255, 70, 70, (int)(pulse * 255)));
         int secs = (int)m_recorder.uptimeSeconds();
         char timeBuf[16];
         snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d:%02d", secs / 3600, (secs / 60) % 60, secs % 60);
-        float timerFontSize = ImGui::GetFontSize() * 1.3f;
-        ImVec2 timerPos(dotX + 22, barPos.y + (barH - timerFontSize) * 0.5f);
-        draw->AddText(ImGui::GetFont(), timerFontSize, timerPos,
-                      IM_COL32(255, 90, 90, 255), timeBuf);
-        float timerW = ImGui::GetFont()->CalcTextSizeA(timerFontSize, FLT_MAX, 0, timeBuf).x;
-
-        // Stop button
-        float stopX = timerPos.x + timerW + 20;
-        ImGui::SetCursorScreenPos(ImVec2(stopX, barPos.y + padTop));
-        float stopW = 100.0f;
-        ImVec2 stopMin(stopX, barPos.y + padTop);
-        ImVec2 stopMax(stopX + stopW, barPos.y + padTop + bigBtnH);
-        ImGui::InvisibleButton("##StopRec", ImVec2(stopW, bigBtnH));
-        bool sh = ImGui::IsItemHovered(), sa = ImGui::IsItemActive();
-        ImU32 stopBg = sa ? IM_COL32(180, 30, 30, 80) : sh ? IM_COL32(140, 20, 20, 55) : IM_COL32(80, 12, 12, 35);
-        draw->AddRectFilled(stopMin, stopMax, stopBg, bigBtnRound);
-        draw->AddRect(stopMin, stopMax, IM_COL32(200, 60, 60, sh ? 140 : 70), bigBtnRound, 0, 1.5f);
-
-        // Square stop icon
-        float sqSz = 10.0f;
-        float sqX = stopMin.x + 22, sqY = stopMin.y + (bigBtnH - sqSz) * 0.5f;
-        draw->AddRectFilled(ImVec2(sqX, sqY), ImVec2(sqX + sqSz, sqY + sqSz),
-                            IM_COL32(220, 70, 70, 230), 2.0f);
-        draw->AddText(ImGui::GetFont(), ImGui::GetFontSize() * 1.1f,
-                      ImVec2(stopMin.x + 40, stopMin.y + (bigBtnH - ImGui::GetFontSize() * 1.1f) * 0.5f),
-                      IM_COL32(220, 95, 95, 255), "Stop");
-
-        if (ImGui::IsItemClicked()) {
+        draw->AddText(ImVec2(curX + 18, cy + (btnH - ImGui::GetTextLineHeight()) * 0.5f), kText, timeBuf);
+        if (transportBtn("##StopRec", "STOP", curX + 90, 50, kRedDim, kRed)) {
             m_recorder.stop();
         }
     }
+    curX += 80;
 
-    // ════════════════════════════════════════════════
-    //  DIVIDER 1
-    // ════════════════════════════════════════════════
-    ImGui::SameLine(0, 20);
+    divider(curX); curX += 12;
+
+    // ── AUDIO METER (compact) ──
     {
-        ImVec2 p = ImGui::GetCursorScreenPos();
-        float divTop = barPos.y + 18;
-        float divBot = barPos.y + barH - 18;
-        draw->AddLine(ImVec2(p.x, divTop), ImVec2(p.x, divBot), IM_COL32(255, 255, 255, 20));
-        draw->AddLine(ImVec2(p.x + 1, divTop), ImVec2(p.x + 1, divBot), IM_COL32(0, 0, 0, 40));
-        ImGui::Dummy(ImVec2(4, bigBtnH));
-    }
+        float meterW = 100.0f, meterH = 14.0f;
+        float meterY = cy + (btnH - meterH) * 0.5f;
+        float gap = 2.0f, singleH = (meterH - gap) * 0.5f;
 
-    // ════════════════════════════════════════════════
-    //  AUDIO SOURCE (center section)
-    // ════════════════════════════════════════════════
-    ImGui::SameLine(0, 16);
+        // Lazy-init
+        if (m_audioDevices.empty()) m_audioDevices = VideoRecorder::enumerateAudioDevices();
 
-    // Lazy-init device list
-    if (m_audioDevices.empty()) {
-        m_audioDevices = VideoRecorder::enumerateAudioDevices();
-    }
-
-    std::string audioPreview = "System Audio";
-    if (m_selectedAudioDevice >= 0 && m_selectedAudioDevice < (int)m_audioDevices.size()) {
-        audioPreview = m_audioDevices[m_selectedAudioDevice].name;
-        if (audioPreview.length() > 30) audioPreview = audioPreview.substr(0, 27) + "...";
-    }
-
-    // Audio section: speaker icon + combo, single row centered
-    {
-        ImVec2 sectionStart = ImGui::GetCursorScreenPos();
-        float iconCY = barPos.y + barH * 0.5f;
-        float iconX = sectionStart.x;
-
-        // Speaker icon (larger)
-        draw->AddRectFilled(ImVec2(iconX, iconCY - 6), ImVec2(iconX + 7, iconCY + 6),
-                            IM_COL32(120, 140, 170, 200), 1.0f);
-        draw->AddTriangleFilled(
-            ImVec2(iconX + 7, iconCY - 6), ImVec2(iconX + 18, iconCY - 12), ImVec2(iconX + 18, iconCY + 12),
-            IM_COL32(120, 140, 170, 200));
-        draw->AddTriangleFilled(
-            ImVec2(iconX + 7, iconCY - 6), ImVec2(iconX + 7, iconCY + 6), ImVec2(iconX + 18, iconCY + 12),
-            IM_COL32(120, 140, 170, 200));
-        draw->AddBezierQuadratic(
-            ImVec2(iconX + 21, iconCY - 8), ImVec2(iconX + 27, iconCY), ImVec2(iconX + 21, iconCY + 8),
-            IM_COL32(120, 140, 170, 120), 1.8f);
-        draw->AddBezierQuadratic(
-            ImVec2(iconX + 24, iconCY - 12), ImVec2(iconX + 32, iconCY), ImVec2(iconX + 24, iconCY + 12),
-            IM_COL32(120, 140, 170, 70), 1.5f);
-
-        // Combo next to icon, vertically centered
-        float comboH = ImGui::GetFrameHeight() + 8; // with extra padding
-        ImGui::SetCursorScreenPos(ImVec2(iconX + 38, barPos.y + (barH - comboH) * 0.5f));
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.06f, 0.07f, 0.09f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.09f, 0.10f, 0.14f, 1.0f));
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12, 10));
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
-        ImGui::SetNextItemWidth(240);
-        if (ImGui::BeginCombo("##AudioSrc", audioPreview.c_str(), ImGuiComboFlags_HeightLarge)) {
-            if (ImGui::Selectable("System Audio (loopback)", m_selectedAudioDevice == -1)) {
-                m_selectedAudioDevice = -1;
-            }
+        // Audio source dropdown (compact)
+        ImGui::SetCursorScreenPos(ImVec2(curX, cy + 2));
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.05f, 0.06f, 0.08f, 0.9f));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8, 6));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
+        std::string audioPreview = "System Audio";
+        if (m_selectedAudioDevice >= 0 && m_selectedAudioDevice < (int)m_audioDevices.size()) {
+            audioPreview = m_audioDevices[m_selectedAudioDevice].name;
+            if (audioPreview.length() > 20) audioPreview = audioPreview.substr(0, 17) + "...";
+        }
+        ImGui::SetNextItemWidth(150);
+        if (ImGui::BeginCombo("##AudioSrc", audioPreview.c_str())) {
+            if (ImGui::Selectable("System Audio", m_selectedAudioDevice == -1)) m_selectedAudioDevice = -1;
             for (int i = 0; i < (int)m_audioDevices.size(); i++) {
                 ImGui::PushID(i);
-                std::string label = m_audioDevices[i].name;
-                if (label.length() > 50) label = label.substr(0, 47) + "...";
-                if (ImGui::Selectable(label.c_str(), m_selectedAudioDevice == i)) {
+                if (ImGui::Selectable(m_audioDevices[i].name.c_str(), m_selectedAudioDevice == i))
                     m_selectedAudioDevice = i;
-                }
                 ImGui::PopID();
             }
-            ImGui::Separator();
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.78f, 1.0f, 0.8f));
-            if (ImGui::Selectable("Refresh devices...")) {
-                m_audioDevices = VideoRecorder::enumerateAudioDevices();
-            }
-            ImGui::PopStyleColor();
             ImGui::EndCombo();
         }
         ImGui::PopStyleVar(2);
-        ImGui::PopStyleColor(2);
+        ImGui::PopStyleColor();
 
-        // ── Level meter (stereo bars) ──
-        ImGui::SameLine(0, 14);
-        {
-            ImVec2 meterStart = ImGui::GetCursorScreenPos();
-            float meterW = 160.0f;
-            float meterTotalH = 20.0f; // total height for both bars
-            float barGap = 3.0f;
-            float singleH = (meterTotalH - barGap) * 0.5f;
-            float meterY = barPos.y + (barH - meterTotalH) * 0.5f;
+        curX += 164;
 
-            // Background tracks
-            ImU32 trackBg = IM_COL32(20, 22, 30, 200);
-            draw->AddRectFilled(ImVec2(meterStart.x, meterY),
-                                ImVec2(meterStart.x + meterW, meterY + singleH), trackBg, 2.0f);
-            draw->AddRectFilled(ImVec2(meterStart.x, meterY + singleH + barGap),
-                                ImVec2(meterStart.x + meterW, meterY + meterTotalH), trackBg, 2.0f);
+        // Stereo meter bars (cyan only)
+        ImU32 trackBg = IM_COL32(20, 24, 35, 200);
+        draw->AddRectFilled(ImVec2(curX, meterY), ImVec2(curX + meterW, meterY + singleH), trackBg, 2.0f);
+        draw->AddRectFilled(ImVec2(curX, meterY + singleH + gap), ImVec2(curX + meterW, meterY + meterH), trackBg, 2.0f);
 
-            // Draw filled level for each channel
-            auto drawBar = [&](float level, float y, float h) {
-                float fillW = level * meterW;
-                if (fillW < 1.0f) fillW = 1.0f;
+        float fillL = m_audioLevelSmoothL * meterW;
+        float fillR = m_audioLevelSmoothR * meterW;
+        draw->AddRectFilled(ImVec2(curX, meterY), ImVec2(curX + fillL, meterY + singleH), kAccentDim, 2.0f);
+        draw->AddRectFilled(ImVec2(curX, meterY + singleH + gap), ImVec2(curX + fillR, meterY + meterH), kAccentDim, 2.0f);
 
-                // Gradient: green -> yellow -> red
-                int segments = (int)(fillW / 2.0f);
-                if (segments < 1) segments = 1;
-                for (int s = 0; s < segments; s++) {
-                    float t = (float)s / (meterW / 2.0f);
-                    float x0 = meterStart.x + s * 2.0f;
-                    float x1 = x0 + 1.5f;
-                    if (x1 > meterStart.x + fillW) break;
-
-                    int r, g, b;
-                    if (t < 0.6f) {
-                        // Green
-                        r = 30; g = 200; b = 80;
-                    } else if (t < 0.8f) {
-                        // Yellow
-                        float blend = (t - 0.6f) / 0.2f;
-                        r = (int)(30 + 220 * blend);
-                        g = (int)(200 + 20 * blend);
-                        b = (int)(80 - 40 * blend);
-                    } else {
-                        // Red
-                        float blend = (t - 0.8f) / 0.2f;
-                        r = (int)(250);
-                        g = (int)(220 - 180 * blend);
-                        b = (int)(40);
-                    }
-                    draw->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y + h),
-                                        IM_COL32(r, g, b, 220), 0.0f);
-                }
-            };
-
-            drawBar(m_audioLevelSmoothL, meterY, singleH);
-            drawBar(m_audioLevelSmoothR, meterY + singleH + barGap, singleH);
-
-            // Thin border
-            draw->AddRect(ImVec2(meterStart.x, meterY),
-                          ImVec2(meterStart.x + meterW, meterY + singleH),
-                          IM_COL32(60, 70, 90, 80), 2.0f);
-            draw->AddRect(ImVec2(meterStart.x, meterY + singleH + barGap),
-                          ImVec2(meterStart.x + meterW, meterY + meterTotalH),
-                          IM_COL32(60, 70, 90, 80), 2.0f);
-
-            // L/R labels
-            draw->AddText(ImVec2(meterStart.x - 12, meterY - 1),
-                          IM_COL32(100, 115, 140, 150), "L");
-            draw->AddText(ImVec2(meterStart.x - 12, meterY + singleH + barGap - 1),
-                          IM_COL32(100, 115, 140, 150), "R");
-
-            ImGui::Dummy(ImVec2(meterW + 4, bigBtnH));
-        }
+        curX += meterW + 12;
     }
 
-    // ════════════════════════════════════════════════
-    //  DIVIDER 2
-    // ════════════════════════════════════════════════
-    ImGui::SameLine(0, 20);
-    {
-        ImVec2 p = ImGui::GetCursorScreenPos();
-        float divTop = barPos.y + 18;
-        float divBot = barPos.y + barH - 18;
-        draw->AddLine(ImVec2(p.x, divTop), ImVec2(p.x, divBot), IM_COL32(255, 255, 255, 20));
-        draw->AddLine(ImVec2(p.x + 1, divTop), ImVec2(p.x + 1, divBot), IM_COL32(0, 0, 0, 40));
-        ImGui::Dummy(ImVec2(4, bigBtnH));
-    }
+    divider(curX); curX += 12;
 
-    // ════════════════════════════════════════════════
-    //  STREAM / GO LIVE (right)
-    // ════════════════════════════════════════════════
-    ImGui::SameLine(0, 16);
-
+    // ── GO LIVE ──
     static const int aspectNums[] = { 16, 4, 16, 0 };
     static const int aspectDens[] = { 9,  3, 10, 0 };
 
-    // Reset Y for the big button
-    ImGui::SetCursorPosY(padTop);
-
     if (!m_rtmpOutput.isActive()) {
         bool hasKey = m_streamKeyBuf[0] != '\0';
-        float btnW = 160.0f;
-
-        ImVec2 btnMin = ImGui::GetCursorScreenPos();
-        ImVec2 btnMax(btnMin.x + btnW, btnMin.y + bigBtnH);
-        if (!hasKey) ImGui::BeginDisabled();
-        ImGui::InvisibleButton("##LiveBtn", ImVec2(btnW, bigBtnH));
-        bool hov = ImGui::IsItemHovered(), act = ImGui::IsItemActive();
-        if (!hasKey) ImGui::EndDisabled();
-
-        // Purple-tinted background
-        ImU32 liveBg = act ? IM_COL32(70, 20, 110, 90) :
-                       hov ? IM_COL32(55, 15, 85, 60) :
-                             IM_COL32(35, 10, 55, 35);
-        ImU32 liveBorder = hasKey ? IM_COL32(150, 70, 220, hov ? 150 : 80) :
-                                    IM_COL32(80, 40, 100, 40);
-        draw->AddRectFilled(btnMin, btnMax, liveBg, bigBtnRound);
-        draw->AddRect(btnMin, btnMax, liveBorder, bigBtnRound, 0, 1.5f);
-
-        if (hov && hasKey) {
-            draw->AddRect(ImVec2(btnMin.x - 1, btnMin.y - 1), ImVec2(btnMax.x + 1, btnMax.y + 1),
-                          IM_COL32(160, 80, 255, 25), bigBtnRound + 1, 0, 3.0f);
-        }
-
-        // Broadcast icon (larger concentric circles)
-        float iconCX = btnMin.x + 32, iconCY = btnMin.y + bigBtnH * 0.5f;
-        ImU32 iconCol = hasKey ? IM_COL32(180, 100, 240, 230) : IM_COL32(100, 60, 130, 100);
-        draw->AddCircleFilled(ImVec2(iconCX, iconCY), 5.0f, iconCol);
-        draw->AddCircle(ImVec2(iconCX, iconCY), 10.0f, hasKey ? IM_COL32(180, 100, 240, 120) : IM_COL32(100, 60, 130, 50), 0, 1.5f);
-        draw->AddCircle(ImVec2(iconCX, iconCY), 15.0f, hasKey ? IM_COL32(180, 100, 240, 50) : IM_COL32(100, 60, 130, 25), 0, 1.0f);
-
-        // Label
-        ImU32 textCol = hasKey ? IM_COL32(210, 130, 255, 255) : IM_COL32(120, 70, 150, 140);
-        draw->AddText(ImGui::GetFont(), ImGui::GetFontSize() * 1.1f,
-                      ImVec2(btnMin.x + 54, btnMin.y + (bigBtnH - ImGui::GetFontSize() * 1.1f) * 0.5f),
-                      textCol, "GO LIVE");
-
-        if (ImGui::IsItemClicked() && hasKey) {
-            m_rtmpOutput.start(m_streamKeyBuf,
-                               zone.warpFBO.width(), zone.warpFBO.height(),
+        if (transportBtn("##Live", "GO LIVE", curX, 80, kAccentDim, hasKey ? kAccent : kTextDim, hasKey)) {
+            m_rtmpOutput.start(m_streamKeyBuf, zone.warpFBO.width(), zone.warpFBO.height(),
                                aspectNums[m_streamAspect], aspectDens[m_streamAspect], 30);
         }
-
-        if (!hasKey && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        if (!hasKey && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("Set stream key in the Stream tab");
-        }
     } else {
-        // ── Live active ──
         float pulse = 0.5f + 0.5f * sinf(time * 3.0f);
-        ImVec2 cur = ImGui::GetCursorScreenPos();
-        float dotX = cur.x + 12, dotY = barPos.y + barH * 0.38f;
-
-        // Pulsing broadcast dot
-        draw->AddCircleFilled(ImVec2(dotX, dotY), 8.0f, IM_COL32(180, 80, 240, (int)(pulse * 255)));
-        draw->AddCircle(ImVec2(dotX, dotY), 12.0f, IM_COL32(180, 80, 240, (int)(pulse * 60)), 0, 1.5f);
-
-        // "LIVE" text
-        float liveFontSz = ImGui::GetFontSize() * 1.3f;
-        draw->AddText(ImGui::GetFont(), liveFontSz,
-                      ImVec2(dotX + 18, dotY - liveFontSz * 0.5f),
-                      IM_COL32(200, 100, 255, 255), "LIVE");
-        float liveW = ImGui::GetFont()->CalcTextSizeA(liveFontSz, FLT_MAX, 0, "LIVE").x;
-
-        // Timer
+        draw->AddCircleFilled(ImVec2(curX + 8, cy + btnH * 0.5f), 5.0f, IM_COL32(0, 200, 255, (int)(pulse * 255)));
         int secs = (int)m_rtmpOutput.uptimeSeconds();
         char timeBuf[16];
-        snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d:%02d", secs / 3600, (secs / 60) % 60, secs % 60);
-        draw->AddText(ImGui::GetFont(), liveFontSz,
-                      ImVec2(dotX + 24 + liveW, dotY - liveFontSz * 0.5f),
-                      IM_COL32(180, 185, 200, 220), timeBuf);
-        float timerW = ImGui::GetFont()->CalcTextSizeA(liveFontSz, FLT_MAX, 0, timeBuf).x;
-
-        if (m_rtmpOutput.droppedFrames() > 0) {
-            char dropBuf[32];
-            snprintf(dropBuf, sizeof(dropBuf), "%d dropped", m_rtmpOutput.droppedFrames());
-            draw->AddText(ImVec2(dotX + 30 + liveW + timerW, dotY - ImGui::GetTextLineHeight() * 0.5f),
-                          IM_COL32(255, 160, 60, 200), dropBuf);
-        }
-
-        // End Stream button below
-        float endX = cur.x;
-        float endY = barPos.y + barH * 0.58f;
-        float endW = 120.0f, endBtnH = 30.0f;
-        ImGui::SetCursorScreenPos(ImVec2(endX, endY));
-        ImVec2 endMin(endX, endY), endMax(endX + endW, endY + endBtnH);
-        ImGui::InvisibleButton("##EndStream", ImVec2(endW, endBtnH));
-        bool eh = ImGui::IsItemHovered(), ea = ImGui::IsItemActive();
-        draw->AddRectFilled(endMin, endMax,
-                            ea ? IM_COL32(110, 30, 140, 90) : eh ? IM_COL32(85, 22, 110, 60) : IM_COL32(50, 15, 65, 35), 6.0f);
-        draw->AddRect(endMin, endMax,
-                      IM_COL32(170, 80, 220, eh ? 140 : 70), 6.0f, 0, 1.5f);
-        const char* endLabel = "End Stream";
-        ImVec2 endTextSz = ImGui::CalcTextSize(endLabel);
-        draw->AddText(ImVec2(endMin.x + (endW - endTextSz.x) * 0.5f,
-                             endMin.y + (endBtnH - endTextSz.y) * 0.5f),
-                      IM_COL32(210, 120, 255, 230), endLabel);
-        if (ImGui::IsItemClicked()) {
+        snprintf(timeBuf, sizeof(timeBuf), "LIVE %02d:%02d", (secs / 60) % 60, secs % 60);
+        draw->AddText(ImVec2(curX + 18, cy + (btnH - ImGui::GetTextLineHeight()) * 0.5f), kAccent, timeBuf);
+        if (transportBtn("##EndLive", "END", curX + 110, 44, kRedDim, kRed)) {
             m_rtmpOutput.stop();
         }
     }
-
-    // ════════════════════════════════════════════════
-    //  BPM SYNC (right side of transport bar)
-    // ════════════════════════════════════════════════
-    {
-        float bpmX = barPos.x + barSize.x - 280;
-        float bpmY = barPos.y + padTop;
-
-        // BPM display
-        ImGui::SetCursorScreenPos(ImVec2(bpmX, bpmY));
-        char bpmBuf[32];
-        float currentBPM = m_bpmSync.bpm();
-        if (currentBPM > 0) {
-            snprintf(bpmBuf, sizeof(bpmBuf), "%.1f", currentBPM);
-        } else {
-            snprintf(bpmBuf, sizeof(bpmBuf), "---");
-        }
-
-        // Big BPM number
-        draw->AddText(ImGui::GetFont(), 28.0f,
-                      ImVec2(bpmX, bpmY + 2),
-                      currentBPM > 0 ? IM_COL32(0, 220, 255, 255) : IM_COL32(80, 90, 110, 180),
-                      bpmBuf);
-        draw->AddText(ImVec2(bpmX, bpmY + 34), IM_COL32(80, 90, 110, 140), "BPM");
-
-        // Beat phase indicator (4 dots)
-        float dotX = bpmX + 90;
-        float dotY = bpmY + 12;
-        for (int b = 0; b < 4; b++) {
-            float dotCX = dotX + b * 18.0f;
-            int beatInBar = m_bpmSync.beatCount() % 4;
-            bool isCurrentBeat = (b == beatInBar) && currentBPM > 0;
-            float pulse = isCurrentBeat ? m_bpmSync.beatPulse() : 0.0f;
-            float r = 5.0f + pulse * 3.0f;
-            ImU32 col = isCurrentBeat ? IM_COL32(0, 220, 255, (int)(150 + pulse * 105)) :
-                        (b < beatInBar || !currentBPM) ? IM_COL32(60, 70, 90, 120) :
-                                                          IM_COL32(60, 70, 90, 120);
-            draw->AddCircleFilled(ImVec2(dotCX, dotY), r, col);
-            if (isCurrentBeat && pulse > 0.1f) {
-                draw->AddCircle(ImVec2(dotCX, dotY), r + 3, IM_COL32(0, 200, 255, (int)(pulse * 80)), 0, 1.5f);
-            }
-        }
-
-        // TAP button
-        float tapX = bpmX + 90;
-        float tapY = bpmY + 28;
-        float tapW = 60, tapH = 26;
-        ImGui::SetCursorScreenPos(ImVec2(tapX, tapY));
-        ImGui::InvisibleButton("##TapBPM", ImVec2(tapW, tapH));
-        bool tapHov = ImGui::IsItemHovered();
-        ImVec2 tapMin(tapX, tapY), tapMax(tapX + tapW, tapY + tapH);
-        draw->AddRectFilled(tapMin, tapMax,
-                            tapHov ? IM_COL32(0, 180, 235, 40) : IM_COL32(0, 140, 180, 15), 4.0f);
-        draw->AddRect(tapMin, tapMax,
-                      IM_COL32(0, 200, 255, tapHov ? 120 : 50), 4.0f, 0, 1.0f);
-        ImVec2 tapSz = ImGui::CalcTextSize("TAP");
-        draw->AddText(ImVec2(tapX + (tapW - tapSz.x) * 0.5f, tapY + (tapH - tapSz.y) * 0.5f),
-                      IM_COL32(0, 200, 255, tapHov ? 255 : 150), "TAP");
-        if (ImGui::IsItemClicked()) {
-            m_bpmSync.tap();
-        }
-
-        // Manual BPM input
-        float inputX = bpmX + 160;
-        float inputY = bpmY + 8;
-        ImGui::SetCursorScreenPos(ImVec2(inputX, inputY));
-        ImGui::SetNextItemWidth(60);
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.06f, 0.07f, 0.10f, 0.8f));
-        float bpmVal = currentBPM;
-        if (ImGui::DragFloat("##BPMInput", &bpmVal, 0.5f, 0.0f, 300.0f, "%.0f")) {
-            m_bpmSync.setBPM(bpmVal);
-        }
-        ImGui::PopStyleColor();
-
-        // Reset button
-        float rstX = inputX + 65;
-        ImGui::SetCursorScreenPos(ImVec2(rstX, inputY + 28));
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.1f, 0.1f, 0.15f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.5f, 0.15f, 0.15f, 0.3f));
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.3f, 0.3f, 0.8f));
-        if (ImGui::SmallButton("Reset")) {
-            m_bpmSync.setBPM(0);
-            m_bpmSync.resetPhase();
-        }
-        ImGui::PopStyleColor(3);
-    }
+    curX += 96;
 
     ImGui::End();
     ImGui::PopStyleColor();
