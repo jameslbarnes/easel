@@ -67,21 +67,19 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
     ImGui::SetNextWindowSizeConstraints(ImVec2(250, 200), ImVec2(FLT_MAX, FLT_MAX));
     ImGui::Begin("Properties");
 
-    // --- BPM Sync (always visible) ---
+    // --- Audio (BPM + bindings, always visible) ---
     if (bpmSync) {
         ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.0f, 0.78f, 1.0f, 0.08f));
         ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
         ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.0f, 0.78f, 1.0f, 0.22f));
-        bool bpmOpen = ImGui::CollapsingHeader("BPM Sync", ImGuiTreeNodeFlags_DefaultOpen);
+        bool audioSectionOpen = ImGui::CollapsingHeader("Audio", ImGuiTreeNodeFlags_DefaultOpen);
         ImGui::PopStyleColor(3);
 
-        if (bpmOpen) {
+        if (audioSectionOpen) {
             float currentBPM = bpmSync->bpm();
-
-            // BPM value + beat dots on same row
             float w = ImGui::GetContentRegionAvail().x;
 
-            // Beat indicator dots
+            // Beat indicator dots + BPM text
             {
                 ImDrawList* dl = ImGui::GetWindowDrawList();
                 ImVec2 p = ImGui::GetCursorScreenPos();
@@ -96,7 +94,6 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                                         isCurrent ? IM_COL32(0, 220, 255, (int)(140 + pulse * 115))
                                                   : IM_COL32(50, 60, 80, 120));
                 }
-                // BPM text next to dots
                 char bpmBuf[16];
                 if (currentBPM > 0) snprintf(bpmBuf, sizeof(bpmBuf), "%.1f BPM", currentBPM);
                 else snprintf(bpmBuf, sizeof(bpmBuf), "--- BPM");
@@ -106,26 +103,20 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 ImGui::Dummy(ImVec2(w, 18));
             }
 
-            // TAP + BPM input + Reset on same row
+            // TAP + BPM input + Reset
             {
                 float btnW = (w - ImGui::GetStyle().ItemSpacing.x * 2) / 3.0f;
-
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.10f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.25f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.40f));
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
-                if (ImGui::Button("TAP", ImVec2(btnW, 0))) {
-                    bpmSync->tap();
-                }
+                if (ImGui::Button("TAP", ImVec2(btnW, 0))) bpmSync->tap();
                 ImGui::PopStyleColor(4);
-
                 ImGui::SameLine();
                 ImGui::SetNextItemWidth(btnW);
                 float bpmVal = currentBPM;
-                if (ImGui::DragFloat("##BPMVal", &bpmVal, 0.5f, 0.0f, 300.0f, "%.0f BPM")) {
+                if (ImGui::DragFloat("##BPMVal", &bpmVal, 0.5f, 0.0f, 300.0f, "%.0f BPM"))
                     bpmSync->setBPM(bpmVal);
-                }
-
                 ImGui::SameLine();
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.05f, 0.05f, 0.15f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.1f, 0.1f, 0.3f));
@@ -137,7 +128,48 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 ImGui::PopStyleColor(3);
             }
 
-            ImGui::Dummy(ImVec2(0, 2));
+            // Audio reactive bindings (only when a layer is selected)
+            if (layer) {
+                ImGui::Dummy(ImVec2(0, 4));
+                ImGui::PushStyleColor(ImGuiCol_Text, kDimText);
+                ImGui::Text("Bindings");
+                ImGui::PopStyleColor();
+
+                static const char* targetNames[] = { "None", "Opacity", "Pos X", "Pos Y", "Scale", "Rotation" };
+                static const char* signalNames[] = { "Bass", "Mid", "High", "Beat" };
+
+                if (accentBtn("+ Add Binding", -1)) {
+                    Layer::AudioBinding ab;
+                    ab.target = Layer::AudioTarget::Scale;
+                    ab.signal = 0;
+                    ab.strength = 0.3f;
+                    layer->audioBindings.push_back(ab);
+                }
+
+                int removeIdx = -1;
+                for (int b = 0; b < (int)layer->audioBindings.size(); b++) {
+                    auto& ab = layer->audioBindings[b];
+                    ImGui::PushID(40000 + b);
+                    float bw = ImGui::GetContentRegionAvail().x;
+                    float third = (bw - ImGui::GetStyle().ItemSpacing.x * 2 - 20) / 3.0f;
+                    ImGui::SetNextItemWidth(third);
+                    int tgt = (int)ab.target;
+                    if (ImGui::Combo("##tgt", &tgt, targetNames, (int)Layer::AudioTarget::COUNT))
+                        ab.target = (Layer::AudioTarget)tgt;
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(third);
+                    ImGui::Combo("##sig", &ab.signal, signalNames, 4);
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(third);
+                    ImGui::SliderFloat("##str", &ab.strength, 0.0f, 2.0f, "%.2f");
+                    ImGui::SameLine();
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.3f, 0.3f, 0.7f));
+                    if (ImGui::SmallButton("x")) removeIdx = b;
+                    ImGui::PopStyleColor();
+                    ImGui::PopID();
+                }
+                if (removeIdx >= 0) layer->audioBindings.erase(layer->audioBindings.begin() + removeIdx);
+            }
         }
 
         thinSep();
@@ -316,65 +348,6 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
         layer->audioStrength = 0.15f;
         layer->cropTop = layer->cropBottom = layer->cropLeft = layer->cropRight = 0.0f;
     }
-
-    // --- Audio Reactivity Bindings ---
-    {
-        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.0f, 0.78f, 1.0f, 0.08f));
-        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
-        ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.0f, 0.78f, 1.0f, 0.22f));
-        bool audioOpen = ImGui::CollapsingHeader("Audio Reactive");
-        ImGui::PopStyleColor(3);
-
-        if (audioOpen) {
-            static const char* targetNames[] = { "None", "Opacity", "Pos X", "Pos Y", "Scale", "Rotation" };
-            static const char* signalNames[] = { "Bass", "Mid", "High", "Beat" };
-
-            if (accentBtn("+ Add Binding", -1)) {
-                Layer::AudioBinding ab;
-                ab.target = Layer::AudioTarget::Scale;
-                ab.signal = 0;
-                ab.strength = 0.3f;
-                layer->audioBindings.push_back(ab);
-            }
-
-            int removeIdx = -1;
-            for (int b = 0; b < (int)layer->audioBindings.size(); b++) {
-                auto& ab = layer->audioBindings[b];
-                ImGui::PushID(40000 + b);
-
-                float w = ImGui::GetContentRegionAvail().x;
-                float third = (w - ImGui::GetStyle().ItemSpacing.x * 2 - 20) / 3.0f;
-
-                // Target dropdown
-                ImGui::SetNextItemWidth(third);
-                int tgt = (int)ab.target;
-                if (ImGui::Combo("##tgt", &tgt, targetNames, (int)Layer::AudioTarget::COUNT)) {
-                    ab.target = (Layer::AudioTarget)tgt;
-                }
-                ImGui::SameLine();
-
-                // Signal dropdown
-                ImGui::SetNextItemWidth(third);
-                ImGui::Combo("##sig", &ab.signal, signalNames, 4);
-                ImGui::SameLine();
-
-                // Strength
-                ImGui::SetNextItemWidth(third);
-                ImGui::SliderFloat("##str", &ab.strength, 0.0f, 2.0f, "%.2f");
-                ImGui::SameLine();
-
-                // Remove
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.3f, 0.3f, 0.7f));
-                if (ImGui::SmallButton("x")) removeIdx = b;
-                ImGui::PopStyleColor();
-
-                ImGui::PopID();
-            }
-            if (removeIdx >= 0) layer->audioBindings.erase(layer->audioBindings.begin() + removeIdx);
-        }
-    }
-
-    thinSep();
 
     // --- Effects ---
     ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.0f, 0.78f, 1.0f, 0.08f));
