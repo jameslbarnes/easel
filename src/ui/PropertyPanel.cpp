@@ -116,6 +116,27 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
         if (ImGui::IsItemActivated()) undoNeeded = true;
     }
 
+    // --- Transition ---
+    {
+        float w = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+        ImGui::SetNextItemWidth(w);
+        const char* currentTrans = transitionTypeName(layer->transitionType);
+        if (ImGui::BeginCombo("##TransType", currentTrans)) {
+            for (int i = 0; i < (int)TransitionType::COUNT; i++) {
+                TransitionType t = (TransitionType)i;
+                bool selected = (layer->transitionType == t);
+                if (ImGui::Selectable(transitionTypeName(t), selected)) {
+                    layer->transitionType = t;
+                }
+                if (selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(w);
+        namedDrag("##TransDur", "Dur", &layer->transitionDuration, 0.01f, 0.0f, 5.0f, "%.2fs");
+    }
+
     thinSep();
 
     // --- Transform (always visible, compact two-column grid) ---

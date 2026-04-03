@@ -30,6 +30,12 @@ uniform float uAudioBeatDecay = 0.0;
 uniform float uFeather = 0.0;
 uniform bool uFlipV = false;
 
+// BPM sync uniforms
+uniform float uBeatPhase = 0.0;
+uniform float uBeatPulse = 0.0;
+uniform float uBarPhase = 0.0;
+uniform float uBPM = 0.0;
+
 vec3 blendNormal(vec3 base, vec3 blend)    { return blend; }
 vec3 blendMultiply(vec3 base, vec3 blend)  { return base * blend; }
 vec3 blendScreen(vec3 base, vec3 blend)    { return 1.0 - (1.0 - base) * (1.0 - blend); }

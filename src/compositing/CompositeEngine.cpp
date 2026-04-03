@@ -50,6 +50,11 @@ void CompositeEngine::setAudioUniforms(ShaderProgram& shader, float audioStrengt
     shader.setFloat("uAudioHighMid", audioStrength > 0 ? m_audio.highMid : 0.0f);
     shader.setFloat("uAudioTreble", audioStrength > 0 ? m_audio.treble : 0.0f);
     shader.setFloat("uAudioBeatDecay", audioStrength > 0 ? m_audio.beatDecay : 0.0f);
+    // BPM sync (always available, independent of audio reactivity toggle)
+    shader.setFloat("uBeatPhase", m_audio.beatPhase);
+    shader.setFloat("uBeatPulse", m_audio.beatPulse);
+    shader.setFloat("uBarPhase", m_audio.barPhase);
+    shader.setFloat("uBPM", m_audio.bpm);
 }
 
 void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layers) {
@@ -58,7 +63,28 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
     bool firstLayer = true;
     for (int i = 0; i < (int)layers.size(); i++) {
         const auto& layer = layers[i];
-        if (!layer->visible || layer->opacity <= 0.0f || !layer->textureId()) continue;
+
+        // Update transition state
+        if (layer->transitionActive && layer->transitionDuration > 0.0f) {
+            float step = (1.0f / layer->transitionDuration) * (1.0f / 60.0f); // approx per frame
+            if (layer->transitionDirection) {
+                layer->transitionProgress = std::min(1.0f, layer->transitionProgress + step);
+                if (layer->transitionProgress >= 1.0f) layer->transitionActive = false;
+            } else {
+                layer->transitionProgress = std::max(0.0f, layer->transitionProgress - step);
+                if (layer->transitionProgress <= 0.0f) layer->transitionActive = false;
+            }
+        }
+
+        // Compute effective opacity including transition
+        float effectiveOpacity = layer->opacity;
+        if (layer->transitionDuration > 0.0f) {
+            effectiveOpacity *= layer->transitionProgress;
+        }
+
+        // Skip fully transparent or invisible (but allow transitioning-out layers to render)
+        if (effectiveOpacity <= 0.0f || !layer->textureId()) continue;
+        if (!layer->visible && !layer->transitionActive) continue;
 
         int next = 1 - m_current;
         m_fbo[next].bind();
@@ -91,7 +117,7 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
             m_passthroughShader.use();
             m_passthroughShader.setMat3("uTransform", layerXform);
             m_passthroughShader.setBool("uFlipV", layer->source && layer->source->isFlippedV());
-            m_passthroughShader.setFloat("uOpacity", layer->opacity);
+            m_passthroughShader.setFloat("uOpacity", effectiveOpacity);
             m_passthroughShader.setInt("uTexture", 0);
             m_passthroughShader.setFloat("uTileX", layer->tileX);
             m_passthroughShader.setFloat("uTileY", layer->tileY);
@@ -130,7 +156,7 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
             m_compositeShader.setBool("uFlipV", layer->source && layer->source->isFlippedV());
             m_compositeShader.setInt("uBase", 0);
             m_compositeShader.setInt("uLayer", 1);
-            m_compositeShader.setFloat("uOpacity", layer->opacity);
+            m_compositeShader.setFloat("uOpacity", effectiveOpacity);
             m_compositeShader.setInt("uBlendMode", (int)layer->blendMode);
             m_compositeShader.setFloat("uTileX", layer->tileX);
             m_compositeShader.setFloat("uTileY", layer->tileY);

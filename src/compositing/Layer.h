@@ -10,6 +10,20 @@
 #include <string>
 #include <memory>
 
+enum class TransitionType { Fade = 0, WipeLeft, WipeRight, WipeUp, WipeDown, Dissolve, COUNT };
+
+inline const char* transitionTypeName(TransitionType t) {
+    switch (t) {
+        case TransitionType::Fade: return "Fade";
+        case TransitionType::WipeLeft: return "Wipe Left";
+        case TransitionType::WipeRight: return "Wipe Right";
+        case TransitionType::WipeUp: return "Wipe Up";
+        case TransitionType::WipeDown: return "Wipe Down";
+        case TransitionType::Dissolve: return "Dissolve";
+        default: return "Fade";
+    }
+}
+
 enum class MosaicMode { Mirror = 0, Hex, COUNT };
 
 inline const char* mosaicModeName(MosaicMode mode) {
@@ -49,6 +63,13 @@ public:
     float mosaicTransitionStart = -10.0f;
     float mosaicTransitionDuration = 1.5f;
 
+    // Transitions
+    TransitionType transitionType = TransitionType::Fade;
+    float transitionDuration = 0.5f;  // seconds (0 = instant)
+    float transitionProgress = 1.0f;  // 0 = fully out, 1 = fully in
+    bool transitionActive = false;
+    bool transitionDirection = true;  // true = fading in, false = fading out
+
     // Edge feather (0.0 = hard edge, 0.5 = max soft blend)
     float feather = 0.0f;
 
@@ -65,6 +86,27 @@ public:
     std::shared_ptr<Texture> mask;
     MaskPath maskPath;
     bool maskEnabled = false;
+
+    // Toggle visibility with transition
+    void toggleVisibility() {
+        if (transitionDuration <= 0.0f) {
+            visible = !visible;
+            transitionProgress = visible ? 1.0f : 0.0f;
+            return;
+        }
+        if (visible) {
+            // Start fading out
+            transitionDirection = false;
+            transitionActive = true;
+            // When fully faded, mark invisible
+        } else {
+            // Start fading in
+            visible = true;
+            transitionDirection = true;
+            transitionActive = true;
+            transitionProgress = 0.0f;
+        }
+    }
 
     glm::mat3 getTransformMatrix() const;
 

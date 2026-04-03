@@ -17,6 +17,11 @@ struct AudioState {
     bool beatDetected = false;
     GLuint fftTexture = 0;
     float time = 0;
+    // BPM sync
+    float bpm = 0;
+    float beatPhase = 0;    // 0-1 sawtooth per beat
+    float beatPulse = 0;    // 1.0 on beat, decays
+    float barPhase = 0;     // 0-1 sawtooth per 4 beats
 };
 
 class CompositeEngine {

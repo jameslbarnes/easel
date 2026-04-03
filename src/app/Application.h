@@ -34,6 +34,7 @@
 
 #include "speech/EthereaClient.h"
 #include "app/AudioAnalyzer.h"
+#include "app/BPMSync.h"
 #include "app/DataBus.h"
 
 #ifdef HAS_NDI
@@ -87,10 +88,13 @@ private:
 
     Mesh m_quad;
     ShaderProgram m_passthroughShader;
+    ShaderProgram m_edgeBlendShader;
+    Framebuffer m_edgeBlendFBO;
     Texture m_testPattern;
 
     int m_selectedLayer = -1;
     AudioAnalyzer m_audioAnalyzer;
+    BPMSync m_bpmSync;
     float m_audioRMS = 0; // backward compat: smoothed audio level
     int m_mosaicAudioDevice = -1; // -1 = system loopback, >=0 = index into device list
     bool m_projectorAutoConnect = false;

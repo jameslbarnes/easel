@@ -125,6 +125,9 @@ bool Application::init() {
     if (!m_passthroughShader.loadFromFiles("shaders/passthrough.vert", "shaders/passthrough.frag")) {
         return false;
     }
+    if (!m_edgeBlendShader.loadFromFiles("shaders/passthrough.vert", "shaders/edgeblend.frag")) {
+        return false;
+    }
     if (!m_maskRenderer.init()) return false;
 
 #ifdef HAS_OPENCV
@@ -317,6 +320,7 @@ void Application::run() {
             m_audioAnalyzer.setDevice(m_mosaicAudioDevice);
             m_audioAnalyzer.update(dt);
             m_audioRMS = m_audioAnalyzer.smoothedRMS();
+            m_bpmSync.update(dt);
         }
 
         compositeAndWarp();
@@ -658,6 +662,10 @@ void Application::compositeZone(OutputZone& zone) {
         audio.beatDetected = m_audioAnalyzer.beatDetected();
         audio.fftTexture = m_audioAnalyzer.fftTexture();
         audio.time = (float)glfwGetTime();
+        audio.bpm = m_bpmSync.bpm();
+        audio.beatPhase = m_bpmSync.beatPhase();
+        audio.beatPulse = m_bpmSync.beatPulse();
+        audio.barPhase = m_bpmSync.barPhase();
         zone.compositor.setAudioState(audio);
     }
     zone.compositor.composite(layers);
@@ -683,6 +691,53 @@ void Application::compositeZone(OutputZone& zone) {
     }
 
     Framebuffer::unbind();
+
+    // Edge blend post-process (if any edge has blend width > 0)
+    bool hasEdgeBlend = zone.edgeBlendLeft > 0 || zone.edgeBlendRight > 0 ||
+                        zone.edgeBlendTop > 0 || zone.edgeBlendBottom > 0;
+    if (hasEdgeBlend) {
+        // Ensure temp FBO matches zone size
+        if (m_edgeBlendFBO.width() != zone.width || m_edgeBlendFBO.height() != zone.height) {
+            m_edgeBlendFBO.create(zone.width, zone.height);
+        }
+        // Render warpFBO through edge blend shader into temp FBO
+        m_edgeBlendFBO.bind();
+        glViewport(0, 0, zone.width, zone.height);
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        m_edgeBlendShader.use();
+        m_edgeBlendShader.setInt("uTexture", 0);
+        m_edgeBlendShader.setMat3("uTransform", glm::mat3(1.0f));
+        m_edgeBlendShader.setFloat("uBlendLeft", zone.edgeBlendLeft / (float)zone.width);
+        m_edgeBlendShader.setFloat("uBlendRight", zone.edgeBlendRight / (float)zone.width);
+        m_edgeBlendShader.setFloat("uBlendTop", zone.edgeBlendTop / (float)zone.height);
+        m_edgeBlendShader.setFloat("uBlendBottom", zone.edgeBlendBottom / (float)zone.height);
+        m_edgeBlendShader.setFloat("uGamma", zone.edgeBlendGamma);
+
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, zone.warpFBO.textureId());
+        m_quad.draw();
+        Framebuffer::unbind();
+
+        // Copy back to warpFBO
+        zone.warpFBO.bind();
+        glViewport(0, 0, zone.width, zone.height);
+        m_passthroughShader.use();
+        m_passthroughShader.setInt("uTexture", 0);
+        m_passthroughShader.setFloat("uOpacity", 1.0f);
+        m_passthroughShader.setMat3("uTransform", glm::mat3(1.0f));
+        m_passthroughShader.setFloat("uTileX", 1.0f);
+        m_passthroughShader.setFloat("uTileY", 1.0f);
+        m_passthroughShader.setInt("uMosaicMode", 0);
+        m_passthroughShader.setFloat("uFeather", 0.0f);
+        m_passthroughShader.setBool("uHasMask", false);
+        m_passthroughShader.setBool("uFlipV", false);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, m_edgeBlendFBO.textureId());
+        m_quad.draw();
+        Framebuffer::unbind();
+    }
 }
 
 void Application::presentOutputs() {
@@ -1063,6 +1118,38 @@ void Application::renderUI() {
                     }
                 }
             }
+
+            ImGui::Dummy(ImVec2(0, 4));
+            {
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                ImVec2 p = ImGui::GetCursorScreenPos();
+                float w = ImGui::GetContentRegionAvail().x;
+                dl->AddLine(ImVec2(p.x, p.y), ImVec2(p.x + w, p.y), IM_COL32(0, 200, 255, 40));
+            }
+            ImGui::Dummy(ImVec2(0, 6));
+        }
+
+        // Edge Blend
+        {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+            ImGui::Text("Edge Blend");
+            ImGui::PopStyleColor();
+
+            float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+            ImGui::SetNextItemWidth(half);
+            ImGui::DragFloat("##EBL", &zone.edgeBlendLeft, 1.0f, 0.0f, (float)zone.width * 0.5f, "L %.0fpx");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(half);
+            ImGui::DragFloat("##EBR", &zone.edgeBlendRight, 1.0f, 0.0f, (float)zone.width * 0.5f, "R %.0fpx");
+
+            ImGui::SetNextItemWidth(half);
+            ImGui::DragFloat("##EBT", &zone.edgeBlendTop, 1.0f, 0.0f, (float)zone.height * 0.5f, "T %.0fpx");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(half);
+            ImGui::DragFloat("##EBB", &zone.edgeBlendBottom, 1.0f, 0.0f, (float)zone.height * 0.5f, "B %.0fpx");
+
+            ImGui::SetNextItemWidth(-1);
+            ImGui::DragFloat("##EBGamma", &zone.edgeBlendGamma, 0.05f, 0.5f, 4.0f, "Gamma %.2f");
 
             ImGui::Dummy(ImVec2(0, 4));
             {
@@ -2143,6 +2230,92 @@ void Application::renderTransportBar() {
         }
     }
 
+    // ════════════════════════════════════════════════
+    //  BPM SYNC (right side of transport bar)
+    // ════════════════════════════════════════════════
+    {
+        float bpmX = barPos.x + barSize.x - 280;
+        float bpmY = barPos.y + padTop;
+
+        // BPM display
+        ImGui::SetCursorScreenPos(ImVec2(bpmX, bpmY));
+        char bpmBuf[32];
+        float currentBPM = m_bpmSync.bpm();
+        if (currentBPM > 0) {
+            snprintf(bpmBuf, sizeof(bpmBuf), "%.1f", currentBPM);
+        } else {
+            snprintf(bpmBuf, sizeof(bpmBuf), "---");
+        }
+
+        // Big BPM number
+        draw->AddText(ImGui::GetFont(), 28.0f,
+                      ImVec2(bpmX, bpmY + 2),
+                      currentBPM > 0 ? IM_COL32(0, 220, 255, 255) : IM_COL32(80, 90, 110, 180),
+                      bpmBuf);
+        draw->AddText(ImVec2(bpmX, bpmY + 34), IM_COL32(80, 90, 110, 140), "BPM");
+
+        // Beat phase indicator (4 dots)
+        float dotX = bpmX + 90;
+        float dotY = bpmY + 12;
+        for (int b = 0; b < 4; b++) {
+            float dotCX = dotX + b * 18.0f;
+            int beatInBar = m_bpmSync.beatCount() % 4;
+            bool isCurrentBeat = (b == beatInBar) && currentBPM > 0;
+            float pulse = isCurrentBeat ? m_bpmSync.beatPulse() : 0.0f;
+            float r = 5.0f + pulse * 3.0f;
+            ImU32 col = isCurrentBeat ? IM_COL32(0, 220, 255, (int)(150 + pulse * 105)) :
+                        (b < beatInBar || !currentBPM) ? IM_COL32(60, 70, 90, 120) :
+                                                          IM_COL32(60, 70, 90, 120);
+            draw->AddCircleFilled(ImVec2(dotCX, dotY), r, col);
+            if (isCurrentBeat && pulse > 0.1f) {
+                draw->AddCircle(ImVec2(dotCX, dotY), r + 3, IM_COL32(0, 200, 255, (int)(pulse * 80)), 0, 1.5f);
+            }
+        }
+
+        // TAP button
+        float tapX = bpmX + 90;
+        float tapY = bpmY + 28;
+        float tapW = 60, tapH = 26;
+        ImGui::SetCursorScreenPos(ImVec2(tapX, tapY));
+        ImGui::InvisibleButton("##TapBPM", ImVec2(tapW, tapH));
+        bool tapHov = ImGui::IsItemHovered();
+        ImVec2 tapMin(tapX, tapY), tapMax(tapX + tapW, tapY + tapH);
+        draw->AddRectFilled(tapMin, tapMax,
+                            tapHov ? IM_COL32(0, 180, 235, 40) : IM_COL32(0, 140, 180, 15), 4.0f);
+        draw->AddRect(tapMin, tapMax,
+                      IM_COL32(0, 200, 255, tapHov ? 120 : 50), 4.0f, 0, 1.0f);
+        ImVec2 tapSz = ImGui::CalcTextSize("TAP");
+        draw->AddText(ImVec2(tapX + (tapW - tapSz.x) * 0.5f, tapY + (tapH - tapSz.y) * 0.5f),
+                      IM_COL32(0, 200, 255, tapHov ? 255 : 150), "TAP");
+        if (ImGui::IsItemClicked()) {
+            m_bpmSync.tap();
+        }
+
+        // Manual BPM input
+        float inputX = bpmX + 160;
+        float inputY = bpmY + 8;
+        ImGui::SetCursorScreenPos(ImVec2(inputX, inputY));
+        ImGui::SetNextItemWidth(60);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.06f, 0.07f, 0.10f, 0.8f));
+        float bpmVal = currentBPM;
+        if (ImGui::DragFloat("##BPMInput", &bpmVal, 0.5f, 0.0f, 300.0f, "%.0f")) {
+            m_bpmSync.setBPM(bpmVal);
+        }
+        ImGui::PopStyleColor();
+
+        // Reset button
+        float rstX = inputX + 65;
+        ImGui::SetCursorScreenPos(ImVec2(rstX, inputY + 28));
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.1f, 0.1f, 0.15f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.5f, 0.15f, 0.15f, 0.3f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.3f, 0.3f, 0.8f));
+        if (ImGui::SmallButton("Reset")) {
+            m_bpmSync.setBPM(0);
+            m_bpmSync.resetPhase();
+        }
+        ImGui::PopStyleColor(3);
+    }
+
     ImGui::End();
     ImGui::PopStyleColor();
     ImGui::PopStyleVar(4);
@@ -2576,6 +2749,15 @@ void Application::saveProject(const std::string& path) {
         }
 
         // Output routing
+        // Edge blend
+        if (z.edgeBlendLeft > 0 || z.edgeBlendRight > 0 || z.edgeBlendTop > 0 || z.edgeBlendBottom > 0) {
+            zj["edgeBlendLeft"] = z.edgeBlendLeft;
+            zj["edgeBlendRight"] = z.edgeBlendRight;
+            zj["edgeBlendTop"] = z.edgeBlendTop;
+            zj["edgeBlendBottom"] = z.edgeBlendBottom;
+            zj["edgeBlendGamma"] = z.edgeBlendGamma;
+        }
+
         zj["outputDest"] = (int)z.outputDest;
         zj["outputMonitor"] = z.outputMonitor;
         zj["ndiStreamName"] = z.ndiStreamName;
@@ -2817,6 +2999,13 @@ void Application::loadProject(const std::string& path) {
             }
             z->init();
             loadZoneWarp(*z, zj);
+
+            // Edge blend
+            z->edgeBlendLeft = zj.value("edgeBlendLeft", 0.0f);
+            z->edgeBlendRight = zj.value("edgeBlendRight", 0.0f);
+            z->edgeBlendTop = zj.value("edgeBlendTop", 0.0f);
+            z->edgeBlendBottom = zj.value("edgeBlendBottom", 0.0f);
+            z->edgeBlendGamma = zj.value("edgeBlendGamma", 2.2f);
 
             // Output routing
             z->outputDest = (OutputDest)zj.value("outputDest", 0);

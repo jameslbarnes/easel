@@ -26,6 +26,12 @@ uniform float uAudioTreble = 0.0;
 uniform float uAudioBeatDecay = 0.0;
 uniform float uFeather = 0.0;
 
+// BPM sync uniforms
+uniform float uBeatPhase = 0.0;   // 0-1 sawtooth per beat
+uniform float uBeatPulse = 0.0;   // 1.0 on beat, decays
+uniform float uBarPhase = 0.0;    // 0-1 sawtooth per 4 beats
+uniform float uBPM = 0.0;
+
 float cellPop(vec2 cell) {
     float h1 = fract(sin(dot(cell, vec2(127.1, 311.7))) * 43758.5);
     float h2 = fract(sin(dot(cell, vec2(269.5, 183.3))) * 28461.3);

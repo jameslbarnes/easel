@@ -31,6 +31,13 @@ struct OutputZone {
     bool showAllLayers = true;
     std::set<uint32_t> visibleLayerIds;
 
+    // Edge blending (pixels of overlap on each edge)
+    float edgeBlendLeft = 0.0f;
+    float edgeBlendRight = 0.0f;
+    float edgeBlendTop = 0.0f;
+    float edgeBlendBottom = 0.0f;
+    float edgeBlendGamma = 2.2f;  // gamma correction for linear blending
+
     // Output routing
     OutputDest outputDest = OutputDest::None;
     int outputMonitor = -1;         // for Fullscreen: which monitor index
