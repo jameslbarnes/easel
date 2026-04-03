@@ -474,6 +474,8 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
         }
     }
 
+    } // end Effects section (layer effects chain only)
+
     // --- Mosaic mode ---
     {
         float halfW = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
@@ -765,8 +767,6 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
     } else {
         maskEditMode = false;
     }
-
-    } // end Effects section
 
     // --- Video controls ---
     if (layer->source && layer->source->isVideo()) {

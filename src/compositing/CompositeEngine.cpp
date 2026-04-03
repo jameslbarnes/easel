@@ -151,7 +151,7 @@ GLuint CompositeEngine::applyEffects(const std::shared_ptr<Layer>& layer, GLuint
             pingpong = 1 - pingpong;
         } else if (fx.type == EffectType::Feedback) {
             // Get or create feedback FBO for this layer
-            auto& fbFBO = m_feedbackFBOs[layer.get()];
+            auto& fbFBO = m_feedbackFBOs[layer->id];
             if (fbFBO.width() != m_width || fbFBO.height() != m_height) {
                 fbFBO.create(m_width, m_height);
             }
@@ -199,19 +199,27 @@ GLuint CompositeEngine::applyEffects(const std::shared_ptr<Layer>& layer, GLuint
 void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layers) {
     clear();
 
+    float dt = m_audio.time - m_lastTime;
+    if (dt <= 0 || dt > 0.5f) dt = 1.0f / 60.0f; // clamp to sane range
+    m_lastTime = m_audio.time;
+
     bool firstLayer = true;
     for (int i = 0; i < (int)layers.size(); i++) {
         const auto& layer = layers[i];
 
         // Update transition state
         if (layer->transitionActive && layer->transitionDuration > 0.0f) {
-            float step = (1.0f / layer->transitionDuration) * (1.0f / 60.0f); // approx per frame
+            float step = dt / std::max(0.01f, layer->transitionDuration);
             if (layer->transitionDirection) {
                 layer->transitionProgress = std::min(1.0f, layer->transitionProgress + step);
                 if (layer->transitionProgress >= 1.0f) layer->transitionActive = false;
             } else {
                 layer->transitionProgress = std::max(0.0f, layer->transitionProgress - step);
-                if (layer->transitionProgress <= 0.0f) layer->transitionActive = false;
+                if (layer->transitionProgress <= 0.0f) {
+                    layer->transitionActive = false;
+                    layer->visible = false;
+                    layer->transitionProgress = 0.0f;
+                }
             }
         }
 
@@ -241,7 +249,7 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
             }
             float mod = sig * ab.strength;
             switch (ab.target) {
-                case Layer::AudioTarget::Opacity: effectiveOpacity *= (1.0f - mod + mod * sig); break;
+                case Layer::AudioTarget::Opacity: effectiveOpacity *= (1.0f - ab.strength + ab.strength * sig); break;
                 case Layer::AudioTarget::PositionX: layer->position.x += mod * 0.5f; break;
                 case Layer::AudioTarget::PositionY: layer->position.y += mod * 0.5f; break;
                 case Layer::AudioTarget::Scale: layer->scale *= (1.0f + mod); break;

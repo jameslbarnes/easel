@@ -18,8 +18,8 @@ void BPMSync::update(float dt) {
     // Bar phase (4 beats)
     m_barPhase = fmodf((float)(m_beatCount % 4) / 4.0f + m_phase / 4.0f, 1.0f);
 
-    // Decay pulse (fast attack, smooth decay like Resolume)
-    m_pulse = std::max(0.0f, m_pulse * (1.0f - m_pulseDecayRate * dt));
+    // Decay pulse (exponential, frame-rate independent)
+    m_pulse *= expf(-m_pulseDecayRate * dt);
 }
 
 void BPMSync::setBPM(float bpm) {

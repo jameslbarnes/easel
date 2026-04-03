@@ -86,7 +86,6 @@ private:
 
     // Rendering
     ShaderProgram m_shader;         // objmesh shader
-    ShaderProgram m_lineShader;     // for frustum lines
     Framebuffer m_fbo;              // offscreen render target
     Mesh m_quad;
     int m_fboWidth = 800, m_fboHeight = 600;

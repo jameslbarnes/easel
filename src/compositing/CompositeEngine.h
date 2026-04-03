@@ -56,8 +56,10 @@ private:
 
     // Effect chain temp FBOs (ping-pong)
     Framebuffer m_effectFBO[2];
-    // Per-layer feedback FBO (keyed by layer pointer)
-    std::unordered_map<Layer*, Framebuffer> m_feedbackFBOs;
+    // Per-layer feedback FBO (keyed by layer ID)
+    std::unordered_map<uint32_t, Framebuffer> m_feedbackFBOs;
+
+    float m_lastTime = 0;
 
     void clear();
     void setAudioUniforms(ShaderProgram& shader, float audioStrength);

@@ -54,7 +54,10 @@ public:
     void startLearn() { m_learning = true; m_lastLearnEvent = {}; }
     void stopLearn() { m_learning = false; }
     bool isLearning() const { return m_learning; }
-    MIDIEvent lastLearnEvent() const { return m_lastLearnEvent; }
+    MIDIEvent lastLearnEvent() {
+        std::lock_guard<std::mutex> lock(m_eventMutex);
+        return m_lastLearnEvent;
+    }
 
     // Mappings
     void addMapping(const MIDIMapping& mapping);

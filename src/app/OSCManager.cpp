@@ -55,11 +55,13 @@ bool OSCManager::startReceiver(int port) {
 
 void OSCManager::stopReceiver() {
     m_receiving = false;
+    // Join thread first (it will exit on next select timeout),
+    // then close socket to avoid race condition
+    if (m_recvThread.joinable()) m_recvThread.join();
     if (m_recvSocket != INVALID_SOCKET) {
         closesocket(m_recvSocket);
         m_recvSocket = INVALID_SOCKET;
     }
-    if (m_recvThread.joinable()) m_recvThread.join();
 }
 
 void OSCManager::receiveLoop() {
@@ -99,18 +101,24 @@ void OSCManager::receiveLoop() {
 bool OSCManager::parseOSC(const uint8_t* data, int len, OSCMessage& msg) {
     if (len < 4 || data[0] != '/') return false;
 
-    // Read address
+    // Read address (bounded by buffer length)
     int pos = 0;
-    msg.address = (const char*)data;
-    pos = (int)msg.address.size() + 1;
+    int addrEnd = 0;
+    while (addrEnd < len && data[addrEnd] != '\0') addrEnd++;
+    if (addrEnd >= len) return false; // no null terminator
+    msg.address = std::string((const char*)data, addrEnd);
+    pos = addrEnd + 1;
     pos = (pos + 3) & ~3; // align to 4
 
     if (pos >= len) return true; // address-only message
 
-    // Read type tag
+    // Read type tag (bounded)
     if (data[pos] != ',') return true;
-    std::string typeTags = (const char*)(data + pos);
-    pos += (int)typeTags.size() + 1;
+    int tagEnd = pos;
+    while (tagEnd < len && data[tagEnd] != '\0') tagEnd++;
+    if (tagEnd >= len) return true;
+    std::string typeTags = std::string((const char*)(data + pos), tagEnd - pos);
+    pos = tagEnd + 1;
     pos = (pos + 3) & ~3;
 
     // Parse arguments
@@ -136,9 +144,12 @@ bool OSCManager::parseOSC(const uint8_t* data, int len, OSCMessage& msg) {
                 break;
             }
             case 's': {
-                std::string s = (const char*)(data + pos);
+                int sEnd = pos;
+                while (sEnd < len && data[sEnd] != '\0') sEnd++;
+                if (sEnd >= len) return true;
+                std::string s((const char*)(data + pos), sEnd - pos);
                 msg.strings.push_back(s);
-                pos += (int)s.size() + 1;
+                pos = sEnd + 1;
                 pos = (pos + 3) & ~3;
                 break;
             }
