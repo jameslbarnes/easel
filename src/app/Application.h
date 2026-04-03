@@ -36,6 +36,8 @@
 #include "app/AudioAnalyzer.h"
 #include "app/BPMSync.h"
 #include "app/SceneManager.h"
+#include "app/OSCManager.h"
+#include "app/MIDIManager.h"
 #include "app/DataBus.h"
 
 #ifdef HAS_NDI
@@ -97,6 +99,8 @@ private:
     AudioAnalyzer m_audioAnalyzer;
     BPMSync m_bpmSync;
     SceneManager m_sceneManager;
+    OSCManager m_oscManager;
+    MIDIManager m_midiManager;
     float m_audioRMS = 0; // backward compat: smoothed audio level
     int m_mosaicAudioDevice = -1; // -1 = system loopback, >=0 = index into device list
     bool m_projectorAutoConnect = false;

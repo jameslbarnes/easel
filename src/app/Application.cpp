@@ -228,6 +228,10 @@ bool Application::init() {
     // Start with a blank project (no auto-load)
     std::cout << "[Easel] Starting with blank project" << std::endl;
 
+    // Auto-start OSC receiver on port 9000
+    m_oscManager.startReceiver(9000);
+    m_oscManager.setSendTarget("127.0.0.1", 9001);
+
     return true;
 }
 
@@ -927,6 +931,100 @@ void Application::duplicateZone(int index) {
 
 void Application::renderUI() {
     handleDroppedFiles();
+
+    // Process MIDI events
+    {
+        auto events = m_midiManager.pollEvents();
+        auto actions = m_midiManager.processEvents(events);
+        for (const auto& act : actions) {
+            switch (act.target) {
+                case MIDIMapping::Target::LayerOpacity:
+                    if (act.layerIndex >= 0 && act.layerIndex < m_layerStack.count())
+                        m_layerStack[act.layerIndex]->opacity = act.value;
+                    break;
+                case MIDIMapping::Target::LayerVisible:
+                    if (act.layerIndex >= 0 && act.layerIndex < m_layerStack.count())
+                        m_layerStack[act.layerIndex]->visible = act.value > 0.5f;
+                    break;
+                case MIDIMapping::Target::LayerPosX:
+                    if (act.layerIndex >= 0 && act.layerIndex < m_layerStack.count())
+                        m_layerStack[act.layerIndex]->position.x = act.value * 2.0f - 1.0f;
+                    break;
+                case MIDIMapping::Target::LayerPosY:
+                    if (act.layerIndex >= 0 && act.layerIndex < m_layerStack.count())
+                        m_layerStack[act.layerIndex]->position.y = act.value * 2.0f - 1.0f;
+                    break;
+                case MIDIMapping::Target::LayerScale:
+                    if (act.layerIndex >= 0 && act.layerIndex < m_layerStack.count())
+                        m_layerStack[act.layerIndex]->scale = glm::vec2(act.value * 2.0f);
+                    break;
+                case MIDIMapping::Target::LayerRotation:
+                    if (act.layerIndex >= 0 && act.layerIndex < m_layerStack.count())
+                        m_layerStack[act.layerIndex]->rotation = act.value * 360.0f;
+                    break;
+                case MIDIMapping::Target::SceneRecall:
+                    m_sceneManager.recallScene(act.sceneIndex, m_layerStack);
+                    break;
+                case MIDIMapping::Target::BPMSet:
+                    m_bpmSync.setBPM(act.value * 200.0f + 40.0f);
+                    break;
+                case MIDIMapping::Target::BPMTap:
+                    if (act.value > 0.5f) m_bpmSync.tap();
+                    break;
+            }
+        }
+    }
+
+    // Process OSC messages
+    {
+        auto msgs = m_oscManager.pollMessages();
+        for (const auto& msg : msgs) {
+            // /easel/layer/N/opacity float
+            // /easel/layer/N/visible int(0/1)
+            // /easel/layer/N/posX float
+            // /easel/layer/N/posY float
+            // /easel/layer/N/scale float
+            // /easel/scene/N (recall scene N)
+            // /easel/bpm float
+            // /easel/tap (tap tempo)
+
+            if (msg.address == "/easel/bpm" && !msg.floats.empty()) {
+                m_bpmSync.setBPM(msg.floats[0]);
+            } else if (msg.address == "/easel/tap") {
+                m_bpmSync.tap();
+            } else if (msg.address.rfind("/easel/scene/", 0) == 0) {
+                int idx = atoi(msg.address.c_str() + 13);
+                m_sceneManager.recallScene(idx, m_layerStack);
+            } else if (msg.address.rfind("/easel/layer/", 0) == 0) {
+                // Parse /easel/layer/N/property
+                const char* rest = msg.address.c_str() + 13;
+                int layerIdx = atoi(rest);
+                const char* slash = strchr(rest, '/');
+                if (slash && layerIdx >= 0 && layerIdx < m_layerStack.count()) {
+                    auto& layer = m_layerStack[layerIdx];
+                    std::string prop = slash + 1;
+                    if (prop == "opacity" && !msg.floats.empty())
+                        layer->opacity = std::max(0.0f, std::min(1.0f, msg.floats[0]));
+                    else if (prop == "visible" && !msg.ints.empty())
+                        layer->visible = msg.ints[0] != 0;
+                    else if (prop == "posX" && !msg.floats.empty())
+                        layer->position.x = msg.floats[0];
+                    else if (prop == "posY" && !msg.floats.empty())
+                        layer->position.y = msg.floats[0];
+                    else if (prop == "scale" && !msg.floats.empty())
+                        layer->scale = glm::vec2(msg.floats[0]);
+                    else if (prop == "rotation" && !msg.floats.empty())
+                        layer->rotation = msg.floats[0];
+                }
+            }
+            // Forward to DataBus
+            if (!msg.floats.empty()) {
+                m_dataBus.set(msg.address, std::to_string(msg.floats[0]));
+            } else if (!msg.strings.empty()) {
+                m_dataBus.set(msg.address, msg.strings[0]);
+            }
+        }
+    }
 
 #ifdef HAS_FFMPEG
     float transportBarH = 56.0f;
