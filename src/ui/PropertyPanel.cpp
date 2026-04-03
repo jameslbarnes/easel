@@ -1,4 +1,5 @@
 #include "ui/PropertyPanel.h"
+#include "app/BPMSync.h"
 #include "compositing/BlendMode.h"
 #include "compositing/LayerStack.h"
 #include "sources/ShaderSource.h"
@@ -60,8 +61,86 @@ static bool dragPair(const char* idA, const char* labelA, float* a,
 
 void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                            SpeechState* speech, MosaicAudioState* mosaicAudio,
-                           float appTime, LayerStack* layerStack) {
+                           float appTime, LayerStack* layerStack,
+                           BPMSync* bpmSync) {
+    ImGui::SetNextWindowSizeConstraints(ImVec2(250, 200), ImVec2(FLT_MAX, FLT_MAX));
     ImGui::Begin("Properties");
+
+    // --- BPM Sync (always visible) ---
+    if (bpmSync) {
+        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.0f, 0.78f, 1.0f, 0.08f));
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
+        ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.0f, 0.78f, 1.0f, 0.22f));
+        bool bpmOpen = ImGui::CollapsingHeader("BPM Sync", ImGuiTreeNodeFlags_DefaultOpen);
+        ImGui::PopStyleColor(3);
+
+        if (bpmOpen) {
+            float currentBPM = bpmSync->bpm();
+
+            // BPM value + beat dots on same row
+            float w = ImGui::GetContentRegionAvail().x;
+
+            // Beat indicator dots
+            {
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                ImVec2 p = ImGui::GetCursorScreenPos();
+                float dotY = p.y + 8;
+                for (int b = 0; b < 4; b++) {
+                    float dotCX = p.x + b * 16.0f;
+                    int beatInBar = bpmSync->beatCount() % 4;
+                    bool isCurrent = (b == beatInBar) && currentBPM > 0;
+                    float pulse = isCurrent ? bpmSync->beatPulse() : 0.0f;
+                    float r = 4.0f + pulse * 2.0f;
+                    dl->AddCircleFilled(ImVec2(dotCX + 6, dotY), r,
+                                        isCurrent ? IM_COL32(0, 220, 255, (int)(140 + pulse * 115))
+                                                  : IM_COL32(50, 60, 80, 120));
+                }
+                // BPM text next to dots
+                char bpmBuf[16];
+                if (currentBPM > 0) snprintf(bpmBuf, sizeof(bpmBuf), "%.1f BPM", currentBPM);
+                else snprintf(bpmBuf, sizeof(bpmBuf), "--- BPM");
+                dl->AddText(ImVec2(p.x + 74, p.y + 2),
+                            currentBPM > 0 ? IM_COL32(0, 200, 255, 255) : IM_COL32(100, 115, 140, 180),
+                            bpmBuf);
+                ImGui::Dummy(ImVec2(w, 18));
+            }
+
+            // TAP + BPM input + Reset on same row
+            {
+                float btnW = (w - ImGui::GetStyle().ItemSpacing.x * 2) / 3.0f;
+
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.10f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.25f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.40f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+                if (ImGui::Button("TAP", ImVec2(btnW, 0))) {
+                    bpmSync->tap();
+                }
+                ImGui::PopStyleColor(4);
+
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(btnW);
+                float bpmVal = currentBPM;
+                if (ImGui::DragFloat("##BPMVal", &bpmVal, 0.5f, 0.0f, 300.0f, "%.0f BPM")) {
+                    bpmSync->setBPM(bpmVal);
+                }
+
+                ImGui::SameLine();
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.05f, 0.05f, 0.15f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.1f, 0.1f, 0.3f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.35f, 0.35f, 0.8f));
+                if (ImGui::Button("Reset", ImVec2(btnW, 0))) {
+                    bpmSync->setBPM(0);
+                    bpmSync->resetPhase();
+                }
+                ImGui::PopStyleColor(3);
+            }
+
+            ImGui::Dummy(ImVec2(0, 2));
+        }
+
+        thinSep();
+    }
 
     if (!layer) {
         ImGui::TextDisabled("No layer selected");
@@ -454,22 +533,29 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             ImGui::PopStyleColor(4);
         }
 
-        float shapeW = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 3) / 4.0f;
+        // Shape presets - 5 buttons in a row
+        float shapeW = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 4) / 5.0f;
         if (accentBtn("Rect", shapeW)) {
             undoNeeded = true;
             layer->maskPath.makeRectangle({0.5f, 0.5f}, {0.6f, 0.6f});
             maskEditMode = true;
         }
         ImGui::SameLine();
-        if (accentBtn("Ellipse", shapeW)) {
+        if (accentBtn("Circle", shapeW)) {
             undoNeeded = true;
-            layer->maskPath.makeEllipse({0.5f, 0.5f}, {0.6f, 0.6f});
+            layer->maskPath.makeEllipse({0.5f, 0.5f}, {0.3f, 0.3f});
             maskEditMode = true;
         }
         ImGui::SameLine();
         if (accentBtn("Tri", shapeW)) {
             undoNeeded = true;
             layer->maskPath.makeTriangle({0.5f, 0.5f}, 0.3f);
+            maskEditMode = true;
+        }
+        ImGui::SameLine();
+        if (accentBtn("Oct", shapeW)) {
+            undoNeeded = true;
+            layer->maskPath.makePolygon({0.5f, 0.5f}, 0.3f, 8);
             maskEditMode = true;
         }
         ImGui::SameLine();

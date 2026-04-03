@@ -144,6 +144,7 @@ static ImU32 zoneColor(int idx) {
 void LayerPanel::render(LayerStack& stack, int& selectedLayer,
                         std::vector<std::unique_ptr<OutputZone>>* zones,
                         int activeZone) {
+    ImGui::SetNextWindowSizeConstraints(ImVec2(250, 150), ImVec2(FLT_MAX, FLT_MAX));
     ImGui::Begin("Layers");
 
     wantsAddImage = wantsAddVideo = wantsAddShader = false;

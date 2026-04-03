@@ -79,7 +79,10 @@ message(STATUS "WHEP source disabled")
 # kiss_fft (public domain FFT library for AudioAnalyzer)
 set(KISS_FFT_SRC "${CMAKE_SOURCE_DIR}/external/kiss_fft/kiss_fft.c")
 
-add_executable(${PROJECT_NAME} WIN32 ${SOURCES} ${KISS_FFT_SRC})
+# Windows app icon resource — generate RC with absolute path to ICO
+# Use resource ID 1 to ensure Windows picks it as the main app icon
+file(WRITE "${CMAKE_BINARY_DIR}/easel_icon.rc" "1 ICON \"${CMAKE_SOURCE_DIR}/resources/icon.ico\"\n")
+add_executable(${PROJECT_NAME} WIN32 ${SOURCES} ${KISS_FFT_SRC} "${CMAKE_BINARY_DIR}/easel_icon.rc")
 
 # Shader test harness (console app)
 add_executable(test_shaders

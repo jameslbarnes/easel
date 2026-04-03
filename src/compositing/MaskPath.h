@@ -59,6 +59,7 @@ public:
     void makeEllipse(glm::vec2 center, glm::vec2 size);
     void makeTriangle(glm::vec2 center, float radius);
     void makeStar(glm::vec2 center, float outerRadius, float innerRadius, int points = 5);
+    void makePolygon(glm::vec2 center, float radius, int sides);
 
 private:
     std::vector<MaskPoint> m_points;

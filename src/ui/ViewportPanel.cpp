@@ -486,7 +486,6 @@ void ViewportPanel::render(GLuint texture, CornerPinWarp& cornerPin, MeshWarp& m
 
             if (warpMode == WarpMode::CornerPin) {
                 const auto& corners = cornerPin.corners();
-                const char* labels[] = {"BL", "BR", "TR", "TL"};
 
                 for (int i = 0; i < 4; i++) {
                     draw->AddLine(ndc2scr(corners[i]), ndc2scr(corners[(i + 1) % 4]), kAccentGlow, 6.0f);
@@ -498,7 +497,6 @@ void ViewportPanel::render(GLuint texture, CornerPinWarp& cornerPin, MeshWarp& m
                     draw->AddCircleFilled(p, active ? 14.0f : 10.0f, kAccentGlow);
                     draw->AddCircleFilled(p, active ? 8.0f : 6.0f, active ? kAccent : kAccentDim);
                     draw->AddCircle(p, active ? 8.0f : 6.0f, kHandleOuter, 0, 1.5f);
-                    draw->AddText(ImVec2(p.x + 12, p.y - 8), kWhiteSoft, labels[i]);
                 }
             } else {
                 const auto& points = meshWarp.points();
