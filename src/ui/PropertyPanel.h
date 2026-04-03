@@ -41,7 +41,8 @@ public:
     void render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 SpeechState* speech = nullptr, MosaicAudioState* mosaicAudio = nullptr,
                 float appTime = 0.0f, LayerStack* layerStack = nullptr,
-                BPMSync* bpmSync = nullptr, SceneManager* sceneManager = nullptr);
+                BPMSync* bpmSync = nullptr, SceneManager* sceneManager = nullptr,
+                int* audioDeviceIdx = nullptr);
 
     // Set to true when a property widget is first activated (signals Application to push undo state)
     bool undoNeeded = false;

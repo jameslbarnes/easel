@@ -1140,7 +1140,7 @@ void Application::renderUI() {
         capturedPre = true;
     }
 
-    m_propertyPanel.render(selectedLayer, m_maskEditMode, &m_speechState, &mosaicAudio, (float)glfwGetTime(), &m_layerStack, &m_bpmSync, &m_sceneManager);
+    m_propertyPanel.render(selectedLayer, m_maskEditMode, &m_speechState, &mosaicAudio, (float)glfwGetTime(), &m_layerStack, &m_bpmSync, &m_sceneManager, &m_mosaicAudioDevice);
 
     // If a property widget was just activated, push the pre-edit state (before the widget changed it)
     if (m_propertyPanel.undoNeeded) {
