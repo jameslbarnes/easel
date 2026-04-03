@@ -16,45 +16,14 @@ NDIRuntime& NDIRuntime::instance() {
     return s;
 }
 
-// Manually load NDI runtime DLL and resolve NDIlib_v6_load
-static const NDIlib_v6* loadNDIRuntime() {
-#ifdef _WIN32
-    // Try the environment variable first (NDI 6 runtime)
-    const char* redistFolder = getenv("NDI_RUNTIME_DIR_V6");
-    if (!redistFolder) redistFolder = getenv("NDI_RUNTIME_DIR_V5");
+// Load NDI runtime via our custom dynamic loader (Processing.NDI.DynamicLoad.h)
+static NDIlib_api s_ndiApi;
 
-    std::string dllPath;
-    if (redistFolder) {
-        dllPath = std::string(redistFolder) + "\\Processing.NDI.Lib.x64.dll";
+static const NDIlib_api* loadNDIRuntime() {
+    if (NDIlib_load(&s_ndiApi)) {
+        return &s_ndiApi;
     }
-
-    HMODULE hNDI = nullptr;
-    if (!dllPath.empty()) {
-        hNDI = LoadLibraryA(dllPath.c_str());
-    }
-    if (!hNDI) {
-        // Fallback: try system PATH
-        hNDI = LoadLibraryA("Processing.NDI.Lib.x64.dll");
-    }
-    if (!hNDI) {
-        return nullptr;
-    }
-
-    // Resolve NDIlib_v6_load (or fall back to NDIlib_v5_load)
-    typedef const NDIlib_v6* (*NDIlib_v6_load_fn)(void);
-    auto loadFn = (NDIlib_v6_load_fn)GetProcAddress(hNDI, "NDIlib_v6_load");
-    if (!loadFn) {
-        loadFn = (NDIlib_v6_load_fn)GetProcAddress(hNDI, "NDIlib_v5_load");
-    }
-    if (!loadFn) {
-        FreeLibrary(hNDI);
-        return nullptr;
-    }
-
-    return loadFn();
-#else
     return nullptr;
-#endif
 }
 
 bool NDIRuntime::init() {

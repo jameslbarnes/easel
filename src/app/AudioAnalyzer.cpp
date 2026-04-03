@@ -35,8 +35,8 @@ void AudioAnalyzer::setDevice(int deviceIdx) {
 void AudioAnalyzer::update(float dt) {
     if (dt <= 0) return;
 
-    // Reinit capture if device changed
-    if (m_deviceIdx != m_requestedDevice) {
+    // Reinit capture if device changed or previous init failed
+    if (m_deviceIdx != m_requestedDevice || (!m_initialized && m_deviceIdx != -2)) {
         cleanupCapture();
         m_deviceIdx = m_requestedDevice;
         initCapture();
@@ -65,13 +65,22 @@ void AudioAnalyzer::initCapture() {
 #ifdef _WIN32
     initHannWindow();
 
-    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    HRESULT comHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    // RPC_E_CHANGED_MODE is OK — COM is still usable in existing apartment mode
+    if (FAILED(comHr) && comHr != RPC_E_CHANGED_MODE) {
+        std::cerr << "[AudioAnalyzer] CoInitializeEx failed (hr=0x" << std::hex << comHr << std::dec << ")" << std::endl;
+        return;
+    }
 
     IMMDeviceEnumerator* enumerator = nullptr;
     HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
                                    CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
                                    (void**)&enumerator);
-    if (FAILED(hr) || !enumerator) return;
+    if (FAILED(hr) || !enumerator) {
+        std::cerr << "[AudioAnalyzer] CoCreateInstance(MMDeviceEnumerator) failed (hr=0x"
+                  << std::hex << hr << std::dec << ")" << std::endl;
+        return;
+    }
 
     IMMDevice* device = nullptr;
     bool isLoopback = false;
@@ -105,17 +114,28 @@ void AudioAnalyzer::initCapture() {
     }
     enumerator->Release();
 
-    if (!device) return;
+    if (!device) {
+        std::cerr << "[AudioAnalyzer] No audio device found (dev=" << m_deviceIdx << ")" << std::endl;
+        return;
+    }
     m_device = device;
 
     IAudioClient* audioClient = nullptr;
     hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&audioClient);
-    if (FAILED(hr) || !audioClient) return;
+    if (FAILED(hr) || !audioClient) {
+        std::cerr << "[AudioAnalyzer] IAudioClient activation failed (hr=0x"
+                  << std::hex << hr << std::dec << ")" << std::endl;
+        return;
+    }
     m_audioClient = audioClient;
 
     WAVEFORMATEX* mixFmt = nullptr;
     hr = audioClient->GetMixFormat(&mixFmt);
-    if (FAILED(hr) || !mixFmt) return;
+    if (FAILED(hr) || !mixFmt) {
+        std::cerr << "[AudioAnalyzer] GetMixFormat failed (hr=0x"
+                  << std::hex << hr << std::dec << ")" << std::endl;
+        return;
+    }
 
     m_sampleRate = mixFmt->nSamplesPerSec;
     m_channels = mixFmt->nChannels;
@@ -138,7 +158,11 @@ void AudioAnalyzer::initCapture() {
 
     IAudioCaptureClient* captureClient = nullptr;
     hr = audioClient->GetService(__uuidof(IAudioCaptureClient), (void**)&captureClient);
-    if (FAILED(hr) || !captureClient) return;
+    if (FAILED(hr) || !captureClient) {
+        std::cerr << "[AudioAnalyzer] GetService(IAudioCaptureClient) failed (hr=0x"
+                  << std::hex << hr << std::dec << ")" << std::endl;
+        return;
+    }
     m_captureClient = captureClient;
 
     audioClient->Start();
@@ -237,13 +261,14 @@ void AudioAnalyzer::runFFT() {
 
     kiss_fft(cfg, in, out);
 
-    // Compute power spectrum (magnitude squared)
-    // Use fixed normalization based on FFT size to avoid per-frame jitter
-    // Max possible power for a full-scale sine in 512-point FFT = (N/2)^2 = 65536
-    const float normFactor = 1.0f / (float)(kFFTSize * kFFTSize / 4);
+    // Compute magnitude spectrum (linear amplitude, not power)
+    // Using magnitude instead of power preserves perceptual loudness relationship:
+    // power (mag^2) squashes moderate-level audio to near-zero, making bands unusable.
+    // Normalize by N/2 so a full-scale sine gives magnitude 1.0 in its bin.
+    const float normFactor = 1.0f / (float)(kFFTSize / 2);
     for (int i = 0; i < kBins; i++) {
-        float power = out[i].r * out[i].r + out[i].i * out[i].i;
-        m_spectrum[i] = std::min(power * normFactor, 1.0f);
+        float mag = std::sqrt(out[i].r * out[i].r + out[i].i * out[i].i);
+        m_spectrum[i] = std::min(mag * normFactor, 1.0f);
     }
 
     kiss_fft_free(cfg);
@@ -283,11 +308,12 @@ void AudioAnalyzer::computeBands() {
     treble /= trebleCount;
 
     // Scale each band to useful 0-1 range
-    // Higher bands need more gain since FFT energy drops with frequency
-    m_rawBass = std::min(bass * 6.0f, 1.0f);
-    m_rawLowMid = std::min(lowMid * 10.0f, 1.0f);
-    m_rawHighMid = std::min(highMid * 20.0f, 1.0f);
-    m_rawTreble = std::min(treble * 40.0f, 1.0f);
+    // Using magnitude spectrum (linear), so gains are higher than power-based.
+    // Tuned for typical system audio at moderate listening volume.
+    m_rawBass = std::min(bass * 60.0f, 1.0f);
+    m_rawLowMid = std::min(lowMid * 100.0f, 1.0f);
+    m_rawHighMid = std::min(highMid * 200.0f, 1.0f);
+    m_rawTreble = std::min(treble * 400.0f, 1.0f);
 }
 
 // --- Beat detection ---

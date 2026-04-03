@@ -3,9 +3,6 @@
 
 #include <Processing.NDI.Lib.h>
 
-// NDI SDK version compatibility: older SDKs use NDIlib_api / NDIlib_load(),
-// newer ones (v6) use NDIlib_v6 / NDIlib_v6_load().
-using NDIlib_api = NDIlib_v6;
 
 // Singleton that manages the NDI runtime lifecycle.
 // Dynamically loads the NDI DLL and provides access to function pointers.

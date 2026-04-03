@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(\"/c/Program Files \\(x86\\)/Microsoft Visual Studio/2019/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe\" --build build --config Release 2>&1 | tail -30)"
+      "Bash(\"/c/Program Files \\(x86\\)/Microsoft Visual Studio/2019/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe\" --build build --config Release 2>&1 | tail -30)",
+      "Bash(cmake --build . --config Release)",
+      "Bash(\"/c/Program Files \\(x86\\)/Microsoft Visual Studio/2019/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe\" --build build --config Release)",
+      "Bash(\"/c/Program Files \\(x86\\)/Microsoft Visual Studio/2019/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe\" --build \"C:/Users/james/easel/build\" --config Release)",
+      "Bash(\"/c/Program Files \\(x86\\)/Microsoft Visual Studio/2019/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe\" --build \"C:/Users/james/easel/build\" --config Release --target Easel)"
     ]
   }
 }

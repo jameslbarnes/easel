@@ -225,8 +225,16 @@ bool Application::init() {
         }
     }
 
-    // Start with a blank project (no auto-load)
-    std::cout << "[Easel] Starting with blank project" << std::endl;
+    // Auto-load default project if it exists, otherwise blank
+    {
+        std::string defaultPath = "default.easel";
+        if (std::filesystem::exists(defaultPath)) {
+            loadProject(defaultPath);
+            std::cout << "[Easel] Auto-loaded default project" << std::endl;
+        } else {
+            std::cout << "[Easel] Starting with blank project" << std::endl;
+        }
+    }
 
     // Init 3D stage view
     m_stageView.init();
@@ -333,7 +341,7 @@ void Application::run() {
             double now = glfwGetTime();
             float dt = (float)(now - lastTime);
             lastTime = now;
-            m_audioAnalyzer.setDevice(m_mosaicAudioDevice);
+            m_audioAnalyzer.setDevice(m_selectedAudioDevice);
             m_audioAnalyzer.update(dt);
             m_audioRMS = m_audioAnalyzer.smoothedRMS();
             m_bpmSync.update(dt);
@@ -1107,7 +1115,7 @@ void Application::renderUI() {
         selectedLayer = m_layerStack[m_selectedLayer];
     }
     MosaicAudioState mosaicAudio;
-    mosaicAudio.selectedDevice = &m_mosaicAudioDevice;
+    mosaicAudio.selectedDevice = &m_selectedAudioDevice;
     mosaicAudio.bass = m_audioAnalyzer.bass();
     mosaicAudio.lowMid = m_audioAnalyzer.lowMid();
     mosaicAudio.highMid = m_audioAnalyzer.highMid();
@@ -1856,10 +1864,13 @@ void Application::cleanupAudioMeter() {
 }
 
 void Application::updateAudioMeter() {
-    // Reinit meter if selected device changed
-    if (m_meterDeviceIdx != m_selectedAudioDevice) {
+    // Reinit meter if selected device changed or previous init failed
+    if (m_meterDeviceIdx != m_selectedAudioDevice || !m_audioMeterInfo) {
         cleanupAudioMeter();
         m_meterDeviceIdx = m_selectedAudioDevice;
+
+        // Ensure COM is initialized on this thread
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
         IMMDeviceEnumerator* enumerator = nullptr;
         HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
@@ -1873,11 +1884,9 @@ void Application::updateAudioMeter() {
             } else if (m_selectedAudioDevice >= 0 && m_selectedAudioDevice < (int)m_audioDevices.size()) {
                 auto& dev = m_audioDevices[m_selectedAudioDevice];
                 if (dev.isCapture) {
-                    // Microphone — get by ID from capture devices
                     std::wstring wid(dev.id.begin(), dev.id.end());
                     hr = enumerator->GetDevice(wid.c_str(), &device);
                 } else {
-                    // Output device for loopback — get by ID from render devices
                     std::wstring wid(dev.id.begin(), dev.id.end());
                     hr = enumerator->GetDevice(wid.c_str(), &device);
                 }
@@ -1889,37 +1898,54 @@ void Application::updateAudioMeter() {
                     m_audioMeterInfo = meter;
                     m_audioMeterDevice = device;
                 } else {
+                    std::cerr << "[AudioMeter] IAudioMeterInformation activation failed (hr=0x"
+                              << std::hex << hr << std::dec << ")" << std::endl;
                     device->Release();
                 }
+            } else {
+                std::cerr << "[AudioMeter] Device not found (hr=0x"
+                          << std::hex << hr << std::dec << " dev=" << m_selectedAudioDevice << ")" << std::endl;
             }
             enumerator->Release();
+        } else {
+            std::cerr << "[AudioMeter] CoCreateInstance failed (hr=0x"
+                      << std::hex << hr << std::dec << ")" << std::endl;
         }
     }
 
-    // Poll levels
+    // Poll levels from IAudioMeterInformation, or fall back to AudioAnalyzer RMS
     if (m_audioMeterInfo) {
         IAudioMeterInformation* meter = (IAudioMeterInformation*)m_audioMeterInfo;
         float peak = 0.0f;
-        if (SUCCEEDED(meter->GetPeakValue(&peak))) {
+        HRESULT hr = meter->GetPeakValue(&peak);
+        if (SUCCEEDED(hr)) {
             m_audioLevelPeak = peak;
+        } else {
+            // Meter became invalid (device disconnected?) — force reinit next frame
+            cleanupAudioMeter();
         }
 
         UINT32 channelCount = 0;
-        meter->GetMeteringChannelCount(&channelCount);
-        if (channelCount >= 2) {
-            float peaks[8] = {};
-            if (SUCCEEDED(meter->GetChannelsPeakValues(channelCount > 8 ? 8 : channelCount, peaks))) {
-                m_audioLevelL = peaks[0];
-                m_audioLevelR = peaks[1];
-            }
-        } else if (channelCount == 1) {
-            float peaks[1] = {};
-            if (SUCCEEDED(meter->GetChannelsPeakValues(1, peaks))) {
-                m_audioLevelL = m_audioLevelR = peaks[0];
+        if (m_audioMeterInfo) { // re-check after potential cleanup
+            meter->GetMeteringChannelCount(&channelCount);
+            if (channelCount >= 2) {
+                float peaks[8] = {};
+                if (SUCCEEDED(meter->GetChannelsPeakValues(channelCount > 8 ? 8 : channelCount, peaks))) {
+                    m_audioLevelL = peaks[0];
+                    m_audioLevelR = peaks[1];
+                }
+            } else if (channelCount == 1) {
+                float peaks[1] = {};
+                if (SUCCEEDED(meter->GetChannelsPeakValues(1, peaks))) {
+                    m_audioLevelL = m_audioLevelR = peaks[0];
+                }
             }
         }
     } else {
-        m_audioLevelPeak = m_audioLevelL = m_audioLevelR = 0.0f;
+        // Fallback: use AudioAnalyzer RMS if meter unavailable
+        float rms = m_audioAnalyzer.smoothedRMS();
+        m_audioLevelPeak = rms;
+        m_audioLevelL = m_audioLevelR = rms;
     }
 
     // Smooth (fast attack, slow release)

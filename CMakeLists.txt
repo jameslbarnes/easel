@@ -267,6 +267,29 @@ if(HAS_NDI)
     target_link_libraries(test_ndi_list PRIVATE glfw glad opengl32)
 endif()
 
+# WASAPI capture diagnostic test (standalone, no Catch2)
+add_executable(test_wasapi_capture tests/test_wasapi_capture.cpp)
+target_compile_definitions(test_wasapi_capture PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_link_libraries(test_wasapi_capture PRIVATE ole32)
+
+# End-to-end audio test (AudioAnalyzer with real WASAPI capture)
+add_executable(test_audio_e2e
+    tests/test_audio_e2e.cpp
+    src/app/AudioAnalyzer.cpp
+    src/render/Texture.cpp
+    src/render/Framebuffer.cpp
+    src/render/Mesh.cpp
+    src/render/ShaderProgram.cpp
+    external/kiss_fft/kiss_fft.c
+)
+target_compile_definitions(test_audio_e2e PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_include_directories(test_audio_e2e PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/external/kiss_fft
+    ${stb_SOURCE_DIR}
+)
+target_link_libraries(test_audio_e2e PRIVATE glfw glad glm::glm opengl32 ole32)
+
 # Copy shaders to build directory
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory

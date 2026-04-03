@@ -322,11 +322,16 @@ std::string ShaderSource::translateVertex(const std::string& isfBody) {
     body = std::regex_replace(body, std::regex(R"(\bvarying\b)"), "out");
     body = std::regex_replace(body, std::regex(R"(\battribute\b)"), "in");
 
+    // Strip declarations that the preamble already provides (custom .vs files redeclare these)
+    body = std::regex_replace(body, std::regex(R"(out\s+vec2\s+isf_FragNormCoord\s*;)"), "// (provided by Easel)");
+    body = std::regex_replace(body, std::regex(R"(in\s+vec2\s+position\s*;)"), "// (provided by Easel)");
+
     std::stringstream out;
     out << "#version 430 core\n";
     out << "layout(location = 0) in vec2 aPos;\n";
     out << "layout(location = 1) in vec2 aTexCoord;\n";
     out << "out vec2 isf_FragNormCoord;\n";
+    out << "#define position aPos\n";
     out << "\n";
 
     // Provide both naming conventions for the vertex init function

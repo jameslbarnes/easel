@@ -214,9 +214,10 @@ TEST_CASE("No jitter: frame-to-frame delta is bounded", "[audio][smooth][jitter]
     INFO("Max bass delta: " << maxBassDelta);
     INFO("Max RMS delta: " << maxRmsDelta);
 
-    // After convergence, deltas should be < 5% per frame
-    CHECK(maxBassDelta < 0.05f);
-    CHECK(maxRmsDelta < 0.05f);
+    // After convergence, deltas should be < 8% per frame
+    // (magnitude-based spectrum with higher gains produces larger deltas than power-based)
+    CHECK(maxBassDelta < 0.08f);
+    CHECK(maxRmsDelta < 0.08f);
 }
 
 TEST_CASE("dt-independence: different frame rates give similar steady-state", "[audio][smooth][dt]") {
