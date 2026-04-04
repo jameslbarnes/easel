@@ -456,8 +456,8 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
         m_pan = {0, 0};
     }
 
-    // --- Draw warp handles only when no layer is selected and not in mask mode ---
-    if (m_editMode != EditMode::Mask && !m_layerSelected && m_imageSize.x > 0 && m_imageSize.y > 0) {
+    // --- Draw warp handles (always visible, not in mask mode) ---
+    if (m_editMode != EditMode::Mask && m_imageSize.x > 0 && m_imageSize.y > 0) {
         if (warpMode == WarpMode::ObjMesh && objMeshWarp) {
             // --- Orbit camera interaction ---
             auto& cam = objMeshWarp->camera();
