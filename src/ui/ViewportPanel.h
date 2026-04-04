@@ -44,6 +44,7 @@ public:
     void clearMaskEditSignal() { m_wantsMaskEdit = false; }
     glm::vec2 maskEditClickUV() const { return m_maskEditClickUV; }  // where the edge click happened
 
+    void setLayerSelected(bool sel) { m_layerSelected = sel; }
     bool isHovered() const { return m_hovered; }
     glm::vec2 size() const { return m_size; }
     glm::vec2 imageOrigin() const { return m_imageOrigin; }
@@ -57,6 +58,7 @@ private:
     glm::vec2 m_size = {800, 600};
     bool m_hovered = false;
     EditMode m_editMode = EditMode::Normal;
+    bool m_layerSelected = false;
 
     // Warp dragging state
     int m_warpDragIndex = -1;
@@ -101,6 +103,11 @@ private:
     // The image area within the panel
     glm::vec2 m_imageOrigin = {0, 0};
     glm::vec2 m_imageSize = {0, 0};
+
+    // Viewport panel clip rect (screen-space) for clipping overlays
+    glm::vec2 m_panelMin = {0, 0};
+    glm::vec2 m_panelMax = {0, 0};
+    bool m_panelVisible = false;
 
     // Coordinate conversion helpers
     glm::vec2 screenToUV(glm::vec2 screen) const;

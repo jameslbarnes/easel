@@ -4,6 +4,7 @@
 #include <sstream>
 #include <iostream>
 #include <filesystem>
+#include <algorithm>
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -71,6 +72,10 @@ void ShaderClawBridge::refreshManifest() {
                 m_shaders.push_back(std::move(se));
             }
         }
+        std::sort(m_shaders.begin(), m_shaders.end(),
+                  [](const ShaderEntry& a, const ShaderEntry& b) {
+                      return a.title < b.title;
+                  });
         return;
     }
 
@@ -101,6 +106,12 @@ void ShaderClawBridge::refreshManifest() {
     } catch (const json::exception& e) {
         std::cerr << "ShaderClaw: manifest parse error: " << e.what() << std::endl;
     }
+
+    // Sort shaders alphabetically by title
+    std::sort(m_shaders.begin(), m_shaders.end(),
+              [](const ShaderEntry& a, const ShaderEntry& b) {
+                  return a.title < b.title;
+              });
 }
 
 std::string ShaderClawBridge::pollFileChanges() {

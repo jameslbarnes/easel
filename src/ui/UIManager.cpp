@@ -1,5 +1,6 @@
 #include "ui/UIManager.h"
 #include <algorithm>
+#include <cmath>
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <imgui_impl_glfw.h>
@@ -266,50 +267,62 @@ void UIManager::setupDockspace(float bottomBarHeight) {
     ImGuiID dockspaceId = ImGui::GetID("EaselDockSpace");
     ImGui::DockSpace(dockspaceId, ImVec2(0, 0), ImGuiDockNodeFlags_PassthruCentralNode);
 
-    // Build default layout on first frame
-    if (m_firstFrame) {
+    // Rebuild layout on first frame or when window size changes significantly
+    bool sizeChanged = false;
+    if (!m_firstFrame) {
+        float dw = fabsf(dockSize.x - m_lastDockW);
+        float dh = fabsf(dockSize.y - m_lastDockH);
+        // Trigger rebuild if size changed by more than 100px in either dimension
+        // (catches maximize, restore, resolution change)
+        if (dw > 100.0f || dh > 100.0f) {
+            sizeChanged = true;
+        }
+    }
+
+    if (m_firstFrame || sizeChanged) {
         m_firstFrame = false;
+        m_lastDockW = dockSize.x;
+        m_lastDockH = dockSize.y;
 
         // Always rebuild layout to ensure clean state
         ImGui::DockBuilderRemoveNode(dockspaceId);
         ImGui::DockBuilderAddNode(dockspaceId, ImGuiDockNodeFlags_DockSpace);
         ImGui::DockBuilderSetNodeSize(dockspaceId, dockSize);
 
-        // Split: top 75% = main area, bottom 25% = Mapping
-        ImGuiID topId, bottomId;
-        ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Up, 0.75f, &topId, &bottomId);
+        // Responsive split based on window width
+        float splitRatio = (dockSize.x > 1600) ? 0.65f : (dockSize.x > 1200) ? 0.60f : 0.55f;
 
-        // Split main area: left 62% = preview canvas, right 38% = panels
+        // Split: left = preview + mapping, right = panels
         ImGuiID leftId, rightId;
-        ImGui::DockBuilderSplitNode(topId, ImGuiDir_Left, 0.62f, &leftId, &rightId);
+        ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Left, splitRatio, &leftId, &rightId);
 
-        // Split right side: top ~15% = Layers tabs, bottom ~85% = Properties
+        // Split left: top = preview canvas, bottom = Mapping (auto-size to content)
+        ImGuiID leftTopId, leftBottomId;
+        ImGui::DockBuilderSplitNode(leftId, ImGuiDir_Up, 0.65f, &leftTopId, &leftBottomId);
+
+        // Split right side: top = Layers tabs, bottom = Properties
+        // Use proportional split — give layers ~25% for tab bar + add layer + a few rows
         ImGuiID rightTopId, rightBottomId;
-        ImGui::DockBuilderSplitNode(rightId, ImGuiDir_Up, 0.15f, &rightTopId, &rightBottomId);
-
-        // Set panel sizes proportionally
-        float rightW = dockSize.x * 0.38f;
-        ImGuiDockNode* rightTopNode = ImGui::DockBuilderGetNode(rightTopId);
-        ImGuiDockNode* rightBottomNode = ImGui::DockBuilderGetNode(rightBottomId);
-        if (rightTopNode) rightTopNode->SizeRef = ImVec2(std::max(280.0f, rightW), dockSize.y * 0.15f);
-        if (rightBottomNode) rightBottomNode->SizeRef = ImVec2(std::max(280.0f, rightW), dockSize.y * 0.60f);
-        ImGuiDockNode* bottomNode = ImGui::DockBuilderGetNode(bottomId);
-        if (bottomNode) bottomNode->SizeRef = ImVec2(dockSize.x, dockSize.y * 0.25f);
+        ImGui::DockBuilderSplitNode(rightId, ImGuiDir_Up, 0.25f, &rightTopId, &rightBottomId);
 
         // Dock windows into regions
-        ImGui::DockBuilderDockWindow("Projector Preview", leftId);
-        ImGui::DockBuilderDockWindow("Stage", leftId);
-        ImGui::DockBuilderDockWindow("Stream", leftId);
-        ImGui::DockBuilderDockWindow("Capture", leftId);
-        ImGui::DockBuilderDockWindow("Projector", leftId);
+        ImGui::DockBuilderDockWindow("Canvas", leftTopId);
+        ImGui::DockBuilderDockWindow("Stage", leftTopId);
+        ImGui::DockBuilderDockWindow("Stream", leftTopId);
+        ImGui::DockBuilderDockWindow("Projector", leftTopId);
+        ImGui::DockBuilderDockWindow("Mapping", leftBottomId);
         ImGui::DockBuilderDockWindow("Layers", rightTopId);
         ImGui::DockBuilderDockWindow("ShaderClaw", rightTopId);
         ImGui::DockBuilderDockWindow("Etherea", rightTopId);
         ImGui::DockBuilderDockWindow("NDI", rightTopId);
+        ImGui::DockBuilderDockWindow("Capture", rightTopId);
         ImGui::DockBuilderDockWindow("Properties", rightBottomId);
-        ImGui::DockBuilderDockWindow("Mapping", bottomId);
 
         ImGui::DockBuilderFinish(dockspaceId);
+    } else {
+        // Track size for change detection even when not rebuilding
+        m_lastDockW = dockSize.x;
+        m_lastDockH = dockSize.y;
     }
 
     ImGui::End();

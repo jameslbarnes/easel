@@ -280,31 +280,6 @@ void Application::run() {
             if (hadOutput) continue;
         }
 
-        // Undo / Redo keybinds
-        {
-            static bool undoWasPressed = false;
-            static bool redoWasPressed = false;
-            bool ctrl = (glfwGetKey(m_window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
-                         glfwGetKey(m_window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS);
-            bool shift = (glfwGetKey(m_window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
-                          glfwGetKey(m_window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS);
-            bool zNow = glfwGetKey(m_window, GLFW_KEY_Z) == GLFW_PRESS;
-            bool yNow = glfwGetKey(m_window, GLFW_KEY_Y) == GLFW_PRESS;
-
-            // Ctrl+Shift+Z or Ctrl+Y = redo
-            bool redoNow = ctrl && ((zNow && shift) || yNow);
-            // Ctrl+Z (without shift) = undo
-            bool undoNow = ctrl && zNow && !shift;
-
-            if (undoNow && !undoWasPressed) {
-                m_undoStack.undo(m_layerStack, m_selectedLayer);
-            }
-            if (redoNow && !redoWasPressed) {
-                m_undoStack.redo(m_layerStack, m_selectedLayer);
-            }
-            undoWasPressed = undoNow;
-            redoWasPressed = redoNow;
-        }
 
         // F12 = quick screenshot (auto-named to screenshots/ folder)
         {
@@ -389,6 +364,26 @@ void Application::run() {
         glClear(GL_COLOR_BUFFER_BIT);
 
         m_ui.beginFrame();
+
+        // Undo / Redo keybinds — use GLFW for reliable detection
+        if (!ImGui::GetIO().WantTextInput) {
+            static bool sUndoPrev = false, sRedoPrev = false;
+            bool ctrl = glfwGetKey(m_window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
+                        glfwGetKey(m_window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS;
+            bool shift = glfwGetKey(m_window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
+                         glfwGetKey(m_window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
+            bool z = glfwGetKey(m_window, GLFW_KEY_Z) == GLFW_PRESS;
+            bool y = glfwGetKey(m_window, GLFW_KEY_Y) == GLFW_PRESS;
+
+            bool undoNow = ctrl && z && !shift;
+            bool redoNow = ctrl && ((z && shift) || y);
+
+            if (undoNow && !sUndoPrev) m_undoStack.undo(m_layerStack, m_selectedLayer);
+            if (redoNow && !sRedoPrev) m_undoStack.redo(m_layerStack, m_selectedLayer);
+            sUndoPrev = undoNow;
+            sRedoPrev = redoNow;
+        }
+
         renderUI();
         m_ui.endFrame();
 
@@ -734,6 +729,44 @@ void Application::compositeZone(OutputZone& zone) {
         sourceTex = m_testPattern.id();
     }
 
+    // Apply mapping masks to the composite BEFORE warping
+    // so masks are visible in the canvas preview and affect the whole output
+    auto* mpMask = mappingForZone(zone);
+    if (mpMask && !mpMask->masks.empty()) {
+        for (auto& mask : mpMask->masks) {
+            if (mask.texture && mask.texture->id() && mask.path.count() >= 3) {
+                if (m_edgeBlendFBO.width() != zone.width || m_edgeBlendFBO.height() != zone.height) {
+                    m_edgeBlendFBO.create(zone.width, zone.height);
+                }
+                m_edgeBlendFBO.bind();
+                glViewport(0, 0, zone.width, zone.height);
+                glClearColor(0, 0, 0, 0);
+                glClear(GL_COLOR_BUFFER_BIT);
+                m_passthroughShader.use();
+                m_passthroughShader.setInt("uTexture", 0);
+                m_passthroughShader.setFloat("uOpacity", 1.0f);
+                m_passthroughShader.setMat3("uTransform", glm::mat3(1.0f));
+                m_passthroughShader.setBool("uHasMask", true);
+                m_passthroughShader.setInt("uMask", 1);
+                m_passthroughShader.setBool("uFlipV", false);
+                m_passthroughShader.setFloat("uTileX", 1.0f);
+                m_passthroughShader.setFloat("uTileY", 1.0f);
+                m_passthroughShader.setInt("uMosaicMode", 0);
+                m_passthroughShader.setFloat("uFeather", 0.0f);
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, sourceTex);
+                glActiveTexture(GL_TEXTURE1);
+                glBindTexture(GL_TEXTURE_2D, mask.texture->id());
+                m_quad.draw();
+                Framebuffer::unbind();
+                sourceTex = m_edgeBlendFBO.textureId();
+            }
+        }
+    }
+
+    // Store post-mask texture for canvas preview
+    zone.canvasTexture = sourceTex;
+
     zone.warpFBO.bind();
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -814,57 +847,7 @@ void Application::compositeZone(OutputZone& zone) {
         Framebuffer::unbind();
     }
 
-    // Apply mapping masks (multiply into warpFBO)
-    if (mp && !mp->masks.empty()) {
-        for (auto& mask : mp->masks) {
-            if (mask.texture && mask.texture->id() && mask.path.count() >= 3) {
-                // Read warpFBO, multiply by mask, write back
-                if (m_edgeBlendFBO.width() != zone.width || m_edgeBlendFBO.height() != zone.height) {
-                    m_edgeBlendFBO.create(zone.width, zone.height);
-                }
-                m_edgeBlendFBO.bind();
-                glViewport(0, 0, zone.width, zone.height);
-                glClearColor(0, 0, 0, 0);
-                glClear(GL_COLOR_BUFFER_BIT);
-
-                m_passthroughShader.use();
-                m_passthroughShader.setInt("uTexture", 0);
-                m_passthroughShader.setFloat("uOpacity", 1.0f);
-                m_passthroughShader.setMat3("uTransform", glm::mat3(1.0f));
-                m_passthroughShader.setBool("uHasMask", true);
-                m_passthroughShader.setInt("uMask", 1);
-                m_passthroughShader.setBool("uFlipV", false);
-                m_passthroughShader.setFloat("uTileX", 1.0f);
-                m_passthroughShader.setFloat("uTileY", 1.0f);
-                m_passthroughShader.setInt("uMosaicMode", 0);
-                m_passthroughShader.setFloat("uFeather", 0.0f);
-                glActiveTexture(GL_TEXTURE0);
-                glBindTexture(GL_TEXTURE_2D, zone.warpFBO.textureId());
-                glActiveTexture(GL_TEXTURE1);
-                glBindTexture(GL_TEXTURE_2D, mask.texture->id());
-                m_quad.draw();
-                Framebuffer::unbind();
-
-                // Copy back
-                zone.warpFBO.bind();
-                glViewport(0, 0, zone.width, zone.height);
-                m_passthroughShader.use();
-                m_passthroughShader.setInt("uTexture", 0);
-                m_passthroughShader.setFloat("uOpacity", 1.0f);
-                m_passthroughShader.setMat3("uTransform", glm::mat3(1.0f));
-                m_passthroughShader.setBool("uHasMask", false);
-                m_passthroughShader.setBool("uFlipV", false);
-                m_passthroughShader.setFloat("uTileX", 1.0f);
-                m_passthroughShader.setFloat("uTileY", 1.0f);
-                m_passthroughShader.setInt("uMosaicMode", 0);
-                m_passthroughShader.setFloat("uFeather", 0.0f);
-                glActiveTexture(GL_TEXTURE0);
-                glBindTexture(GL_TEXTURE_2D, m_edgeBlendFBO.textureId());
-                m_quad.draw();
-                Framebuffer::unbind();
-            }
-        }
-    }
+    // Masks are now applied pre-warp (above), so they're visible in the canvas preview
 }
 
 void Application::presentOutputs() {
@@ -1170,7 +1153,12 @@ void Application::renderUI() {
                 }
             }
         }
-        m_viewportPanel.render(z.warpFBO.textureId(), mappingForZone(z), projAspect,
+        // Show the flat (pre-warp) composite in the viewport so layer bboxes match.
+        // Warp is only applied to projector/NDI output.
+        GLuint previewTex = z.canvasTexture ? z.canvasTexture : z.compositor.resultTexture();
+        if (m_layerStack.count() == 0 || !previewTex) previewTex = m_testPattern.id();
+        m_viewportPanel.setLayerSelected(m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count());
+        m_viewportPanel.render(previewTex, mappingForZone(z), projAspect,
                                &m_zones, &m_activeZone, &monitors, ndiAvail, editorMon, &m_mappings);
     }
 
@@ -1259,24 +1247,7 @@ void Application::renderUI() {
         m_propertyPanel.undoNeeded = false;
     }
 
-    // Set viewport edit mode based on current editing state
-    // Masks are now on the mapping profile, not on layers
-    auto* zoneMapping = mappingForZone(zone);
-    MappingMask* activeMask = nullptr;
-    if (zoneMapping && m_maskEditMode && zoneMapping->activeMaskIndex >= 0 &&
-        zoneMapping->activeMaskIndex < (int)zoneMapping->masks.size()) {
-        activeMask = &zoneMapping->masks[zoneMapping->activeMaskIndex];
-    }
-    if (m_maskEditMode && activeMask) {
-        m_viewportPanel.setEditMode(ViewportPanel::EditMode::Mask);
-        // Masks are in canvas UV space (identity transform — they apply to the zone output)
-        m_viewportPanel.renderMaskOverlay(activeMask->path, glm::mat3(1.0f));
-    } else {
-        m_viewportPanel.setEditMode(ViewportPanel::EditMode::Normal);
-        m_viewportPanel.renderLayerOverlay(m_layerStack, m_selectedLayer, zone.width, zone.height);
-        m_maskEditMode = false;
-    }
-
+    // Render warp editor FIRST so it can set m_maskEditMode
     auto* mp = mappingForZone(zone);
     if (mp) {
         auto prevWarpMode = mp->warpMode;
@@ -1294,6 +1265,24 @@ void Application::renderUI() {
             if (!path.empty()) {
                 mp->objMeshWarp.loadModel(path);
             }
+        }
+    }
+
+    // Set viewport edit mode AFTER warp editor (which may toggle m_maskEditMode)
+    {
+        auto* zoneMapping = mappingForZone(zone);
+        MappingMask* activeMask = nullptr;
+        if (zoneMapping && m_maskEditMode && zoneMapping->activeMaskIndex >= 0 &&
+            zoneMapping->activeMaskIndex < (int)zoneMapping->masks.size()) {
+            activeMask = &zoneMapping->masks[zoneMapping->activeMaskIndex];
+        }
+        if (m_maskEditMode && activeMask) {
+            m_viewportPanel.setEditMode(ViewportPanel::EditMode::Mask);
+            m_viewportPanel.renderMaskOverlay(activeMask->path, glm::mat3(1.0f));
+        } else {
+            m_viewportPanel.setEditMode(ViewportPanel::EditMode::Normal);
+            m_viewportPanel.renderLayerOverlay(m_layerStack, m_selectedLayer, zone.width, zone.height);
+            m_maskEditMode = false;
         }
     }
 
@@ -1592,11 +1581,31 @@ void Application::renderUI() {
             dl->AddLine(ImVec2(p.x, p.y), ImVec2(p.x + w, p.y), IM_COL32(0, 200, 255, 40));
             ImGui::Dummy(ImVec2(0, 6));
 
-            // Shader list
+            // Update preview shader if loaded
+            bool previewValid = false;
+            if (m_scPreview) {
+                m_scPreview->setResolution(64, 64);
+                m_scPreview->update();
+                m_scPreviewFrame++;
+                previewValid = (m_scPreviewFrame > 2); // allow a few frames to warm up
+            }
+
+            // Shader list with thumbnails
+            std::string hoveredPath;
+            float thumbSize = 32.0f;
             for (int i = 0; i < (int)m_shaderClaw.shaders().size(); i++) {
                 const auto& shader = m_shaderClaw.shaders()[i];
                 ImGui::PushID(2000 + i);
 
+                // Show thumbnail if this is the previewed shader
+                bool hasThumb = previewValid && (shader.fullPath == m_scPreviewPath);
+                if (hasThumb) {
+                    ImGui::Image((ImTextureID)(intptr_t)m_scPreview->textureId(),
+                                 ImVec2(thumbSize, thumbSize), ImVec2(0, 1), ImVec2(1, 0));
+                    ImGui::SameLine();
+                }
+
+                ImGui::BeginGroup();
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.30f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.50f));
@@ -1619,8 +1628,29 @@ void Application::renderUI() {
                     ImGui::Text("- %s", desc.c_str());
                     ImGui::PopStyleColor();
                 }
+                ImGui::EndGroup();
+
+                // Load preview when hovered
+                if (ImGui::IsItemHovered()) {
+                    hoveredPath = shader.fullPath;
+                }
 
                 ImGui::PopID();
+            }
+
+            // Load/unload preview shader based on hover
+            if (!hoveredPath.empty() && hoveredPath != m_scPreviewPath) {
+                m_scPreview = std::make_shared<ShaderSource>();
+                if (m_scPreview->loadFromFile(hoveredPath)) {
+                    m_scPreviewPath = hoveredPath;
+                    m_scPreviewFrame = 0;
+                } else {
+                    m_scPreview.reset();
+                    m_scPreviewPath.clear();
+                }
+            } else if (hoveredPath.empty()) {
+                m_scPreview.reset();
+                m_scPreviewPath.clear();
             }
         }
     }

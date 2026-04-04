@@ -129,31 +129,6 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 ImGui::PopStyleColor(3);
             }
 
-            // Audio source selector
-            if (audioDeviceIdx && mosaicAudio) {
-                ImGui::Dummy(ImVec2(0, 2));
-                const char* srcLabel = "System Audio";
-                int sel = *audioDeviceIdx;
-                if (sel >= 0 && sel < (int)mosaicAudio->devices.size()) {
-                    srcLabel = mosaicAudio->devices[sel].name.c_str();
-                }
-                ImGui::SetNextItemWidth(-1);
-                if (ImGui::BeginCombo("##AudioDev", srcLabel)) {
-                    if (ImGui::Selectable("System Audio (loopback)", sel == -1)) {
-                        *audioDeviceIdx = -1;
-                    }
-                    for (int i = 0; i < (int)mosaicAudio->devices.size(); i++) {
-                        auto& d = mosaicAudio->devices[i];
-                        char label[256];
-                        snprintf(label, sizeof(label), "%s%s", d.name.c_str(), d.isMic ? "  (mic)" : "");
-                        if (ImGui::Selectable(label, sel == i)) {
-                            *audioDeviceIdx = i;
-                        }
-                    }
-                    ImGui::EndCombo();
-                }
-            }
-
             // Audio reactive bindings (only when a layer is selected)
             if (layer) {
                 ImGui::Dummy(ImVec2(0, 4));

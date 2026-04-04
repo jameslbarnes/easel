@@ -7,6 +7,7 @@
 #include "warp/ObjMeshWarp.h"
 #include "compositing/MaskPath.h"
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -77,8 +78,21 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
     MeshWarp* meshWarpPtr = mapping ? &mapping->meshWarp : nullptr;
     ObjMeshWarp* objMeshWarp = mapping ? &mapping->objMeshWarp : nullptr;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    ImGui::Begin("Projector Preview");
+    ImGui::Begin("Canvas");
     ImGui::PopStyleVar();
+
+    // Track panel visibility and bounds for overlay clipping
+    // Check if this window is actually the visible/selected tab in its dock node
+    ImGuiWindow* win = ImGui::GetCurrentWindow();
+    bool isDockTabVisible = true;
+    if (win->DockNode && win->DockNode->VisibleWindow != win)
+        isDockTabVisible = false;
+    m_panelVisible = isDockTabVisible && !ImGui::IsWindowCollapsed();
+    ImVec2 wMin = ImGui::GetWindowContentRegionMin();
+    ImVec2 wMax = ImGui::GetWindowContentRegionMax();
+    ImVec2 wPos = ImGui::GetWindowPos();
+    m_panelMin = {wPos.x + wMin.x, wPos.y + wMin.y};
+    m_panelMax = {wPos.x + wMax.x, wPos.y + wMax.y};
 
     // Zone tab bar + output routing — always visible
     if (zones && activeZone) {
@@ -442,8 +456,8 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
         m_pan = {0, 0};
     }
 
-    // --- Always draw and handle warp (unless in mask mode) ---
-    if (m_editMode != EditMode::Mask && m_imageSize.x > 0 && m_imageSize.y > 0) {
+    // --- Draw warp handles only when no layer is selected and not in mask mode ---
+    if (m_editMode != EditMode::Mask && !m_layerSelected && m_imageSize.x > 0 && m_imageSize.y > 0) {
         if (warpMode == WarpMode::ObjMesh && objMeshWarp) {
             // --- Orbit camera interaction ---
             auto& cam = objMeshWarp->camera();
@@ -571,6 +585,7 @@ static float pointToSegmentDist(ImVec2 p, ImVec2 a, ImVec2 b) {
 
 void ViewportPanel::renderLayerOverlay(LayerStack& stack, int& selectedLayer, int canvasW, int canvasH) {
     if (m_imageSize.x <= 0 || m_imageSize.y <= 0) return;
+    if (!m_panelVisible) return;
     if (m_editMode != EditMode::Normal) return;
     if (stack.count() == 0) {
         m_layerDragging = false;
@@ -586,6 +601,10 @@ void ViewportPanel::renderLayerOverlay(LayerStack& stack, int& selectedLayer, in
 
     bool warpBusy = m_warpDragging;
     ImDrawList* draw = ImGui::GetForegroundDrawList();
+
+    // Clip overlay drawing to viewport panel bounds
+    draw->PushClipRect(ImVec2(m_panelMin.x, m_panelMin.y),
+                       ImVec2(m_panelMax.x, m_panelMax.y), true);
     ImVec2 mouse = ImGui::GetMousePos();
     glm::vec2 mouseNDC = screenToNDC({mouse.x, mouse.y});
     const float handleR = 5.0f;
@@ -869,12 +888,15 @@ void ViewportPanel::renderLayerOverlay(LayerStack& stack, int& selectedLayer, in
             }
         }
     }
+
+    draw->PopClipRect();
 }
 
 // ======== MASK OVERLAY ========
 
 void ViewportPanel::renderMaskOverlay(MaskPath& mask, const glm::mat3& layerTransform) {
     if (m_imageSize.x <= 0 || m_imageSize.y <= 0) return;
+    if (!m_panelVisible) return;
     if (m_editMode != EditMode::Mask) return;
 
     // Convert between canvas UV (what's displayed) and layer UV (what the mask stores).
@@ -899,6 +921,9 @@ void ViewportPanel::renderMaskOverlay(MaskPath& mask, const glm::mat3& layerTran
     };
 
     ImDrawList* draw = ImGui::GetForegroundDrawList();
+    // Clip mask overlay drawing to viewport panel bounds
+    draw->PushClipRect(ImVec2(m_panelMin.x, m_panelMin.y),
+                       ImVec2(m_panelMax.x, m_panelMax.y), true);
     ImVec2 mousePos = ImGui::GetMousePos();
     glm::vec2 mouseUV = screenToLayerUV({mousePos.x, mousePos.y});
 
@@ -945,11 +970,28 @@ void ViewportPanel::renderMaskOverlay(MaskPath& mask, const glm::mat3& layerTran
     }
     if (m_maskSelectedPoint >= 0 && m_maskSelectedPoint < mask.count()) {
         if (ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_Backspace)) { mask.removePoint(m_maskSelectedPoint); m_maskSelectedPoint = -1; }
+
+        // Arrow key nudge selected mask point (1 pixel in layer UV space)
+        if (!ImGui::GetIO().WantTextInput && m_maskSelectedPoint >= 0 && m_maskSelectedPoint < mask.count()) {
+            auto& pts = mask.points();
+            // 1 pixel nudge: approximate as 1/canvas_size in UV, use image pixel size
+            float nudgeX = 1.0f / std::max(1.0f, m_imageSize.x);
+            float nudgeY = 1.0f / std::max(1.0f, m_imageSize.y);
+            bool nudged = false;
+            if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))  { pts[m_maskSelectedPoint].position.x -= nudgeX; nudged = true; }
+            if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) { pts[m_maskSelectedPoint].position.x += nudgeX; nudged = true; }
+            if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))    { pts[m_maskSelectedPoint].position.y += nudgeY; nudged = true; }
+            if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))  { pts[m_maskSelectedPoint].position.y -= nudgeY; nudged = true; }
+            if (nudged) {
+                pts[m_maskSelectedPoint].position = glm::clamp(pts[m_maskSelectedPoint].position, glm::vec2(0.0f), glm::vec2(1.0f));
+                mask.markDirty();
+            }
+        }
     }
     if (ImGui::IsKeyPressed(ImGuiKey_Escape)) m_maskSelectedPoint = -1;
 
     const auto& pts = mask.points();
-    if (pts.empty()) return;
+    if (pts.empty()) { draw->PopClipRect(); return; }
 
     if (pts.size() >= 3) {
         auto tv = mask.tessellate(24);
@@ -991,4 +1033,6 @@ void ViewportPanel::renderMaskOverlay(MaskPath& mask, const glm::mat3& layerTran
             draw->AddCircleFilled(anchor,4.5f,kPointFill); draw->AddCircle(anchor,4.5f,kPointRing,0,1.2f);
         }
     }
+
+    draw->PopClipRect();
 }

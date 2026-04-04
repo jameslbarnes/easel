@@ -133,6 +133,11 @@ private:
     std::vector<WindowInfo> m_windowList;
     ShaderClawBridge m_shaderClaw;
 
+    // ShaderClaw thumbnail preview
+    std::shared_ptr<ShaderSource> m_scPreview;
+    std::string m_scPreviewPath;
+    int m_scPreviewFrame = 0;
+
 #ifdef HAS_OPENCV
     SceneScanner m_scanner;
     WebcamSource m_webcam;

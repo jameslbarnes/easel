@@ -21,6 +21,8 @@ private:
 
     GLFWwindow* m_window = nullptr;
     bool m_firstFrame = true;
+    float m_lastDockW = 0;
+    float m_lastDockH = 0;
     ImFont* m_smallFont = nullptr;
     ImFont* m_boldFont = nullptr;
 };
