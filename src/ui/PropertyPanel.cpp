@@ -805,7 +805,9 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
 
                     if (ImGui::BeginPopup("##audiobind")) {
                         static const char* signalNames[] = { "None", "Level", "Bass", "Mid", "High", "Beat" };
+                        bool isNew = (bindings.find(input.name) == bindings.end());
                         AudioBinding& ab = bindings[input.name];
+                        if (isNew) { ab.rangeMin = input.minVal; ab.rangeMax = input.maxVal; }
                         int sigIdx = (int)ab.signal;
                         ImGui::Text("Audio Signal");
                         ImGui::SetNextItemWidth(120);

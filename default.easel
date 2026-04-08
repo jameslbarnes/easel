@@ -1,17 +1,36 @@
 {
   "layers": [
     {
+      "audioBindings": [
+        {
+          "param": "dotSize",
+          "rangeMax": 12.0,
+          "rangeMin": 0.10000000149011612,
+          "signal": 2,
+          "smoothing": 0.30000001192092896
+        },
+        {
+          "param": "specAmt",
+          "rangeMax": 70.0,
+          "rangeMin": 0.0,
+          "signal": 1,
+          "smoothing": 0.30000001192092896
+        }
+      ],
       "audioReactive": false,
       "audioStrength": 0.15000000596046448,
       "blendMode": 0,
       "feather": 0.0,
       "flipH": false,
       "flipV": false,
-      "id": 1,
+      "id": 66,
+      "imageBindings": {
+        "inputImage": 67
+      },
       "mosaicDensity": 4.0,
       "mosaicMode": 0,
       "mosaicSpin": 0.0,
-      "name": "Win: Etherea Projection (MediaMTX) - Google Chrome",
+      "name": "polka_dotz.fs",
       "ndiEnabled": false,
       "opacity": 1.0,
       "position": [
@@ -20,11 +39,207 @@
       ],
       "rotation": 0.0,
       "scale": [
-        0.5299999713897705,
-        0.5299999713897705
+        1.0,
+        1.0
       ],
-      "sourcePath": "Etherea Projection (MediaMTX) - Google Chrome",
+      "shaderParams": [
+        {
+          "name": "inputImage",
+          "type": "image"
+        },
+        {
+          "name": "tileScale",
+          "type": "float",
+          "value": 20.0
+        },
+        {
+          "name": "flipSpeed",
+          "type": "float",
+          "value": 1.0
+        },
+        {
+          "name": "flipInterval",
+          "type": "float",
+          "value": 1.7979999780654907
+        },
+        {
+          "name": "dotSize",
+          "type": "float",
+          "value": 0.5
+        },
+        {
+          "name": "specAmt",
+          "type": "float",
+          "value": 0.5654036998748779
+        },
+        {
+          "name": "vignetteAmt",
+          "type": "float",
+          "value": 1.0
+        },
+        {
+          "name": "gapShade",
+          "type": "float",
+          "value": 0.17399999499320984
+        },
+        {
+          "name": "bgColor",
+          "type": "color",
+          "value": [
+            0.20000000298023224,
+            0.30000001192092896,
+            0.4000000059604645,
+            1.0
+          ]
+        },
+        {
+          "name": "transparentBg",
+          "type": "bool",
+          "value": false
+        }
+      ],
+      "sourcePath": "C:\\Users\\james\\shader-claw3\\shaders/polka_dotz.fs",
+      "sourceType": "Shader",
+      "tileX": 1.0,
+      "tileY": 1.0,
+      "visible": true
+    },
+    {
+      "audioReactive": false,
+      "audioStrength": 0.15000000596046448,
+      "blendMode": 0,
+      "feather": 0.0,
+      "flipH": false,
+      "flipV": false,
+      "id": 67,
+      "mosaicDensity": 4.0,
+      "mosaicMode": 0,
+      "mosaicSpin": 0.0,
+      "name": "Win: Picture in picture",
+      "ndiEnabled": false,
+      "opacity": 1.0,
+      "position": [
+        0.0,
+        0.0
+      ],
+      "rotation": 0.0,
+      "scale": [
+        0.6600000262260437,
+        0.6600000262260437
+      ],
+      "sourcePath": "Picture in picture",
       "sourceType": "Window Capture",
+      "tileX": 1.0,
+      "tileY": 1.0,
+      "visible": true
+    },
+    {
+      "audioReactive": false,
+      "audioStrength": 0.15000000596046448,
+      "blendMode": 0,
+      "feather": 0.0,
+      "flipH": false,
+      "flipV": false,
+      "id": 68,
+      "mosaicDensity": 4.0,
+      "mosaicMode": 0,
+      "mosaicSpin": 0.0,
+      "name": "text_typewriter.fs",
+      "ndiEnabled": false,
+      "opacity": 7.840932994440664e-06,
+      "position": [
+        0.0,
+        0.0
+      ],
+      "rotation": 0.0,
+      "scale": [
+        0.9800000190734863,
+        0.9800000190734863
+      ],
+      "shaderParams": [
+        {
+          "name": "msg",
+          "type": "text",
+          "value": "THE MASK FALLS ASLEEP."
+        },
+        {
+          "name": "fontFamily",
+          "type": "long",
+          "value": 0.0
+        },
+        {
+          "name": "speed",
+          "type": "float",
+          "value": 12.0
+        },
+        {
+          "name": "cursorBlink",
+          "type": "float",
+          "value": 2.0
+        },
+        {
+          "name": "textScale",
+          "type": "float",
+          "value": 0.30000001192092896
+        },
+        {
+          "name": "kerning",
+          "type": "float",
+          "value": 1.0
+        },
+        {
+          "name": "oscSpeed",
+          "type": "float",
+          "value": 0.0
+        },
+        {
+          "name": "oscAmount",
+          "type": "float",
+          "value": 0.0
+        },
+        {
+          "name": "oscSpread",
+          "type": "float",
+          "value": 0.5
+        },
+        {
+          "name": "textColor",
+          "type": "color",
+          "value": [
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        {
+          "name": "bgColor",
+          "type": "color",
+          "value": [
+            0.019999999552965164,
+            0.019999999552965164,
+            0.03999999910593033,
+            1.0
+          ]
+        },
+        {
+          "name": "voiceSync",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "name": "transparentBg",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "name": "loop",
+          "type": "bool",
+          "value": false
+        }
+      ],
+      "sourcePath": "C:\\Users\\james\\shader-claw3\\shaders/text_typewriter.fs",
+      "sourceType": "Shader",
       "tileX": 1.0,
       "tileY": 1.0,
       "visible": true
@@ -163,7 +378,7 @@
   "version": 2,
   "zones": [
     {
-      "height": 810,
+      "height": 1080,
       "mappingIndex": 0,
       "name": "Main",
       "ndiStreamName": "",

@@ -32,13 +32,20 @@ void AudioAnalyzer::setDevice(int deviceIdx) {
     m_requestedDevice = deviceIdx;
 }
 
+void AudioAnalyzer::setDeviceId(const std::string& id, bool isCapture) {
+    m_requestedDeviceId = id;
+    m_requestedIsCapture = isCapture;
+}
+
 void AudioAnalyzer::update(float dt) {
     if (dt <= 0) return;
 
     // Reinit capture if device changed or previous init failed
-    if (m_deviceIdx != m_requestedDevice || (!m_initialized && m_deviceIdx != -2)) {
+    bool deviceChanged = (m_deviceIdx != m_requestedDevice) || (m_deviceId != m_requestedDeviceId);
+    if (deviceChanged || (!m_initialized && m_deviceIdx != -2)) {
         cleanupCapture();
         m_deviceIdx = m_requestedDevice;
+        m_deviceId = m_requestedDeviceId;
         initCapture();
     }
 
@@ -89,8 +96,13 @@ void AudioAnalyzer::initCapture() {
         // System audio loopback (default render endpoint)
         hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
         isLoopback = true;
+    } else if (!m_deviceId.empty()) {
+        // Look up by device ID string (matches the meter and UI selection)
+        std::wstring wid(m_deviceId.begin(), m_deviceId.end());
+        hr = enumerator->GetDevice(wid.c_str(), &device);
+        isLoopback = !m_requestedIsCapture;
     } else {
-        // Specific device by index — enumerate all devices
+        // Fallback: specific device by index — enumerate all devices
         IMMDeviceCollection* collection = nullptr;
         hr = enumerator->EnumAudioEndpoints(eAll, DEVICE_STATE_ACTIVE, &collection);
         if (SUCCEEDED(hr) && collection) {

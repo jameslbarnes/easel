@@ -1,6 +1,7 @@
 #pragma once
 #include "render/Texture.h"
 #include <vector>
+#include <string>
 #include <cmath>
 
 // Forward declare WASAPI types to avoid Windows.h in header
@@ -28,6 +29,7 @@ public:
 
     // Change audio device (-1 = system loopback, >=0 = device index)
     void setDevice(int deviceIdx);
+    void setDeviceId(const std::string& id, bool isCapture);
 
     // Smoothed frequency bands (0-1)
     float bass() const { return m_smoothBass; }
@@ -65,6 +67,9 @@ private:
     IMMDevice* m_device = nullptr;
     int m_deviceIdx = -2; // -2 = uninitialized
     int m_requestedDevice = -1;
+    std::string m_deviceId;         // Windows endpoint ID string
+    std::string m_requestedDeviceId;
+    bool m_requestedIsCapture = false;
     int m_sampleRate = 48000;
     int m_channels = 2;
     bool m_initialized = false;
