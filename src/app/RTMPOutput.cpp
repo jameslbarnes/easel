@@ -14,11 +14,13 @@ extern "C" {
 #include <libavutil/channel_layout.h>
 }
 
+#ifdef _WIN32
 // WASAPI loopback capture
 #include <windows.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <combaseapi.h>
+#endif
 
 RTMPOutput::~RTMPOutput() {
     stop();
@@ -67,6 +69,7 @@ double RTMPOutput::uptimeSeconds() const {
 
 // ─── WASAPI loopback init ───────────────────────────────────────────
 
+#ifdef _WIN32
 bool RTMPOutput::initAudioCapture() {
     HRESULT hr;
 
@@ -137,6 +140,12 @@ bool RTMPOutput::initAudioCapture() {
 
     return true;
 }
+#else
+bool RTMPOutput::initAudioCapture() {
+    std::cerr << "[RTMP] Audio capture not implemented on this platform" << std::endl;
+    return false;
+}
+#endif
 
 // ─── FFmpeg encoder init ────────────────────────────────────────────
 
@@ -202,8 +211,10 @@ bool RTMPOutput::initEncoder(const std::string& url, int width, int height,
               << " -> crop " << m_cropW << "x" << m_cropH
               << " -> encode " << m_encWidth << "x" << m_encHeight << std::endl;
 
+#ifdef _WIN32
     // Initialize COM for WASAPI (this thread)
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+#endif
 
     // Allocate output format context for RTMP/FLV
     int ret = avformat_alloc_output_context2(&m_fmtCtx, nullptr, "flv", url.c_str());
@@ -406,6 +417,7 @@ void RTMPOutput::sendFrame(GLuint texture, int w, int h) {
 void RTMPOutput::drainAudio() {
     if (!m_captureClient || !m_audioCodecCtx) return;
 
+#ifdef _WIN32
     IAudioCaptureClient* capture = (IAudioCaptureClient*)m_captureClient;
 
     UINT32 packetLength = 0;
@@ -430,6 +442,7 @@ void RTMPOutput::drainAudio() {
         capture->ReleaseBuffer(numFrames);
         capture->GetNextPacketSize(&packetLength);
     }
+#endif
 }
 
 void RTMPOutput::encodeAudioSamples(const float* data, int numSamples, int channels) {
@@ -477,8 +490,10 @@ void RTMPOutput::encodeAudioSamples(const float* data, int numSamples, int chann
 // ─── Encode thread ──────────────────────────────────────────────────
 
 void RTMPOutput::encodeThread() {
+#ifdef _WIN32
     // COM init for this thread (WASAPI calls happen here via drainAudio)
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+#endif
 
     while (!m_stopRequested) {
         std::unique_lock<std::mutex> lock(m_mutex);
@@ -526,7 +541,9 @@ void RTMPOutput::encodeThread() {
         av_write_trailer(m_fmtCtx);
     }
 
+#ifdef _WIN32
     CoUninitialize();
+#endif
 }
 
 void RTMPOutput::encodeVideoFrame(const uint8_t* rgbaData, int /*w*/, int /*h*/) {
@@ -564,6 +581,7 @@ void RTMPOutput::encodeVideoFrame(const uint8_t* rgbaData, int /*w*/, int /*h*/)
 
 void RTMPOutput::cleanupAudio() {
     // Stop and release WASAPI
+#ifdef _WIN32
     if (m_audioClient) {
         ((IAudioClient*)m_audioClient)->Stop();
         ((IAudioClient*)m_audioClient)->Release();
@@ -577,6 +595,11 @@ void RTMPOutput::cleanupAudio() {
         ((IMMDevice*)m_audioDevice)->Release();
         m_audioDevice = nullptr;
     }
+#else
+    m_audioClient = nullptr;
+    m_captureClient = nullptr;
+    m_audioDevice = nullptr;
+#endif
 
     if (m_swrCtx) { swr_free(&m_swrCtx); m_swrCtx = nullptr; }
     if (m_audioFrame) { av_frame_free(&m_audioFrame); }

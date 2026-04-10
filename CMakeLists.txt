@@ -1,5 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
-project(Easel VERSION 0.1.0 LANGUAGES C CXX)
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+
+if(APPLE)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version")
+    project(Easel VERSION 0.1.0 LANGUAGES C CXX OBJCXX)
+else()
+    project(Easel VERSION 0.1.0 LANGUAGES C CXX)
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -8,30 +15,50 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(cmake/FetchDependencies.cmake)
 
 # FFmpeg (external pre-built)
-set(FFMPEG_DIR "${CMAKE_SOURCE_DIR}/external/ffmpeg-master-latest-win64-gpl-shared")
-if(EXISTS "${FFMPEG_DIR}")
+if(WIN32)
+    set(FFMPEG_DIR "${CMAKE_SOURCE_DIR}/external/ffmpeg-master-latest-win64-gpl-shared")
+elseif(APPLE)
+    set(FFMPEG_DIR "/opt/homebrew/opt/ffmpeg")
+    if(NOT EXISTS "${FFMPEG_DIR}")
+        set(FFMPEG_DIR "/usr/local/opt/ffmpeg")
+    endif()
+endif()
+if(FFMPEG_DIR AND EXISTS "${FFMPEG_DIR}")
     set(FFMPEG_FOUND TRUE)
     message(STATUS "FFmpeg found at ${FFMPEG_DIR}")
 else()
     set(FFMPEG_FOUND FALSE)
-    message(WARNING "FFmpeg not found at ${FFMPEG_DIR} - video support disabled")
+    message(WARNING "FFmpeg not found - video support disabled")
 endif()
 
-# OpenCV (external pre-built, same pattern as FFmpeg)
-set(OPENCV_DIR "${CMAKE_SOURCE_DIR}/external/opencv")
-if(EXISTS "${OPENCV_DIR}")
-    set(OpenCV_DIR "${OPENCV_DIR}/x64/vc16/lib")
+# OpenCV
+if(WIN32)
+    set(OPENCV_DIR "${CMAKE_SOURCE_DIR}/external/opencv")
+    if(EXISTS "${OPENCV_DIR}")
+        set(OpenCV_DIR "${OPENCV_DIR}/x64/vc16/lib")
+        find_package(OpenCV QUIET COMPONENTS core imgproc calib3d videoio)
+        if(OpenCV_FOUND)
+            set(HAS_OPENCV TRUE)
+            message(STATUS "OpenCV ${OpenCV_VERSION} found at ${OPENCV_DIR}")
+        else()
+            set(HAS_OPENCV FALSE)
+            message(WARNING "OpenCV found but find_package failed - scanning disabled")
+        endif()
+    else()
+        set(HAS_OPENCV FALSE)
+        message(STATUS "OpenCV not found - scanning disabled")
+    endif()
+elseif(APPLE)
     find_package(OpenCV QUIET COMPONENTS core imgproc calib3d videoio)
     if(OpenCV_FOUND)
         set(HAS_OPENCV TRUE)
-        message(STATUS "OpenCV ${OpenCV_VERSION} found at ${OPENCV_DIR}")
+        message(STATUS "OpenCV ${OpenCV_VERSION} found")
     else()
         set(HAS_OPENCV FALSE)
-        message(WARNING "OpenCV found at ${OPENCV_DIR} but find_package failed - scanning disabled")
+        message(STATUS "OpenCV not found - scanning disabled")
     endif()
 else()
     set(HAS_OPENCV FALSE)
-    message(STATUS "OpenCV not found at ${OPENCV_DIR} - scanning disabled")
 endif()
 
 # Whisper.cpp disabled (CUDA compilation too slow)
@@ -45,7 +72,7 @@ if(EXISTS "${NDI_DIR}/include/Processing.NDI.Lib.h")
     message(STATUS "NDI SDK headers found at ${NDI_DIR}")
 else()
     set(HAS_NDI FALSE)
-    message(STATUS "NDI SDK headers not found at ${NDI_DIR} - NDI support disabled")
+    message(STATUS "NDI SDK headers not found - NDI support disabled")
 endif()
 
 # Collect source files
@@ -53,6 +80,12 @@ file(GLOB_RECURSE SOURCES
     src/*.cpp
     src/*.h
 )
+
+# On macOS, also collect Objective-C++ sources
+if(APPLE)
+    file(GLOB_RECURSE OBJCXX_SOURCES src/*.mm)
+    list(APPEND SOURCES ${OBJCXX_SOURCES})
+endif()
 
 # Exclude test harness and VideoSource as needed
 list(FILTER SOURCES EXCLUDE REGEX ".*test_shaders.*")
@@ -65,26 +98,42 @@ endif()
 if(NOT HAS_WHISPER)
     list(FILTER SOURCES EXCLUDE REGEX ".*WhisperSpeech.*")
 endif()
-# Exclude old WebView2 SpeechBridge (replaced by EthereaTranscript)
 list(FILTER SOURCES EXCLUDE REGEX ".*SpeechBridge.*")
 if(NOT HAS_NDI)
     list(FILTER SOURCES EXCLUDE REGEX ".*NDI.*")
 endif()
 
-# WHEP disabled — WebRTC NAT traversal to remote pods unreliable without server-side TURN
 set(HAS_WHEP FALSE)
 list(FILTER SOURCES EXCLUDE REGEX ".*WHEP.*")
 message(STATUS "WHEP source disabled")
 
+# Platform-specific source exclusions
+if(APPLE)
+    list(FILTER SOURCES EXCLUDE REGEX ".*CaptureSource\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*CaptureSource\\.h$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*WindowCaptureSource\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*WindowCaptureSource\\.h$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*WGCCapture\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*WGCCapture\\.h$")
+elseif(WIN32)
+    list(FILTER SOURCES EXCLUDE REGEX ".*_mac\\.mm$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*_mac\\.h$")
+endif()
+
 # kiss_fft (public domain FFT library for AudioAnalyzer)
 set(KISS_FFT_SRC "${CMAKE_SOURCE_DIR}/external/kiss_fft/kiss_fft.c")
 
-# Windows app icon resource — generate RC with absolute path to ICO
-# Use resource ID 1 to ensure Windows picks it as the main app icon
-file(WRITE "${CMAKE_BINARY_DIR}/easel_icon.rc" "1 ICON \"${CMAKE_SOURCE_DIR}/resources/icon.ico\"\n")
-add_executable(${PROJECT_NAME} WIN32 ${SOURCES} ${KISS_FFT_SRC} "${CMAKE_BINARY_DIR}/easel_icon.rc")
+# Main executable
+if(WIN32)
+    file(WRITE "${CMAKE_BINARY_DIR}/easel_icon.rc" "1 ICON \"${CMAKE_SOURCE_DIR}/resources/icon.ico\"\n")
+    add_executable(${PROJECT_NAME} WIN32 ${SOURCES} ${KISS_FFT_SRC} "${CMAKE_BINARY_DIR}/easel_icon.rc")
+else()
+    add_executable(${PROJECT_NAME} ${SOURCES} ${KISS_FFT_SRC})
+endif()
 
-# Shader test harness (console app)
+find_package(OpenGL REQUIRED)
+
+# Shader test harness
 add_executable(test_shaders
     src/test_shaders.cpp
     src/sources/ShaderSource.cpp
@@ -92,18 +141,17 @@ add_executable(test_shaders
     src/render/Framebuffer.cpp
     src/render/Mesh.cpp
     src/render/Texture.cpp
+    src/render/FontAtlas.cpp
 )
-target_compile_definitions(test_shaders PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-target_include_directories(test_shaders PRIVATE
-    ${CMAKE_SOURCE_DIR}/src
-    ${stb_SOURCE_DIR}
-)
-target_link_libraries(test_shaders PRIVATE
-    glfw glad glm::glm nlohmann_json::nlohmann_json opengl32
-)
+if(WIN32)
+    target_compile_definitions(test_shaders PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
+target_include_directories(test_shaders PRIVATE ${CMAKE_SOURCE_DIR}/src ${stb_SOURCE_DIR})
+target_link_libraries(test_shaders PRIVATE glfw glad glm::glm nlohmann_json::nlohmann_json OpenGL::GL)
 
-# Prevent Windows min/max macros from conflicting with std::min/std::max
-target_compile_definitions(${PROJECT_NAME} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+if(WIN32)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/src
@@ -116,183 +164,152 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
-    glfw
-    glad
-    glm::glm
-    imgui
-    nlohmann_json::nlohmann_json
-    opengl32
-    dwmapi
-    d3d11
-    dxgi
-    comdlg32
-    ws2_32
-    runtimeobject
+    glfw glad glm::glm imgui nlohmann_json::nlohmann_json OpenGL::GL
 )
+
+if(WIN32)
+    target_link_libraries(${PROJECT_NAME} PRIVATE
+        dwmapi d3d11 dxgi comdlg32 ws2_32 runtimeobject
+    )
+elseif(APPLE)
+    target_link_libraries(${PROJECT_NAME} PRIVATE
+        "-framework Cocoa"
+        "-framework IOKit"
+        "-framework CoreVideo"
+        "-framework CoreAudio"
+        "-framework AudioToolbox"
+        "-framework CoreMIDI"
+        "-framework CoreFoundation"
+        "-framework ScreenCaptureKit"
+        "-framework CoreGraphics"
+        "-framework CoreMedia"
+    )
+endif()
 
 # FFmpeg linking
 if(FFMPEG_FOUND)
     target_include_directories(${PROJECT_NAME} PRIVATE "${FFMPEG_DIR}/include")
     target_link_directories(${PROJECT_NAME} PRIVATE "${FFMPEG_DIR}/lib")
-    target_link_libraries(${PROJECT_NAME} PRIVATE
-        avformat
-        avcodec
-        avutil
-        swscale
-        swresample
-    )
+    target_link_libraries(${PROJECT_NAME} PRIVATE avformat avcodec avutil swscale swresample)
     target_compile_definitions(${PROJECT_NAME} PRIVATE HAS_FFMPEG=1)
 
-    # Copy FFmpeg DLLs to output directory
-    file(GLOB FFMPEG_DLLS "${FFMPEG_DIR}/bin/*.dll")
-    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${FFMPEG_DLLS}
-        $<TARGET_FILE_DIR:${PROJECT_NAME}>
-    )
+    if(WIN32)
+        file(GLOB FFMPEG_DLLS "${FFMPEG_DIR}/bin/*.dll")
+        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${FFMPEG_DLLS} $<TARGET_FILE_DIR:${PROJECT_NAME}>
+        )
+    endif()
 endif()
 
 # OpenCV linking
 if(HAS_OPENCV)
-    target_include_directories(${PROJECT_NAME} PRIVATE "${OPENCV_DIR}/include")
+    if(WIN32)
+        target_include_directories(${PROJECT_NAME} PRIVATE "${OPENCV_DIR}/include")
+    endif()
     target_link_libraries(${PROJECT_NAME} PRIVATE ${OpenCV_LIBS})
     target_compile_definitions(${PROJECT_NAME} PRIVATE HAS_OPENCV=1)
 
-    # Copy OpenCV DLLs to output directory
-    file(GLOB OPENCV_DLLS "${OPENCV_DIR}/x64/vc16/bin/*.dll")
-    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${OPENCV_DLLS}
-        $<TARGET_FILE_DIR:${PROJECT_NAME}>
-    )
+    if(WIN32)
+        file(GLOB OPENCV_DLLS "${OPENCV_DIR}/x64/vc16/bin/*.dll")
+        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${OPENCV_DLLS} $<TARGET_FILE_DIR:${PROJECT_NAME}>
+        )
+    endif()
 endif()
 
-# Whisper.cpp linking
 if(HAS_WHISPER)
     target_link_libraries(${PROJECT_NAME} PRIVATE whisper)
-    target_include_directories(${PROJECT_NAME} PRIVATE "${CMAKE_SOURCE_DIR}/external")
-    target_include_directories(${PROJECT_NAME} PRIVATE "${whisper_SOURCE_DIR}/include")
+    target_include_directories(${PROJECT_NAME} PRIVATE "${CMAKE_SOURCE_DIR}/external" "${whisper_SOURCE_DIR}/include")
     target_compile_definitions(${PROJECT_NAME} PRIVATE HAS_WHISPER=1)
 endif()
 
-# NDI (headers only, runtime loaded dynamically - no link libraries needed)
 if(HAS_NDI)
     target_include_directories(${PROJECT_NAME} PRIVATE "${NDI_DIR}/include")
     target_compile_definitions(${PROJECT_NAME} PRIVATE HAS_NDI=1)
 endif()
 
-
-# Scanning test suite (requires OpenCV)
+# Test suites
 if(HAS_OPENCV)
     add_executable(test_scanning
-        tests/test_scanning.cpp
-        src/scanning/GrayCodePattern.cpp
-        src/scanning/SceneScanner.cpp
-        src/scanning/WebcamSource.cpp
-        src/render/Texture.cpp
-        src/render/Framebuffer.cpp
-        src/render/Mesh.cpp
-        src/render/ShaderProgram.cpp
+        tests/test_scanning.cpp src/scanning/GrayCodePattern.cpp src/scanning/SceneScanner.cpp
+        src/scanning/WebcamSource.cpp src/render/Texture.cpp src/render/Framebuffer.cpp
+        src/render/Mesh.cpp src/render/ShaderProgram.cpp
     )
-    target_compile_definitions(test_scanning PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN HAS_OPENCV=1)
-    target_include_directories(test_scanning PRIVATE
-        ${CMAKE_SOURCE_DIR}/src
-        ${stb_SOURCE_DIR}
-        "${OPENCV_DIR}/include"
-    )
+    target_compile_definitions(test_scanning PRIVATE HAS_OPENCV=1)
+    if(WIN32)
+        target_compile_definitions(test_scanning PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+        target_include_directories(test_scanning PRIVATE "${OPENCV_DIR}/include")
+    endif()
+    target_include_directories(test_scanning PRIVATE ${CMAKE_SOURCE_DIR}/src ${stb_SOURCE_DIR})
     target_link_libraries(test_scanning PRIVATE
-        Catch2::Catch2WithMain
-        ${OpenCV_LIBS}
-        glfw glad glm::glm nlohmann_json::nlohmann_json opengl32
+        Catch2::Catch2WithMain ${OpenCV_LIBS} glfw glad glm::glm nlohmann_json::nlohmann_json OpenGL::GL
     )
-
-    # Copy OpenCV DLLs for test executable
-    add_custom_command(TARGET test_scanning POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${OPENCV_DLLS}
-        $<TARGET_FILE_DIR:test_scanning>
-    )
-
-    # Register with CTest
+    if(WIN32)
+        add_custom_command(TARGET test_scanning POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${OPENCV_DLLS} $<TARGET_FILE_DIR:test_scanning>
+        )
+    endif()
     include(CTest)
     include(Catch)
     catch_discover_tests(test_scanning)
 endif()
 
-# AudioAnalyzer test suite
 add_executable(test_audio_analyzer
-    tests/test_audio_analyzer.cpp
-    src/app/AudioAnalyzer.cpp
-    src/render/Texture.cpp
-    src/render/Framebuffer.cpp
-    src/render/Mesh.cpp
-    src/render/ShaderProgram.cpp
+    tests/test_audio_analyzer.cpp src/app/AudioAnalyzer.cpp
+    src/render/Texture.cpp src/render/Framebuffer.cpp src/render/Mesh.cpp src/render/ShaderProgram.cpp
     external/kiss_fft/kiss_fft.c
 )
-target_compile_definitions(test_audio_analyzer PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+if(WIN32)
+    target_compile_definitions(test_audio_analyzer PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
 target_include_directories(test_audio_analyzer PRIVATE
-    ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR}/external/kiss_fft
-    ${stb_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/external/kiss_fft ${stb_SOURCE_DIR}
 )
 target_link_libraries(test_audio_analyzer PRIVATE
-    Catch2::Catch2WithMain
-    glfw glad glm::glm nlohmann_json::nlohmann_json opengl32
+    Catch2::Catch2WithMain glfw glad glm::glm nlohmann_json::nlohmann_json OpenGL::GL
 )
 
-# NDI receive test
 if(HAS_NDI)
     add_executable(test_ndi_receive
-        tests/test_ndi_receive.cpp
-        src/sources/NDIRuntime.cpp
-        src/sources/NDISource.cpp
-        src/render/Texture.cpp
-        src/render/Framebuffer.cpp
-        src/render/Mesh.cpp
-        src/render/ShaderProgram.cpp
+        tests/test_ndi_receive.cpp src/sources/NDIRuntime.cpp src/sources/NDISource.cpp
+        src/render/Texture.cpp src/render/Framebuffer.cpp src/render/Mesh.cpp src/render/ShaderProgram.cpp
     )
-    target_compile_definitions(test_ndi_receive PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN HAS_NDI=1)
-    target_include_directories(test_ndi_receive PRIVATE
-        ${CMAKE_SOURCE_DIR}/src
-        ${NDI_DIR}/include
-        ${stb_SOURCE_DIR}
-    )
-    target_link_libraries(test_ndi_receive PRIVATE
-        glfw glad glm::glm opengl32
-    )
+    target_compile_definitions(test_ndi_receive PRIVATE HAS_NDI=1)
+    if(WIN32)
+        target_compile_definitions(test_ndi_receive PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    endif()
+    target_include_directories(test_ndi_receive PRIVATE ${CMAKE_SOURCE_DIR}/src ${NDI_DIR}/include ${stb_SOURCE_DIR})
+    target_link_libraries(test_ndi_receive PRIVATE glfw glad glm::glm OpenGL::GL)
 
     add_executable(test_ndi_list tests/test_ndi_list.cpp src/sources/NDIRuntime.cpp)
-    target_compile_definitions(test_ndi_list PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN HAS_NDI=1)
+    target_compile_definitions(test_ndi_list PRIVATE HAS_NDI=1)
+    if(WIN32)
+        target_compile_definitions(test_ndi_list PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    endif()
     target_include_directories(test_ndi_list PRIVATE ${CMAKE_SOURCE_DIR}/src ${NDI_DIR}/include)
-    target_link_libraries(test_ndi_list PRIVATE glfw glad opengl32)
+    target_link_libraries(test_ndi_list PRIVATE glfw glad OpenGL::GL)
 endif()
 
-# WASAPI capture diagnostic test (standalone, no Catch2)
-add_executable(test_wasapi_capture tests/test_wasapi_capture.cpp)
-target_compile_definitions(test_wasapi_capture PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-target_link_libraries(test_wasapi_capture PRIVATE ole32)
+if(WIN32)
+    add_executable(test_wasapi_capture tests/test_wasapi_capture.cpp)
+    target_compile_definitions(test_wasapi_capture PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(test_wasapi_capture PRIVATE ole32)
 
-# End-to-end audio test (AudioAnalyzer with real WASAPI capture)
-add_executable(test_audio_e2e
-    tests/test_audio_e2e.cpp
-    src/app/AudioAnalyzer.cpp
-    src/render/Texture.cpp
-    src/render/Framebuffer.cpp
-    src/render/Mesh.cpp
-    src/render/ShaderProgram.cpp
-    external/kiss_fft/kiss_fft.c
-)
-target_compile_definitions(test_audio_e2e PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-target_include_directories(test_audio_e2e PRIVATE
-    ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR}/external/kiss_fft
-    ${stb_SOURCE_DIR}
-)
-target_link_libraries(test_audio_e2e PRIVATE glfw glad glm::glm opengl32 ole32)
+    add_executable(test_audio_e2e
+        tests/test_audio_e2e.cpp src/app/AudioAnalyzer.cpp
+        src/render/Texture.cpp src/render/Framebuffer.cpp src/render/Mesh.cpp src/render/ShaderProgram.cpp
+        external/kiss_fft/kiss_fft.c
+    )
+    target_compile_definitions(test_audio_e2e PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_include_directories(test_audio_e2e PRIVATE
+        ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/external/kiss_fft ${stb_SOURCE_DIR}
+    )
+    target_link_libraries(test_audio_e2e PRIVATE glfw glad glm::glm OpenGL::GL ole32)
+endif()
 
-# Copy shaders to build directory
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
-    ${CMAKE_SOURCE_DIR}/shaders
-    $<TARGET_FILE_DIR:${PROJECT_NAME}>/shaders
+    ${CMAKE_SOURCE_DIR}/shaders $<TARGET_FILE_DIR:${PROJECT_NAME}>/shaders
 )

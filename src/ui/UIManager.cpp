@@ -40,7 +40,13 @@ bool UIManager::init(GLFWwindow* window) {
     ImFontConfig fontCfg;
     fontCfg.OversampleH = 2;
     fontCfg.OversampleV = 1;
+#ifdef _WIN32
     ImFont* mainFont = io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeui.ttf", fontSize, &fontCfg, glyphRanges);
+#elif defined(__APPLE__)
+    ImFont* mainFont = io.Fonts->AddFontFromFileTTF("/System/Library/Fonts/Supplemental/Arial.ttf", fontSize, &fontCfg, glyphRanges);
+#else
+    ImFont* mainFont = nullptr;
+#endif
     if (!mainFont) {
         ImFontConfig defCfg;
         defCfg.SizePixels = fontSize;
@@ -51,7 +57,13 @@ bool UIManager::init(GLFWwindow* window) {
     float smallSize = 14.0f * dpiScale;
     ImFontConfig smallCfg;
     smallCfg.OversampleH = 2;
+#ifdef _WIN32
     m_smallFont = io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeui.ttf", smallSize, &smallCfg, glyphRanges);
+#elif defined(__APPLE__)
+    m_smallFont = io.Fonts->AddFontFromFileTTF("/System/Library/Fonts/Supplemental/Arial.ttf", smallSize, &smallCfg, glyphRanges);
+#else
+    m_smallFont = nullptr;
+#endif
     if (!m_smallFont) {
         ImFontConfig defCfg;
         defCfg.SizePixels = smallSize;
@@ -61,13 +73,23 @@ bool UIManager::init(GLFWwindow* window) {
     // Bold font for headers
     ImFontConfig boldCfg;
     boldCfg.OversampleH = 2;
+#ifdef _WIN32
     m_boldFont = io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeuib.ttf", fontSize, &boldCfg, glyphRanges);
+#elif defined(__APPLE__)
+    m_boldFont = io.Fonts->AddFontFromFileTTF("/System/Library/Fonts/Supplemental/Arial Bold.ttf", fontSize, &boldCfg, glyphRanges);
+#else
+    m_boldFont = nullptr;
+#endif
     if (!m_boldFont) m_boldFont = mainFont ? mainFont : io.Fonts->Fonts[0];
 
     applyTheme(dpiScale);
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
+#ifdef __APPLE__
+    ImGui_ImplOpenGL3_Init("#version 150");
+#else
     ImGui_ImplOpenGL3_Init("#version 430");
+#endif
 
     return true;
 }

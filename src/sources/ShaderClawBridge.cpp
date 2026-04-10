@@ -193,6 +193,11 @@ uint64_t ShaderClawBridge::getFileModTime(const std::string& path) {
         uli.HighPart = data.ftLastWriteTime.dwHighDateTime;
         return uli.QuadPart;
     }
+#else
+    try {
+        auto ftime = fs::last_write_time(path);
+        return (uint64_t)ftime.time_since_epoch().count();
+    } catch (...) {}
 #endif
     return 0;
 }

@@ -15,12 +15,14 @@ extern "C" {
 #include <libavutil/channel_layout.h>
 }
 
+#ifdef _WIN32
 #include <windows.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <combaseapi.h>
 #include <propidl.h>
 #include <ksmedia.h>
+#endif
 
 VideoRecorder::~VideoRecorder() {
     stop();
@@ -68,6 +70,7 @@ double VideoRecorder::uptimeSeconds() const {
 
 // ─── WASAPI audio device enumeration ────────────────────────────────
 
+#ifdef _WIN32
 std::vector<RecAudioDevice> VideoRecorder::enumerateAudioDevices() {
     std::vector<RecAudioDevice> result;
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -168,9 +171,15 @@ std::vector<RecAudioDevice> VideoRecorder::enumerateAudioDevices() {
     enumerator->Release();
     return result;
 }
+#else
+std::vector<RecAudioDevice> VideoRecorder::enumerateAudioDevices() {
+    return {};
+}
+#endif
 
 // ─── WASAPI capture ─────────────────────────────────────────────────
 
+#ifdef _WIN32
 bool VideoRecorder::initAudioCapture() {
     HRESULT hr;
 
@@ -270,6 +279,12 @@ bool VideoRecorder::initAudioCapture() {
     std::cout << "[REC] Audio capture started successfully" << std::endl;
     return true;
 }
+#else
+bool VideoRecorder::initAudioCapture() {
+    std::cerr << "[REC] Audio capture not implemented on this platform" << std::endl;
+    return false;
+}
+#endif
 
 // ─── FFmpeg encoder ─────────────────────────────────────────────────
 
@@ -277,7 +292,9 @@ bool VideoRecorder::initEncoder(const std::string& path, int width, int height, 
     m_width = width;
     m_height = height;
 
+#ifdef _WIN32
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+#endif
 
     // Auto-detect container from extension (mp4, mkv, etc.)
     int ret = avformat_alloc_output_context2(&m_fmtCtx, nullptr, nullptr, path.c_str());
@@ -458,6 +475,7 @@ void VideoRecorder::sendFrame(GLuint texture, int w, int h) {
 void VideoRecorder::drainAudio() {
     if (!m_captureClient || !m_audioCodecCtx) return;
 
+#ifdef _WIN32
     IAudioCaptureClient* capture = (IAudioCaptureClient*)m_captureClient;
     UINT32 packetLength = 0;
     HRESULT hr = capture->GetNextPacketSize(&packetLength);
@@ -486,6 +504,7 @@ void VideoRecorder::drainAudio() {
         hr = capture->GetNextPacketSize(&packetLength);
         if (FAILED(hr)) break;
     }
+#endif
 }
 
 void VideoRecorder::encodeAudioSamples(const float* data, int numSamples, int channels) {
@@ -527,7 +546,9 @@ void VideoRecorder::encodeAudioSamples(const float* data, int numSamples, int ch
 // ─── Encode thread ──────────────────────────────────────────────────
 
 void VideoRecorder::encodeThread() {
+#ifdef _WIN32
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+#endif
 
     while (!m_stopRequested) {
         std::unique_lock<std::mutex> lock(m_mutex);
@@ -572,7 +593,9 @@ void VideoRecorder::encodeThread() {
     if (m_fmtCtx && m_fmtCtx->pb)
         av_write_trailer(m_fmtCtx);
 
+#ifdef _WIN32
     CoUninitialize();
+#endif
 }
 
 void VideoRecorder::encodeVideoFrame(const uint8_t* rgbaData) {
@@ -600,6 +623,7 @@ void VideoRecorder::encodeVideoFrame(const uint8_t* rgbaData) {
 // ─── Cleanup ────────────────────────────────────────────────────────
 
 void VideoRecorder::cleanupAudio() {
+#ifdef _WIN32
     if (m_audioClient) {
         ((IAudioClient*)m_audioClient)->Stop();
         ((IAudioClient*)m_audioClient)->Release();
@@ -613,6 +637,11 @@ void VideoRecorder::cleanupAudio() {
         ((IMMDevice*)m_audioDevice)->Release();
         m_audioDevice = nullptr;
     }
+#else
+    m_audioClient = nullptr;
+    m_captureClient = nullptr;
+    m_audioDevice = nullptr;
+#endif
     if (m_swrCtx) { swr_free(&m_swrCtx); m_swrCtx = nullptr; }
     if (m_audioFrame) { av_frame_free(&m_audioFrame); }
     if (m_audioCodecCtx) { avcodec_free_context(&m_audioCodecCtx); }

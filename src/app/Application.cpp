@@ -3,8 +3,13 @@
 #ifdef HAS_FFMPEG
 #include "sources/VideoSource.h"
 #endif
+#ifdef _WIN32
 #include "sources/CaptureSource.h"
 #include "sources/WindowCaptureSource.h"
+#elif defined(__APPLE__)
+#include "sources/CaptureSource_mac.h"
+#include "sources/WindowCaptureSource_mac.h"
+#endif
 #include "sources/ShaderSource.h"
 #ifdef HAS_NDI
 #include "sources/NDIRuntime.h"
@@ -38,6 +43,12 @@ static void glfwErrorCallback(int error, const char* description) {
     std::cerr << "GLFW Error " << error << ": " << description << std::endl;
 }
 
+#ifdef __APPLE__
+// Implemented in FileDialog_mac.mm
+extern std::string openFileDialog_mac(const char* filter);
+extern std::string saveFileDialog_mac(const char* filter, const char* defaultExt);
+#endif
+
 static std::string openFileDialog(const char* filter) {
 #ifdef _WIN32
     char filename[MAX_PATH] = "";
@@ -50,6 +61,8 @@ static std::string openFileDialog(const char* filter) {
     if (GetOpenFileNameA(&ofn)) {
         return filename;
     }
+#elif defined(__APPLE__)
+    return openFileDialog_mac(filter);
 #endif
     return "";
 }
@@ -67,6 +80,8 @@ static std::string saveFileDialog(const char* filter, const char* defaultExt) {
     if (GetSaveFileNameA(&ofn)) {
         return filename;
     }
+#elif defined(__APPLE__)
+    return saveFileDialog_mac(filter, defaultExt);
 #endif
     return "";
 }
@@ -85,9 +100,16 @@ bool Application::init() {
         return false;
     }
 
+#ifdef __APPLE__
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+#else
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+#endif
     glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_TRUE);
 
     m_window = glfwCreateWindow(m_windowWidth, m_windowHeight, "Easel", nullptr, nullptr);
@@ -222,12 +244,22 @@ bool Application::init() {
 
     // Auto-connect to ShaderClaw shaders directory
     {
+#ifdef _WIN32
         const char* home = getenv("USERPROFILE");
+#else
+        const char* home = getenv("HOME");
+#endif
         if (home) {
             std::string candidates[] = {
+#ifdef _WIN32
                 std::string(home) + "\\ShaderClaw3\\shaders",
                 std::string(home) + "\\Documents\\ShaderClaw3\\shaders",
                 std::string(home) + "\\Documents\\ShaderClaw\\shaders",
+#else
+                std::string(home) + "/ShaderClaw3/shaders",
+                std::string(home) + "/Documents/ShaderClaw3/shaders",
+                std::string(home) + "/Documents/ShaderClaw/shaders",
+#endif
             };
             for (const auto& path : candidates) {
                 if (std::filesystem::exists(path)) {
@@ -1715,7 +1747,11 @@ void Application::renderUI() {
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.50f));
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
                 if (ImGui::Button("Add")) {
+#ifdef _WIN32
                     addWindowCapture(m_windowList[i].hwnd, m_windowList[i].title);
+#elif defined(__APPLE__)
+                    addWindowCapture(m_windowList[i].windowID, m_windowList[i].title);
+#endif
                 }
                 ImGui::PopStyleColor(4);
 
@@ -2563,11 +2599,14 @@ void Application::renderUI() {
 }
 
 #ifdef HAS_FFMPEG
+#ifdef _WIN32
 #include <mmdeviceapi.h>
 #include <endpointvolume.h>
 #include <functiondiscoverykeys_devpkey.h>
+#endif
 
 void Application::cleanupAudioMeter() {
+#ifdef _WIN32
     if (m_audioMeterInfo) {
         ((IAudioMeterInformation*)m_audioMeterInfo)->Release();
         m_audioMeterInfo = nullptr;
@@ -2576,10 +2615,15 @@ void Application::cleanupAudioMeter() {
         ((IMMDevice*)m_audioMeterDevice)->Release();
         m_audioMeterDevice = nullptr;
     }
+#else
+    m_audioMeterInfo = nullptr;
+    m_audioMeterDevice = nullptr;
+#endif
     m_meterDeviceIdx = -2;
 }
 
 void Application::updateAudioMeter() {
+#ifdef _WIN32
     // Reinit meter if selected device changed or previous init failed
     if (m_meterDeviceIdx != m_selectedAudioDevice || !m_audioMeterInfo) {
         cleanupAudioMeter();
@@ -2657,7 +2701,9 @@ void Application::updateAudioMeter() {
                 }
             }
         }
-    } else {
+    } else
+#endif
+    {
         // Fallback: use AudioAnalyzer RMS if meter unavailable
         float rms = m_audioAnalyzer.smoothedRMS();
         m_audioLevelPeak = rms;
@@ -2749,7 +2795,11 @@ void Application::renderTransportBar() {
             auto now = std::chrono::system_clock::now();
             auto t = std::chrono::system_clock::to_time_t(now);
             struct tm tm_buf;
+#ifdef _WIN32
             localtime_s(&tm_buf, &t);
+#else
+            localtime_r(&t, &tm_buf);
+#endif
             char fname[128];
             strftime(fname, sizeof(fname), "recordings/%Y%m%d_%H%M%S.mp4", &tm_buf);
             m_recorder.setAudioDevice(m_selectedAudioDevice);
@@ -3090,6 +3140,7 @@ void Application::addScreenCapture(int monitorIndex) {
     m_selectedLayer = m_layerStack.count() - 1;
 }
 
+#ifdef _WIN32
 void Application::addWindowCapture(HWND hwnd, const std::string& title) {
     m_undoStack.pushState(m_layerStack, m_selectedLayer);
     auto source = std::make_shared<WindowCaptureSource>();
@@ -3106,6 +3157,24 @@ void Application::addWindowCapture(HWND hwnd, const std::string& title) {
     m_layerStack.addLayer(layer);
     m_selectedLayer = m_layerStack.count() - 1;
 }
+#elif defined(__APPLE__)
+void Application::addWindowCapture(uint32_t windowID, const std::string& title) {
+    m_undoStack.pushState(m_layerStack, m_selectedLayer);
+    auto source = std::make_shared<WindowCaptureSource>();
+    if (!source->start(windowID)) {
+        std::cerr << "Failed to capture window: " << title << std::endl;
+        return;
+    }
+
+    auto layer = std::make_shared<Layer>();
+    layer->id = m_nextLayerId++;
+    layer->source = source;
+    layer->name = "Win: " + title;
+
+    m_layerStack.addLayer(layer);
+    m_selectedLayer = m_layerStack.count() - 1;
+}
+#endif
 
 void Application::loadShader(const std::string& path) {
     m_undoStack.pushState(m_layerStack, m_selectedLayer);

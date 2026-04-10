@@ -206,7 +206,7 @@ std::string ShaderSource::translateFragment(const std::string& isfBody) {
     body = std::regex_replace(body, std::regex(R"(\btexture2D\b)"), "texture");
 
     std::stringstream out;
-    out << "#version 430 core\n";
+    out << "#version 330 core\n";
     out << "out vec4 FragColor;\n";
     out << "in vec2 isf_FragNormCoord;\n";
     out << "\n";
@@ -342,7 +342,7 @@ std::string ShaderSource::translateVertex(const std::string& isfBody) {
     body = std::regex_replace(body, std::regex(R"(in\s+vec2\s+position\s*;)"), "// (provided by Easel)");
 
     std::stringstream out;
-    out << "#version 430 core\n";
+    out << "#version 330 core\n";
     out << "layout(location = 0) in vec2 aPos;\n";
     out << "layout(location = 1) in vec2 aTexCoord;\n";
     out << "out vec2 isf_FragNormCoord;\n";
@@ -363,7 +363,7 @@ std::string ShaderSource::translateVertex(const std::string& isfBody) {
 
 std::string ShaderSource::generateDefaultVertex() {
     return
-        "#version 430 core\n"
+        "#version 330 core\n"
         "layout(location = 0) in vec2 aPos;\n"
         "layout(location = 1) in vec2 aTexCoord;\n"
         "out vec2 isf_FragNormCoord;\n"

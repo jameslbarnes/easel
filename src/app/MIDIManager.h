@@ -11,6 +11,9 @@
 #include <mmeapi.h>
 #pragma comment(lib, "winmm.lib")
 #endif
+#ifdef __APPLE__
+#include <cstdint>
+#endif
 
 // A MIDI CC/Note event
 struct MIDIEvent {
@@ -79,6 +82,9 @@ private:
     HMIDIIN m_midiIn = nullptr;
     static void CALLBACK midiCallback(HMIDIIN hMidiIn, UINT wMsg, DWORD_PTR dwInstance,
                                        DWORD_PTR dwParam1, DWORD_PTR dwParam2);
+#endif
+#ifdef __APPLE__
+    void* m_macMidiImpl = nullptr;
 #endif
     bool m_open = false;
     int m_deviceIdx = -1;

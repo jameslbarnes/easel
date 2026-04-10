@@ -13,10 +13,12 @@ extern "C" {
 #include <libavutil/channel_layout.h>
 }
 
+#ifdef _WIN32
 // WASAPI includes
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <functiondiscoverykeys_devpkey.h>
+#endif
 
 VideoSource::~VideoSource() {
     close();
@@ -24,6 +26,7 @@ VideoSource::~VideoSource() {
 
 // ─── Audio output initialization ─────────────────────────────────────
 
+#ifdef _WIN32
 bool VideoSource::initAudioOutput() {
     HRESULT hr;
 
@@ -99,8 +102,15 @@ bool VideoSource::initAudioOutput() {
 
     return true;
 }
+#else
+bool VideoSource::initAudioOutput() {
+    std::cerr << "[Video] Audio output not implemented on this platform" << std::endl;
+    return false;
+}
+#endif
 
 void VideoSource::cleanupAudio() {
+#ifdef _WIN32
     if (m_audioClient) {
         ((IAudioClient*)m_audioClient)->Stop();
         ((IAudioClient*)m_audioClient)->Release();
@@ -114,6 +124,11 @@ void VideoSource::cleanupAudio() {
         ((IMMDevice*)m_audioDevice)->Release();
         m_audioDevice = nullptr;
     }
+#else
+    m_audioClient = nullptr;
+    m_renderClient = nullptr;
+    m_audioDevice = nullptr;
+#endif
     if (m_audioCodecCtx) {
         avcodec_free_context(&m_audioCodecCtx);
     }
@@ -126,6 +141,7 @@ void VideoSource::cleanupAudio() {
 void VideoSource::feedAudioToWASAPI() {
     if (!m_audioClient || !m_renderClient) return;
 
+#ifdef _WIN32
     auto* audioClient = (IAudioClient*)m_audioClient;
     auto* renderClient = (IAudioRenderClient*)m_renderClient;
 
@@ -159,6 +175,7 @@ void VideoSource::feedAudioToWASAPI() {
 
     renderClient->ReleaseBuffer(toWrite, 0);
     m_audioFramesPlayed += toWrite;
+#endif
 }
 
 void VideoSource::decodeAudioPacket(AVFrame* frame, AVPacket* pkt) {
@@ -339,16 +356,20 @@ void VideoSource::play() {
     m_playbackStart = glfwGetTime();
     m_playbackOffset = m_currentTime;
     m_playing = true;
+#ifdef _WIN32
     if (m_audioClient) {
         ((IAudioClient*)m_audioClient)->Start();
     }
+#endif
 }
 
 void VideoSource::pause() {
     m_playing = false;
+#ifdef _WIN32
     if (m_audioClient) {
         ((IAudioClient*)m_audioClient)->Stop();
     }
+#endif
 }
 
 void VideoSource::seek(double seconds) {

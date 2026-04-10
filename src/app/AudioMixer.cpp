@@ -653,7 +653,7 @@ void AudioMixer::mixAndOutput() {
 
     if (m_output.initialized) {
         // Use WASAPI output buffer for timing
-        UINT32 padding = 0;
+        uint32_t padding = 0;
 #ifdef _WIN32
         if (m_output.audioClient)
             m_output.audioClient->GetCurrentPadding(&padding);

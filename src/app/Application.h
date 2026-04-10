@@ -19,7 +19,11 @@
 #include "ui/WarpEditor.h"
 #include <unordered_map>
 
+#ifdef _WIN32
 #include "sources/WindowCaptureSource.h"
+#elif defined(__APPLE__)
+#include "sources/WindowCaptureSource_mac.h"
+#endif
 #include "sources/ShaderSource.h"
 #include "sources/ShaderClawBridge.h"
 
@@ -133,7 +137,11 @@ private:
     void loadImage(const std::string& path);
     void loadVideo(const std::string& path);
     void addScreenCapture(int monitorIndex);
+#ifdef _WIN32
     void addWindowCapture(HWND hwnd, const std::string& title);
+#elif defined(__APPLE__)
+    void addWindowCapture(uint32_t windowID, const std::string& title);
+#endif
     void loadShader(const std::string& path);
 
     std::vector<WindowInfo> m_windowList;

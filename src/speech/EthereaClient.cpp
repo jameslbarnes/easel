@@ -1,18 +1,35 @@
+#include "speech/EthereaClient.h"
+
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-#include "speech/EthereaClient.h"
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+#else
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <unistd.h>
+#define SOCKET int
+#define INVALID_SOCKET -1
+#define SOCKET_ERROR -1
+#define closesocket close
+#define MAKEWORD(a,b) 0
+inline int WSAStartup(int, void*) { return 0; }
+inline void WSACleanup() {}
+struct WSADATA { int dummy; };
+#endif
+
 #include <fstream>
 #include <sstream>
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
-
-#pragma comment(lib, "ws2_32.lib")
 
 // ─── Logging ───────────────────────────────────────────────────────────────
 
@@ -137,7 +154,11 @@ struct WSReader {
             struct timeval tv;
             tv.tv_sec = timeoutMs / 1000;
             tv.tv_usec = (timeoutMs % 1000) * 1000;
+#ifdef _WIN32
             int sel = select(0, &readSet, nullptr, nullptr, &tv);
+#else
+            int sel = select(sock + 1, &readSet, nullptr, nullptr, &tv);
+#endif
             if (sel <= 0) return false;
             int n = recv(sock, out + have, len - have, 0);
             if (n <= 0) return false;
@@ -412,7 +433,12 @@ void EthereaClient::wsLoop() {
             FD_ZERO(&readSet);
             FD_SET(sock, &readSet);
             struct timeval tv = { 3, 0 };
-            if (select(0, &readSet, nullptr, nullptr, &tv) <= 0) break;
+#ifdef _WIN32
+            int sel = select(0, &readSet, nullptr, nullptr, &tv);
+#else
+            int sel = select(sock + 1, &readSet, nullptr, nullptr, &tv);
+#endif
+            if (sel <= 0) break;
             int n = recv(sock, buf, sizeof(buf) - 1, 0);
             if (n <= 0) break;
             buf[n] = '\0';
@@ -540,7 +566,11 @@ void EthereaClient::sseLoop() {
             FD_ZERO(&readSet);
             FD_SET(sock, &readSet);
             struct timeval tv = { 1, 0 };
+#ifdef _WIN32
             int sel = select(0, &readSet, nullptr, nullptr, &tv);
+#else
+            int sel = select(sock + 1, &readSet, nullptr, nullptr, &tv);
+#endif
             if (sel == 0) continue;
             if (sel == SOCKET_ERROR) break;
 

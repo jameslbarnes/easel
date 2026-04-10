@@ -6,6 +6,8 @@ MIDIManager::~MIDIManager() {
     closeDevice();
 }
 
+// On macOS, listDevices/openDevice/closeDevice are defined in MIDIManager_mac.mm
+#ifndef __APPLE__
 std::vector<std::string> MIDIManager::listDevices() {
     std::vector<std::string> devices;
 #ifdef _WIN32
@@ -50,6 +52,7 @@ void MIDIManager::closeDevice() {
     m_open = false;
     m_deviceIdx = -1;
 }
+#endif // !__APPLE__
 
 #ifdef _WIN32
 void CALLBACK MIDIManager::midiCallback(HMIDIIN hMidiIn, UINT wMsg, DWORD_PTR dwInstance,

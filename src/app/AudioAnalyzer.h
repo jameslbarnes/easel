@@ -4,10 +4,12 @@
 #include <string>
 #include <cmath>
 
+#ifdef _WIN32
 // Forward declare WASAPI types to avoid Windows.h in header
 struct IAudioClient;
 struct IAudioCaptureClient;
 struct IMMDevice;
+#endif
 
 struct AudioBands {
     float bass = 0;
@@ -66,10 +68,14 @@ public:
     float rawRMS() const { return m_rawRMS; }
 
 private:
+#ifdef _WIN32
     // WASAPI capture
     IAudioClient* m_audioClient = nullptr;
     IAudioCaptureClient* m_captureClient = nullptr;
     IMMDevice* m_device = nullptr;
+#elif defined(__APPLE__)
+    void* m_macAudioImpl = nullptr; // Opaque pointer to macOS audio capture
+#endif
     int m_deviceIdx = -2; // -2 = uninitialized
     int m_requestedDevice = -1;
     std::string m_deviceId;         // Windows endpoint ID string

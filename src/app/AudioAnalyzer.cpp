@@ -70,7 +70,8 @@ void AudioAnalyzer::update(float dt) {
 }
 
 // --- WASAPI capture ---
-
+// On macOS, these functions are defined in AudioAnalyzer_mac.mm
+#ifndef __APPLE__
 void AudioAnalyzer::initCapture() {
 #ifdef _WIN32
     initHannWindow();
@@ -240,6 +241,7 @@ void AudioAnalyzer::drainPackets() {
     }
 #endif
 }
+#endif // !__APPLE__
 
 // --- Test injection ---
 

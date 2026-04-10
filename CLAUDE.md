@@ -1,18 +1,25 @@
 # Easel - C++ Projection Mapping Application
 
 ## Build System
-- CMake 3.20+ with Visual Studio 2022 (MSVC)
-- C++17 required
-- Solution: `build/Easel.sln`
+- CMake 3.20+ with C++17
+- Windows: Visual Studio 2022 (MSVC), solution: `build/Easel.sln`
+- macOS: Apple Clang (Xcode Command Line Tools), Makefiles
 
 ## Build Commands
+### Windows
 ```bash
 cd build
 cmake .. -G "Visual Studio 17 2022" -A x64
 cmake --build . --config Release
 ```
 
-If cmake is not on PATH, find it via VS Developer Command Prompt or install: `winget install Kitware.CMake`
+### macOS
+```bash
+brew install cmake ffmpeg opencv
+mkdir build && cd build
+cmake ..
+cmake --build .
+```
 
 ## Dependencies (auto-fetched via FetchContent)
 - GLFW 3.4, GLM, Dear ImGui (docking), nlohmann/json, Catch2, libdatachannel

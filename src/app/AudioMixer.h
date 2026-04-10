@@ -11,11 +11,13 @@
 #include "sources/NDIRuntime.h"
 #endif
 
+#ifdef _WIN32
 // Forward declare WASAPI types to avoid Windows.h in header
 struct IAudioClient;
 struct IAudioCaptureClient;
 struct IAudioRenderClient;
 struct IMMDevice;
+#endif
 struct SwrContext;
 
 // --- Per-input WASAPI capture + resampler ---
@@ -27,10 +29,14 @@ struct AudioMixerInput {
     float volume = 1.0f;        // 0.0-1.0 gain
     bool muted = false;
 
+#ifdef _WIN32
     // WASAPI state (owned by mixer thread)
     IAudioClient* audioClient = nullptr;
     IAudioCaptureClient* captureClient = nullptr;
     IMMDevice* device = nullptr;
+#elif defined(__APPLE__)
+    void* macAudioImpl = nullptr;
+#endif
     int sampleRate = 0;
     int channels = 0;
     bool initialized = false;
@@ -57,9 +63,13 @@ struct AudioMixerOutput {
     std::string deviceId;       // empty = system default
     std::string name;
 
+#ifdef _WIN32
     IAudioClient* audioClient = nullptr;
     IAudioRenderClient* renderClient = nullptr;
     IMMDevice* device = nullptr;
+#elif defined(__APPLE__)
+    void* macAudioImpl = nullptr;
+#endif
     int sampleRate = 0;
     int channels = 0;
     int bufferFrames = 0;
