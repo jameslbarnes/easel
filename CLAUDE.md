@@ -13,12 +13,21 @@ cmake .. -G "Visual Studio 17 2022" -A x64
 cmake --build . --config Release
 ```
 
-### macOS
+### macOS (ARM64 / Apple Silicon)
 ```bash
 brew install cmake ffmpeg opencv
-mkdir build && cd build
-cmake ..
-cmake --build .
+cmake -B build
+cmake --build build
+```
+
+#### NDI support (optional)
+Download the NDI runtime from https://ndi.video/tools/ or:
+```bash
+curl -L -o /tmp/libNDI.pkg https://downloads.ndi.tv/SDK/NDI_SDK_Mac/libNDI_for_Mac.pkg
+# Extract without sudo:
+mkdir -p /tmp/ndi && cd /tmp/ndi && xar -xf /tmp/libNDI.pkg
+cd libNDIComponent.pkg && cat Payload | gunzip | cpio -id
+cp libndi.dylib <easel>/build/
 ```
 
 ## Dependencies (auto-fetched via FetchContent)
@@ -53,6 +62,11 @@ Layers composited via ping-pong FBO with blend modes. `AudioState` struct carrie
 
 ## Testing
 ```bash
+# Windows
 cmake --build build --config Release --target test_audio_analyzer
 build/Release/test_audio_analyzer.exe
+
+# macOS
+cmake --build build --target test_audio_analyzer
+./build/test_audio_analyzer
 ```
