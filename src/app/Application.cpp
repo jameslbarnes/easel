@@ -2720,6 +2720,8 @@ void Application::updateAudioMeter() {
     smooth(m_audioLevelSmooth, m_audioLevelPeak);
     smooth(m_audioLevelSmoothL, m_audioLevelL);
     smooth(m_audioLevelSmoothR, m_audioLevelR);
+
+
 }
 
 // Old cleanupMosaicMeter/updateMosaicMeter removed — replaced by AudioAnalyzer

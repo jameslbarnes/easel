@@ -263,6 +263,7 @@ void AudioAnalyzer::feedSamples(const float* mono, int count) {
 // --- FFT ---
 
 void AudioAnalyzer::runFFT() {
+    initHannWindow();
     kiss_fft_cfg cfg = kiss_fft_alloc(kFFTSize, 0, nullptr, nullptr);
     if (!cfg) return;
 
