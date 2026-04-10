@@ -259,6 +259,7 @@ bool Application::init() {
                 std::string(home) + "/ShaderClaw3/shaders",
                 std::string(home) + "/Documents/ShaderClaw3/shaders",
                 std::string(home) + "/Documents/ShaderClaw/shaders",
+                std::string(home) + "/conductor/workspaces/macbook-migration/doha/ShaderClaw3/shaders",
 #endif
             };
             for (const auto& path : candidates) {
@@ -1773,14 +1774,24 @@ void Application::renderUI() {
             // Auto-detect common locations
             static char scPath[512] = "";
             if (scPath[0] == '\0') {
+#ifdef _WIN32
                 const char* home = getenv("USERPROFILE");
+#else
+                const char* home = getenv("HOME");
+#endif
                 if (home) {
                     // Try known ShaderClaw locations
                     std::string candidates[] = {
+#ifdef _WIN32
                         std::string(home) + "\\ShaderClaw3\\shaders",
                         std::string(home) + "\\Documents\\ShaderClaw3\\shaders",
                         std::string(home) + "\\Documents\\ShaderClaw\\shaders",
                         std::string(home) + "\\shader-claw3\\shaders",
+#else
+                        std::string(home) + "/ShaderClaw3/shaders",
+                        std::string(home) + "/Documents/ShaderClaw3/shaders",
+                        std::string(home) + "/conductor/workspaces/macbook-migration/doha/ShaderClaw3/shaders",
+#endif
                     };
                     for (const auto& tryPath : candidates) {
                         if (std::filesystem::exists(tryPath)) {

@@ -24,6 +24,16 @@ bool UIManager::init(GLFWwindow* window) {
         glfwGetMonitorContentScale(monitor, &xscale, &yscale);
     }
     float dpiScale = xscale;
+#ifdef __APPLE__
+    // macOS Retina: GLFW already handles framebuffer scaling, so we render fonts
+    // at native resolution (dpiScale for crisp text) but don't scale UI sizes again.
+    // Use a smaller base font size since the content scale is already applied.
+    float fontScale = dpiScale;
+    float uiScale = 1.0f;
+#else
+    float fontScale = dpiScale;
+    float uiScale = dpiScale;
+#endif
 
     // Extended glyph ranges for unicode support (accented chars, etc.)
     static const ImWchar glyphRanges[] = {
@@ -35,8 +45,8 @@ bool UIManager::init(GLFWwindow* window) {
         0,
     };
 
-    // Load Segoe UI from Windows for a clean, modern look
-    float fontSize = 16.0f * dpiScale;
+    // Load system font with DPI-aware sizing
+    float fontSize = 16.0f * fontScale;
     ImFontConfig fontCfg;
     fontCfg.OversampleH = 2;
     fontCfg.OversampleV = 1;
@@ -54,7 +64,7 @@ bool UIManager::init(GLFWwindow* window) {
     }
 
     // Slightly smaller font for secondary text
-    float smallSize = 14.0f * dpiScale;
+    float smallSize = 14.0f * fontScale;
     ImFontConfig smallCfg;
     smallCfg.OversampleH = 2;
 #ifdef _WIN32
@@ -82,7 +92,7 @@ bool UIManager::init(GLFWwindow* window) {
 #endif
     if (!m_boldFont) m_boldFont = mainFont ? mainFont : io.Fonts->Fonts[0];
 
-    applyTheme(dpiScale);
+    applyTheme(uiScale);
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
 #ifdef __APPLE__
