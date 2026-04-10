@@ -2482,7 +2482,7 @@ void Application::renderUI() {
     }
     ImGui::End();
 
-#ifdef HAS_OPENCV
+#if defined(HAS_OPENCV) && !defined(__APPLE__)
     m_scanPanel.render(m_scanner, m_webcam);
 #endif
 

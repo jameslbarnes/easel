@@ -24,15 +24,16 @@ bool UIManager::init(GLFWwindow* window) {
         glfwGetMonitorContentScale(monitor, &xscale, &yscale);
     }
     float dpiScale = xscale;
+    // On macOS Retina, fonts are loaded at 2x for crispness, then
+    // FontGlobalScale is set to 1/dpiScale so they render at logical size.
+    // On Windows, fonts and UI are both scaled by dpiScale.
+    float fontScale = dpiScale;   // font texture resolution
 #ifdef __APPLE__
-    // macOS Retina: GLFW already handles framebuffer scaling, so we render fonts
-    // at native resolution (dpiScale for crisp text) but don't scale UI sizes again.
-    // Use a smaller base font size since the content scale is already applied.
-    float fontScale = dpiScale;
-    float uiScale = 1.0f;
+    float uiScale = 1.0f;        // widget sizes — already in logical coords on mac
+    m_baseFontGlobalScale = 1.0f / dpiScale;
 #else
-    float fontScale = dpiScale;
     float uiScale = dpiScale;
+    m_baseFontGlobalScale = 1.0f;
 #endif
 
     // Extended glyph ranges for unicode support (accented chars, etc.)
@@ -93,6 +94,9 @@ bool UIManager::init(GLFWwindow* window) {
     if (!m_boldFont) m_boldFont = mainFont ? mainFont : io.Fonts->Fonts[0];
 
     applyTheme(uiScale);
+
+    // Set font global scale (on Retina: 0.5 to counteract 2x font texture)
+    io.FontGlobalScale = m_baseFontGlobalScale * m_uiZoom;
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
 #ifdef __APPLE__
@@ -254,6 +258,30 @@ void UIManager::applyTheme(float dpiScale) {
     s.ScaleAllSizes(dpiScale);
 }
 
+void UIManager::handleZoom() {
+    ImGuiIO& io = ImGui::GetIO();
+
+    // Cmd+= / Cmd+- on macOS, Ctrl+= / Ctrl+- on Windows/Linux
+#ifdef __APPLE__
+    bool mod = io.KeySuper;
+#else
+    bool mod = io.KeyCtrl;
+#endif
+
+    if (mod && ImGui::IsKeyPressed(ImGuiKey_Equal)) {   // + / =
+        m_uiZoom = std::min(m_uiZoom + 0.1f, 3.0f);
+        io.FontGlobalScale = m_baseFontGlobalScale * m_uiZoom;
+    }
+    if (mod && ImGui::IsKeyPressed(ImGuiKey_Minus)) {   // -
+        m_uiZoom = std::max(m_uiZoom - 0.1f, 0.4f);
+        io.FontGlobalScale = m_baseFontGlobalScale * m_uiZoom;
+    }
+    if (mod && ImGui::IsKeyPressed(ImGuiKey_0)) {       // reset
+        m_uiZoom = 1.0f;
+        io.FontGlobalScale = m_baseFontGlobalScale * m_uiZoom;
+    }
+}
+
 void UIManager::shutdown() {
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
@@ -264,6 +292,7 @@ void UIManager::beginFrame() {
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
+    handleZoom();
 }
 
 void UIManager::endFrame() {
