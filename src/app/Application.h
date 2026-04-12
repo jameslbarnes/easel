@@ -128,6 +128,7 @@ private:
     void compositeAndWarp();
     void compositeZone(OutputZone& zone);
     void presentOutputs();
+    void renderReadbackFBO(OutputZone& zone);
     void renderUI();
     void renderMenuBar();
     void addZone();

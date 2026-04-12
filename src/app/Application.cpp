@@ -954,6 +954,26 @@ void Application::compositeZone(OutputZone& zone) {
     // Masks are now applied pre-warp (above), so they're visible in the canvas preview
 }
 
+void Application::renderReadbackFBO(OutputZone& zone) {
+    zone.readbackFBO.bind();
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    m_passthroughShader.use();
+    m_passthroughShader.setInt("uTexture", 0);
+    m_passthroughShader.setFloat("uOpacity", 1.0f);
+    m_passthroughShader.setMat3("uTransform", glm::mat3(1.0f));
+    m_passthroughShader.setBool("uFlipV", true);
+    m_passthroughShader.setBool("uHasMask", false);
+    m_passthroughShader.setFloat("uTileX", 1.0f);
+    m_passthroughShader.setFloat("uTileY", 1.0f);
+    m_passthroughShader.setInt("uMosaicMode", 0);
+    m_passthroughShader.setFloat("uFeather", 0.0f);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, zone.warpFBO.textureId());
+    m_quad.draw();
+    Framebuffer::unbind();
+}
+
 void Application::presentOutputs() {
     glFinish(); // Ensure all zone FBOs are written before presenting
 
@@ -1007,7 +1027,8 @@ void Application::presentOutputs() {
                 zone.ndiOutput.create(name);
             }
             if (zone.ndiOutput.isActive()) {
-                zone.ndiOutput.send(zone.warpFBO.textureId(), zone.warpFBO.width(), zone.warpFBO.height());
+                renderReadbackFBO(zone);
+                zone.ndiOutput.send(zone.readbackFBO.textureId(), zone.width, zone.height);
             }
         } else {
             // Destroy NDI sender if no longer needed
@@ -1030,19 +1051,30 @@ void Application::presentOutputs() {
 
     // Global outputs (stream/record) — use active zone
     auto& active = activeZone();
+    bool needsReadback = false;
+#ifdef HAS_NDI
+    if (m_ndiOutputEnabled && m_ndiOutput.isActive()) needsReadback = true;
+#endif
+#ifdef HAS_FFMPEG
+    if (m_rtmpOutput.isActive() || m_recorder.isActive()) needsReadback = true;
+#endif
+    if (needsReadback) {
+        renderReadbackFBO(active);
+    }
+
 #ifdef HAS_NDI
     // Legacy global NDI output (composition toggle in NDI panel)
     if (m_ndiOutputEnabled && m_ndiOutput.isActive()) {
-        m_ndiOutput.send(active.warpFBO.textureId(), active.warpFBO.width(), active.warpFBO.height());
+        m_ndiOutput.send(active.readbackFBO.textureId(), active.width, active.height);
     }
 #endif
 
 #ifdef HAS_FFMPEG
     if (m_rtmpOutput.isActive()) {
-        m_rtmpOutput.sendFrame(active.warpFBO.textureId(), active.warpFBO.width(), active.warpFBO.height());
+        m_rtmpOutput.sendFrame(active.readbackFBO.textureId(), active.width, active.height);
     }
     if (m_recorder.isActive()) {
-        m_recorder.sendFrame(active.warpFBO.textureId(), active.warpFBO.width(), active.warpFBO.height());
+        m_recorder.sendFrame(active.readbackFBO.textureId(), active.width, active.height);
     }
 #endif
 }

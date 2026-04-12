@@ -32,57 +32,90 @@ void NDIOutput::destroy() {
     if (m_send) {
         auto& rt = NDIRuntime::instance();
         if (rt.isAvailable()) {
-            // Send nullptr to flush any async frame
+            // Flush async frame
             rt.api()->send_send_video_async_v2(m_send, nullptr);
             rt.api()->send_destroy(m_send);
         }
         m_send = nullptr;
     }
-    m_pixelBuffer.clear();
+    if (m_pbo[0]) { glDeleteBuffers(2, m_pbo); m_pbo[0] = m_pbo[1] = 0; }
+    m_pixelBuffer[0].clear();
+    m_pixelBuffer[1].clear();
     m_lastW = 0;
     m_lastH = 0;
+    m_pboReady = false;
+    m_pboIndex = 0;
+    m_bufferIndex = 0;
 }
 
 void NDIOutput::send(GLuint texture, int w, int h) {
     if (!m_send || w <= 0 || h <= 0) return;
 
-    // Resize pixel buffer if needed
+    size_t bytes = (size_t)w * h * 4;
+
+    // Resize buffers if dimensions changed
     if (w != m_lastW || h != m_lastH) {
-        m_pixelBuffer.resize(w * h * 4);
+        m_pixelBuffer[0].resize(bytes);
+        m_pixelBuffer[1].resize(bytes);
         m_lastW = w;
         m_lastH = h;
+        m_pboReady = false;
+
+        // (Re)create PBOs
+        if (m_pbo[0]) glDeleteBuffers(2, m_pbo);
+        glGenBuffers(2, m_pbo);
+        for (int i = 0; i < 2; i++) {
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, m_pbo[i]);
+            glBufferData(GL_PIXEL_PACK_BUFFER, bytes, nullptr, GL_STREAM_READ);
+        }
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+        m_pboIndex = 0;
     }
 
-    // Read back texture as BGRA (NDI native format, avoids swizzle on their side)
+    int readPBO = m_pboIndex;
+    int mapPBO = 1 - m_pboIndex;
+
+    // Step 1: Kick off async readback of current frame into readPBO
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, m_pbo[readPBO]);
     glBindTexture(GL_TEXTURE_2D, texture);
-    glGetTexImage(GL_TEXTURE_2D, 0, GL_BGRA, GL_UNSIGNED_BYTE, m_pixelBuffer.data());
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    // Flip vertically (OpenGL bottom-up → NDI top-down)
-    int stride = w * 4;
-    std::vector<uint8_t> row(stride);
-    for (int y = 0; y < h / 2; y++) {
-        uint8_t* top = m_pixelBuffer.data() + y * stride;
-        uint8_t* bot = m_pixelBuffer.data() + (h - 1 - y) * stride;
-        std::memcpy(row.data(), top, stride);
-        std::memcpy(top, bot, stride);
-        std::memcpy(bot, row.data(), stride);
+    // Step 2: Map the OTHER PBO (previous frame) — this one is already done
+    if (m_pboReady) {
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, m_pbo[mapPBO]);
+        void* ptr = glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
+        if (ptr) {
+            // Straight copy — readback FBO is already vertically flipped
+            auto& buf = m_pixelBuffer[m_bufferIndex];
+            std::memcpy(buf.data(), ptr, bytes);
+            glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+
+            // Send asynchronously — NDI holds the buffer until next async call
+            NDIlib_video_frame_v2_t frame = {};
+            frame.xres = w;
+            frame.yres = h;
+            frame.FourCC = NDIlib_FourCC_video_type_BGRA;
+            frame.frame_rate_N = 60000;
+            frame.frame_rate_D = 1001;
+            frame.picture_aspect_ratio = (float)w / (float)h;
+            frame.frame_format_type = NDIlib_frame_format_type_progressive;
+            frame.p_data = buf.data();
+            frame.line_stride_in_bytes = w * 4;
+
+            auto& rt = NDIRuntime::instance();
+            rt.api()->send_send_video_async_v2(m_send, &frame);
+
+            // Swap send buffer so next frame writes to the other one
+            m_bufferIndex = 1 - m_bufferIndex;
+        }
     }
 
-    // Build and send the frame
-    NDIlib_video_frame_v2_t frame = {};
-    frame.xres = w;
-    frame.yres = h;
-    frame.FourCC = NDIlib_FourCC_video_type_BGRA;
-    frame.frame_rate_N = 60000;
-    frame.frame_rate_D = 1001;
-    frame.picture_aspect_ratio = (float)w / (float)h;
-    frame.frame_format_type = NDIlib_frame_format_type_progressive;
-    frame.p_data = m_pixelBuffer.data();
-    frame.line_stride_in_bytes = stride;
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
 
-    auto& rt = NDIRuntime::instance();
-    rt.api()->send_send_video_v2(m_send, &frame);
+    // Swap PBO index for next frame
+    m_pboIndex = 1 - m_pboIndex;
+    m_pboReady = true;
 }
 
 #endif // HAS_NDI

@@ -18,6 +18,7 @@ struct OutputZone {
 
     CompositeEngine compositor;
     Framebuffer warpFBO;
+    Framebuffer readbackFBO; // vertically-flipped copy of warpFBO for CPU readback
     GLuint canvasTexture = 0; // post-mask, pre-warp texture for canvas preview
 
     // Mapping profile index (-1 = none/passthrough, >=0 = index into Application::m_mappings)

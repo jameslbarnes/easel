@@ -555,28 +555,48 @@ bool VideoRecorder::initEncoder(const std::string& path, int width, int height, 
 void VideoRecorder::sendFrame(GLuint texture, int w, int h) {
     if (!m_active || w != m_width || h != m_height) return;
 
+    size_t bytes = (size_t)w * h * 4;
+
+    // Create PBOs on first use or size change
+    if (!m_pbo[0] || (int)m_readbackBuf.size() != (int)bytes) {
+        if (m_pbo[0]) glDeleteBuffers(2, m_pbo);
+        glGenBuffers(2, m_pbo);
+        for (int i = 0; i < 2; i++) {
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, m_pbo[i]);
+            glBufferData(GL_PIXEL_PACK_BUFFER, bytes, nullptr, GL_STREAM_READ);
+        }
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+        m_pboIndex = 0;
+        m_pboReady = false;
+        m_readbackBuf.resize(bytes);
+    }
+
+    int readPBO = m_pboIndex;
+    int mapPBO = 1 - m_pboIndex;
+
+    // Kick off async readback into current PBO
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, m_pbo[readPBO]);
     glBindTexture(GL_TEXTURE_2D, texture);
-    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, m_readbackBuf.data());
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    // Flip vertically
-    int stride = w * 4;
-    for (int y = 0; y < h / 2; y++) {
-        uint8_t* top = m_readbackBuf.data() + y * stride;
-        uint8_t* bot = m_readbackBuf.data() + (h - 1 - y) * stride;
-        for (int x = 0; x < stride; x++) {
-            uint8_t tmp = top[x];
-            top[x] = bot[x];
-            bot[x] = tmp;
+    // Map previous PBO (already complete) and hand off to encoder
+    if (m_pboReady) {
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, m_pbo[mapPBO]);
+        void* ptr = glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
+        if (ptr) {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            std::memcpy(m_readbackBuf.data(), ptr, bytes);
+            std::swap(m_readbackBuf, m_encodeBuf);
+            m_frameReady = true;
         }
+        glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+        m_cv.notify_one();
     }
 
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        std::swap(m_readbackBuf, m_encodeBuf);
-        m_frameReady = true;
-    }
-    m_cv.notify_one();
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    m_pboIndex = 1 - m_pboIndex;
+    m_pboReady = true;
 }
 
 // ─── Audio drain ────────────────────────────────────────────────────
@@ -760,6 +780,9 @@ void VideoRecorder::cleanupAudio() {
 
 void VideoRecorder::cleanup() {
     cleanupAudio();
+    if (m_pbo[0]) { glDeleteBuffers(2, m_pbo); m_pbo[0] = m_pbo[1] = 0; }
+    m_pboReady = false;
+    m_pboIndex = 0;
     if (m_swsCtx) { sws_freeContext(m_swsCtx); m_swsCtx = nullptr; }
     if (m_videoFrame) { av_frame_free(&m_videoFrame); }
     if (m_packet) { av_packet_free(&m_packet); }

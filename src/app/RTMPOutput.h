@@ -79,6 +79,11 @@ private:
     int m_wasapiSampleRate = 0;
     int m_wasapiChannels = 0;
 
+    // PBO async readback (double-buffered)
+    GLuint m_pbo[2] = {0, 0};
+    int m_pboIndex = 0;
+    bool m_pboReady = false;
+
     // Video frame handoff
     std::vector<uint8_t> m_readbackBuf;
     std::vector<uint8_t> m_encodeBuf;

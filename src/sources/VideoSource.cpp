@@ -11,6 +11,7 @@ extern "C" {
 #include <libavutil/time.h>
 #include <libavutil/opt.h>
 #include <libavutil/channel_layout.h>
+#include <libavutil/hwcontext.h>
 }
 
 #ifdef _WIN32
@@ -256,6 +257,19 @@ bool VideoSource::load(const std::string& path) {
 
     m_codecCtx = avcodec_alloc_context3(codec);
     avcodec_parameters_to_context(m_codecCtx, codecpar);
+
+#ifdef __APPLE__
+    // Try VideoToolbox hardware acceleration on macOS
+    AVBufferRef* hwDeviceCtx = nullptr;
+    if (av_hwdevice_ctx_create(&hwDeviceCtx, AV_HWDEVICE_TYPE_VIDEOTOOLBOX, nullptr, nullptr, 0) == 0) {
+        m_codecCtx->hw_device_ctx = av_buffer_ref(hwDeviceCtx);
+        av_buffer_unref(&hwDeviceCtx);
+        std::cout << "[Video] VideoToolbox hardware decode enabled" << std::endl;
+    } else {
+        std::cout << "[Video] VideoToolbox not available, using software decode" << std::endl;
+    }
+#endif
+
     if (avcodec_open2(m_codecCtx, codec, nullptr) < 0) {
         std::cerr << "Failed to open video codec" << std::endl;
         close();
@@ -272,12 +286,16 @@ bool VideoSource::load(const std::string& path) {
         : m_formatCtx->duration / (double)AV_TIME_BASE;
 
     // Create sws context for conversion to RGBA
+    // Note: with VideoToolbox, pix_fmt may be VIDEOTOOLBOX at this point;
+    // the actual software format is determined after the first frame transfer.
+    // We'll create/recreate sws in the decode loop as needed.
     m_swsCtx = sws_getContext(
         m_width, m_height, m_codecCtx->pix_fmt,
         m_width, m_height, AV_PIX_FMT_RGBA,
         SWS_BILINEAR, nullptr, nullptr, nullptr);
 
-    if (!m_swsCtx) {
+    // sws may fail for hw formats — that's OK, we'll create it lazily
+    if (!m_swsCtx && !m_codecCtx->hw_device_ctx) {
         std::cerr << "Failed to create sws context" << std::endl;
         close();
         return false;
@@ -505,9 +523,37 @@ void VideoSource::decodeLoop() {
             avcodec_send_packet(m_codecCtx, pkt);
             ret = avcodec_receive_frame(m_codecCtx, frame);
             if (ret == 0 && !hasPendingVideo) {
+                // Transfer hardware frame to software if needed (VideoToolbox)
+                AVFrame* swFrame = nullptr;
+                AVFrame* srcFrame = frame;
+                if (frame->format == AV_PIX_FMT_VIDEOTOOLBOX) {
+                    swFrame = av_frame_alloc();
+                    if (av_hwframe_transfer_data(swFrame, frame, 0) == 0) {
+                        srcFrame = swFrame;
+                    } else {
+                        av_frame_free(&swFrame);
+                        av_packet_unref(pkt);
+                        continue;
+                    }
+                }
+
+                // Recreate sws context if pixel format changed (e.g. hw transfer output)
+                if (!m_swsCtx || srcFrame->format != m_lastSwsFmt) {
+                    if (m_swsCtx) sws_freeContext(m_swsCtx);
+                    m_swsCtx = sws_getContext(
+                        m_width, m_height, (AVPixelFormat)srcFrame->format,
+                        m_width, m_height, AV_PIX_FMT_RGBA,
+                        SWS_BILINEAR, nullptr, nullptr, nullptr);
+                    m_lastSwsFmt = (AVPixelFormat)srcFrame->format;
+                }
+
                 // Convert to RGBA
-                sws_scale(m_swsCtx, frame->data, frame->linesize, 0, m_height,
-                          rgbaFrame->data, rgbaFrame->linesize);
+                if (m_swsCtx) {
+                    sws_scale(m_swsCtx, srcFrame->data, srcFrame->linesize, 0, m_height,
+                              rgbaFrame->data, rgbaFrame->linesize);
+                }
+
+                if (swFrame) av_frame_free(&swFrame);
 
                 pendingPts = 0.0;
                 if (frame->pts != AV_NOPTS_VALUE) {

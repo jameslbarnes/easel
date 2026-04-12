@@ -54,6 +54,7 @@ private:
     AVCodecContext* m_codecCtx = nullptr;
     SwsContext* m_swsCtx = nullptr;
     int m_videoStreamIndex = -1;
+    int m_lastSwsFmt = -1; // AVPixelFormat of last sws source
 
     // FFmpeg audio state
     AVCodecContext* m_audioCodecCtx = nullptr;

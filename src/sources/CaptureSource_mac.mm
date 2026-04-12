@@ -2,49 +2,57 @@
 #include "sources/CaptureSource_mac.h"
 #include <CoreGraphics/CoreGraphics.h>
 #include <ScreenCaptureKit/ScreenCaptureKit.h>
+#include <OpenGL/OpenGL.h>
+#include <OpenGL/CGLIOSurface.h>
+#include <IOSurface/IOSurface.h>
 #include <iostream>
 #include <mutex>
 
 // ─── ScreenCaptureKit delegate ──────────────────────────────────────
 
 @interface EaselCaptureDelegate : NSObject <SCStreamOutput>
-@property (nonatomic) std::vector<uint8_t>* pixelBuffer;
 @property (nonatomic) int* captureWidth;
 @property (nonatomic) int* captureHeight;
 @property (nonatomic) std::mutex* bufferMutex;
+@property (nonatomic) IOSurfaceRef pendingSurface;
 @property (nonatomic) bool* hasNewFrame;
 @end
 
 @implementation EaselCaptureDelegate
+- (void)dealloc {
+    if (_pendingSurface) {
+        IOSurfaceDecrementUseCount(_pendingSurface);
+        CFRelease(_pendingSurface);
+    }
+}
+
 - (void)stream:(SCStream *)stream didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer ofType:(SCStreamOutputType)type {
     if (type != SCStreamOutputTypeScreen) return;
 
     CVImageBufferRef imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
     if (!imageBuffer) return;
 
-    CVPixelBufferLockBaseAddress(imageBuffer, kCVPixelBufferLock_ReadOnly);
+    IOSurfaceRef surface = CVPixelBufferGetIOSurface(imageBuffer);
+    if (!surface) return;
 
     size_t w = CVPixelBufferGetWidth(imageBuffer);
     size_t h = CVPixelBufferGetHeight(imageBuffer);
-    size_t bytesPerRow = CVPixelBufferGetBytesPerRow(imageBuffer);
-    uint8_t* baseAddress = (uint8_t*)CVPixelBufferGetBaseAddress(imageBuffer);
 
-    if (baseAddress && w > 0 && h > 0) {
+    if (w > 0 && h > 0) {
         std::lock_guard<std::mutex> lock(*self.bufferMutex);
         *self.captureWidth = (int)w;
         *self.captureHeight = (int)h;
-        self.pixelBuffer->resize(w * h * 4);
 
-        // Copy row-by-row (bytesPerRow may include padding)
-        for (size_t y = 0; y < h; y++) {
-            memcpy(self.pixelBuffer->data() + y * w * 4,
-                   baseAddress + y * bytesPerRow,
-                   w * 4);
+        // Retain new surface, release old
+        CFRetain(surface);
+        IOSurfaceIncrementUseCount(surface);
+        if (self.pendingSurface) {
+            IOSurfaceDecrementUseCount(self.pendingSurface);
+            CFRelease(self.pendingSurface);
         }
+        self.pendingSurface = surface;
         *self.hasNewFrame = true;
     }
-
-    CVPixelBufferUnlockBaseAddress(imageBuffer, kCVPixelBufferLock_ReadOnly);
 }
 @end
 
@@ -99,7 +107,6 @@ bool CaptureSource::start(int monitorIndex) {
     CGDirectDisplayID displayID = displays[monitorIndex];
     m_width = (int)CGDisplayPixelsWide(displayID);
     m_height = (int)CGDisplayPixelsHigh(displayID);
-    m_pixelBuffer.resize(m_width * m_height * 4);
 
     // Create internal state
     auto* state = new MacCaptureState();
@@ -110,7 +117,6 @@ bool CaptureSource::start(int monitorIndex) {
     __block bool success = false;
     int captureW = m_width;
     int captureH = m_height;
-    auto* pixBuf = &m_pixelBuffer;
     auto* widthPtr = &m_width;
     auto* heightPtr = &m_height;
 
@@ -150,7 +156,6 @@ bool CaptureSource::start(int monitorIndex) {
         // Create stream
         state->stream = [[SCStream alloc] initWithFilter:filter configuration:config delegate:nil];
         state->delegate = [[EaselCaptureDelegate alloc] init];
-        state->delegate.pixelBuffer = pixBuf;
         state->delegate.captureWidth = widthPtr;
         state->delegate.captureHeight = heightPtr;
         state->delegate.bufferMutex = &state->bufferMutex;
@@ -196,17 +201,36 @@ void CaptureSource::update() {
 
     auto* state = (MacCaptureState*)m_impl;
 
-    std::lock_guard<std::mutex> lock(state->bufferMutex);
-    if (!state->hasNewFrame) return;
-    state->hasNewFrame = false;
+    IOSurfaceRef surface = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(state->bufferMutex);
+        if (!state->hasNewFrame) return;
+        state->hasNewFrame = false;
 
-    // Upload to OpenGL texture
+        surface = state->delegate.pendingSurface;
+        if (surface) {
+            CFRetain(surface);
+            IOSurfaceIncrementUseCount(surface);
+        }
+    }
+
+    if (!surface) return;
+
+    // Ensure GL texture exists
     if (!m_texture.id()) {
         m_texture.createEmpty(m_width, m_height, GL_RGBA8);
     }
 
-    // BGRA -> need to swizzle or use GL_BGRA
-    m_texture.updateData(m_pixelBuffer.data(), m_width, m_height, GL_BGRA, GL_UNSIGNED_BYTE);
+    // Zero-copy: bind IOSurface directly as GL texture backing
+    CGLContextObj cgl_ctx = CGLGetCurrentContext();
+    glBindTexture(GL_TEXTURE_2D, m_texture.id());
+    CGLTexImageIOSurface2D(cgl_ctx, GL_TEXTURE_2D, GL_RGBA8,
+                           m_width, m_height,
+                           GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV,
+                           surface, 0);
+
+    IOSurfaceDecrementUseCount(surface);
+    CFRelease(surface);
 }
 
 void CaptureSource::cleanup() {

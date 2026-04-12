@@ -1,6 +1,10 @@
 #include "app/ProjectorOutput.h"
 #include <iostream>
 
+#ifdef __APPLE__
+extern void makeWindowTrulyBorderless(GLFWwindow* window);
+#endif
+
 ProjectorOutput::~ProjectorOutput() {
     destroy();
 }
@@ -101,6 +105,11 @@ bool ProjectorOutput::create(GLFWwindow* mainWindow, int monitorIndex) {
     // Position on the target monitor
     glfwSetWindowPos(m_window, mi.x, mi.y);
     glfwSetWindowSize(m_window, mi.width, mi.height);
+
+#ifdef __APPLE__
+    // Remove macOS title bar / border that can appear even with GLFW_DECORATED=FALSE
+    makeWindowTrulyBorderless(m_window);
+#endif
 
     // Escape key closes the projector window
     glfwSetWindowUserPointer(m_window, this);

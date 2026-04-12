@@ -183,6 +183,8 @@ elseif(APPLE)
         "-framework ScreenCaptureKit"
         "-framework CoreGraphics"
         "-framework CoreMedia"
+        "-framework IOSurface"
+        "-framework VideoToolbox"
     )
 endif()
 
