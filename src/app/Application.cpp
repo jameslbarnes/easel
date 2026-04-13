@@ -723,6 +723,7 @@ void Application::updateSources() {
                     m_audioAnalyzer.beatDecay(),
                     &m_midiManager
                 );
+                shaderSrc->applyMidiBindings(m_midiCCValues);
                 shaderSrc->setMouseState(normMX, normMY, mousePressed);
 
                 // Refresh image input bindings (texture IDs may change each frame)
@@ -1446,6 +1447,13 @@ void Application::renderUI() {
     // Process MIDI events
     {
         auto events = m_midiManager.pollEvents();
+        // Update normalized CC table for shader-parameter MIDI bindings
+        for (const auto& ev : events) {
+            if (ev.type == 0 && ev.channel >= 0 && ev.channel < 16 &&
+                ev.number >= 0 && ev.number < 128) {
+                m_midiCCValues[ev.channel][ev.number] = ev.value / 127.0f;
+            }
+        }
         auto actions = m_midiManager.processEvents(events);
         for (const auto& act : actions) {
             switch (act.target) {
@@ -1581,10 +1589,16 @@ void Application::renderUI() {
                 }
             }
         }
-        // Show the warped output in the viewport so corner pin / mesh warp
-        // edits are visible.  Fall back to pre-warp canvas when no warp FBO.
-        GLuint previewTex = z.warpFBO.textureId() ? z.warpFBO.textureId()
-                          : (z.canvasTexture ? z.canvasTexture : z.compositor.resultTexture());
+        // Viewport preview: show the warped output so users on a single display
+        // (common on Mac) can see corner-pin/mesh-warp changes live. Fall back to
+        // the flat composite when in mask edit mode (masks are drawn in pre-warp space).
+        GLuint previewTex = 0;
+        if (m_maskEditMode) {
+            previewTex = z.canvasTexture ? z.canvasTexture : z.compositor.resultTexture();
+        } else {
+            previewTex = z.warpFBO.textureId();
+            if (!previewTex) previewTex = z.canvasTexture ? z.canvasTexture : z.compositor.resultTexture();
+        }
         if (!previewTex) previewTex = m_testPattern.id();
         m_viewportPanel.setLayerSelected(m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count());
         m_viewportPanel.render(previewTex, mappingForZone(z), projAspect,
@@ -1948,6 +1962,7 @@ void Application::renderUI() {
 #endif
     m_speechState.dataBus = &m_dataBus;
     m_speechState.activeLayerId = selectedLayer ? selectedLayer->id : 0;
+    m_speechState.midi = &m_midiManager;
 
     // Capture undo snapshot BEFORE the property panel modifies values
     SceneSnapshot preEditSnapshot;

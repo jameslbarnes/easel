@@ -7,6 +7,7 @@
 #include "sources/ShaderSource.h"
 #include "sources/VideoSource.h"
 #include "app/DataBus.h"
+#include "app/MIDIManager.h"
 #ifdef HAS_WHISPER
 #include "speech/WhisperSpeech.h"
 #endif
@@ -862,7 +863,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                         int sigIdx = (int)ab.signal;
                         ImGui::Text("Source");
                         ImGui::SetNextItemWidth(120);
-                        if (ImGui::Combo("##sig", &sigIdx, signalNames, 7)) {
+                        if (ImGui::Combo("##sig", &sigIdx, signalNames, IM_ARRAYSIZE(signalNames))) {
                             ab.signal = (AudioSignal)sigIdx;
                         }
                         if (ab.signal == AudioSignal::MidiCC) {
@@ -881,7 +882,6 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                                 if (ch1 > 16) ch1 = 16;
                                 ab.midiChannel = ch1 - 1; // -1 = any
                             }
-                            // MIDI Learn button
                             if (midi) {
                                 bool learning = midi->isLearning();
                                 if (learning) {
@@ -890,7 +890,6 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                                         midi->stopLearn();
                                     }
                                     ImGui::PopStyleColor();
-                                    // Check if an event was captured
                                     if (midi->hasLearnEvent()) {
                                         auto evt = midi->lastLearnEvent();
                                         ab.midiCC = evt.number;

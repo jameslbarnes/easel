@@ -33,30 +33,24 @@ static void midiReadProc(const MIDIPacketList* pktList, void* readProcRefCon, vo
                 ev.type = 0;
                 ev.number = packet->data[j + 1];
                 ev.value = packet->data[j + 2];
-                // Push event via direct member access (same pattern as Windows callback)
-                {
-                    // Access through the public interface workaround
-                    auto events = impl->manager->pollEvents(); // not ideal, but functional
-                }
+                impl->manager->pushEvent(ev);
                 j += 3;
             } else if (msgType == 0x90 && j + 2 < packet->length) { // Note On
                 ev.type = (packet->data[j + 2] > 0) ? 1 : 2;
                 ev.number = packet->data[j + 1];
                 ev.value = packet->data[j + 2];
+                impl->manager->pushEvent(ev);
                 j += 3;
             } else if (msgType == 0x80 && j + 2 < packet->length) { // Note Off
                 ev.type = 2;
                 ev.number = packet->data[j + 1];
                 ev.value = packet->data[j + 2];
+                impl->manager->pushEvent(ev);
                 j += 3;
             } else {
                 j++;
                 continue;
             }
-
-            // We need to push to pending events - but we can't access private members
-            // from here. The Windows version uses a friend callback. We'll need to
-            // restructure slightly. For now, this is a working skeleton.
         }
         packet = MIDIPacketNext(packet);
     }

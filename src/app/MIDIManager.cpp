@@ -116,12 +116,23 @@ float MIDIManager::getCCValue(int channel, int ccNum) const {
         auto it = m_ccValues.find((channel << 8) | ccNum);
         return (it != m_ccValues.end()) ? it->second : -1.0f;
     }
-    // Any channel: find latest value for this CC number
     for (int ch = 0; ch < 16; ch++) {
         auto it = m_ccValues.find((ch << 8) | ccNum);
         if (it != m_ccValues.end()) return it->second;
     }
     return -1.0f;
+}
+
+void MIDIManager::pushEvent(const MIDIEvent& ev) {
+    std::lock_guard<std::mutex> lock(m_eventMutex);
+    m_pendingEvents.push_back(ev);
+    if (ev.type == 0) {
+        m_ccValues[(ev.channel << 8) | ev.number] = ev.value / 127.0f;
+    }
+    if (m_learning && ev.type == 0) {
+        m_lastLearnEvent = ev;
+        m_hasLearnEvent = true;
+    }
 }
 
 void MIDIManager::addMapping(const MIDIMapping& mapping) {

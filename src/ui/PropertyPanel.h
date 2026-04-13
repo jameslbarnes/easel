@@ -20,6 +20,7 @@ struct SpeechState {
     std::string targetParam;
     DataBus* dataBus = nullptr;
     uint32_t activeLayerId = 0; // for data bus binding key
+    MIDIManager* midi = nullptr; // for MIDI Learn on shader parameter bindings
 #ifdef HAS_WHISPER
     WhisperSpeech* whisper = nullptr; // for device selection UI
 #endif

@@ -795,6 +795,7 @@ void ShaderSource::applyAudioBindings(float level, float bass, float mid, float 
                                       MIDIManager* midi) {
     for (auto& [paramName, binding] : m_audioBindings) {
         if (binding.signal == AudioSignal::None) continue;
+        if (binding.signal == AudioSignal::MIDI) continue; // handled by applyMidiBindings
 
         // Get raw signal value (0-1)
         float raw = 0.0f;
@@ -829,6 +830,30 @@ void ShaderSource::applyAudioBindings(float level, float bass, float mid, float 
         float mapped = binding.rangeMin + binding.smoothedValue * (binding.rangeMax - binding.rangeMin);
 
         // Find the input and set its value
+        for (auto& input : m_inputs) {
+            if (input.name == paramName && (input.type == "float" || input.type == "long")) {
+                mapped = std::max(input.minVal, std::min(input.maxVal, mapped));
+                input.value = mapped;
+                break;
+            }
+        }
+    }
+}
+
+void ShaderSource::applyMidiBindings(const float ccVals[16][128]) {
+    for (auto& [paramName, binding] : m_audioBindings) {
+        if (binding.signal != AudioSignal::MIDI) continue;
+        if (binding.midiChannel < 0 || binding.midiChannel > 15) continue;
+        if (binding.midiCC < 0 || binding.midiCC > 127) continue;
+
+        float raw = ccVals[binding.midiChannel][binding.midiCC]; // 0..1
+
+        // Symmetric smoothing — MIDI knobs/sliders don't need attack/release shaping
+        float alpha = 1.0f - binding.smoothing;
+        binding.smoothedValue += (raw - binding.smoothedValue) * alpha;
+
+        float mapped = binding.rangeMin + binding.smoothedValue * (binding.rangeMax - binding.rangeMin);
+
         for (auto& input : m_inputs) {
             if (input.name == paramName && (input.type == "float" || input.type == "long")) {
                 mapped = std::max(input.minVal, std::min(input.maxVal, mapped));

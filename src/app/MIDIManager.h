@@ -57,6 +57,10 @@ public:
     // channel = -1 matches any channel.
     float getCCValue(int channel, int ccNum) const;
 
+    // Push a parsed MIDI event into the pending queue. Thread-safe; callable from
+    // platform read callbacks (e.g. CoreMIDI on macOS).
+    void pushEvent(const MIDIEvent& ev);
+
     // MIDI Learn mode
     void startLearn() {
         std::lock_guard<std::mutex> lock(m_eventMutex);
