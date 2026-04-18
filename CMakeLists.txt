@@ -103,9 +103,16 @@ if(NOT HAS_NDI)
     list(FILTER SOURCES EXCLUDE REGEX ".*NDI.*")
 endif()
 
-set(HAS_WHEP FALSE)
-list(FILTER SOURCES EXCLUDE REGEX ".*WHEP.*")
-message(STATUS "WHEP source disabled")
+# WHEP (WebRTC-HTTP Egress Protocol) - requires libdatachannel + FFmpeg
+if(FFMPEG_FOUND)
+    FetchContent_MakeAvailable(libdatachannel)
+    set(HAS_WHEP TRUE)
+    message(STATUS "WHEP source enabled (libdatachannel + FFmpeg)")
+else()
+    set(HAS_WHEP FALSE)
+    list(FILTER SOURCES EXCLUDE REGEX ".*WHEP.*")
+    message(STATUS "WHEP source disabled (requires FFmpeg)")
+endif()
 
 # Platform-specific source exclusions
 if(APPLE)
@@ -232,6 +239,18 @@ if(HAS_NDI)
     target_compile_definitions(${PROJECT_NAME} PRIVATE HAS_NDI=1)
 endif()
 
+if(HAS_WHEP)
+    target_link_libraries(${PROJECT_NAME} PRIVATE LibDataChannel::LibDataChannel)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE HAS_WHEP=1)
+    if(NOT WIN32)
+        find_package(CURL REQUIRED)
+        target_link_libraries(${PROJECT_NAME} PRIVATE CURL::libcurl)
+    endif()
+    if(APPLE)
+        target_link_libraries(${PROJECT_NAME} PRIVATE "-framework WebKit")
+    endif()
+endif()
+
 # Test suites
 if(HAS_OPENCV)
     add_executable(test_scanning
@@ -294,6 +313,11 @@ if(HAS_NDI)
     endif()
     target_include_directories(test_ndi_receive PRIVATE ${CMAKE_SOURCE_DIR}/src ${NDI_DIR}/include ${stb_SOURCE_DIR})
     target_link_libraries(test_ndi_receive PRIVATE glfw glad glm::glm OpenGL::GL)
+
+    add_executable(test_ndi_capture tests/test_ndi_capture.cpp src/sources/NDIRuntime.cpp)
+    target_compile_definitions(test_ndi_capture PRIVATE HAS_NDI=1)
+    target_include_directories(test_ndi_capture PRIVATE ${CMAKE_SOURCE_DIR}/src ${NDI_DIR}/include)
+    target_link_libraries(test_ndi_capture PRIVATE glfw glad OpenGL::GL)
 
     add_executable(test_ndi_list tests/test_ndi_list.cpp src/sources/NDIRuntime.cpp)
     target_compile_definitions(test_ndi_list PRIVATE HAS_NDI=1)

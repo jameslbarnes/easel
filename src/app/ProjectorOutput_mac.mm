@@ -7,7 +7,11 @@
 void makeWindowTrulyBorderless(GLFWwindow* window) {
     NSWindow* nsWindow = (NSWindow*)glfwGetCocoaWindow(window);
     [nsWindow setStyleMask:NSWindowStyleMaskBorderless];
-    [nsWindow setLevel:NSNormalWindowLevel];
+    [nsWindow setLevel:NSScreenSaverWindowLevel]; // Above everything including menu bar
     [nsWindow setHasShadow:NO];
+    [nsWindow setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
+
+    // Hide menu bar on the projector's screen
+    [NSMenu setMenuBarVisible:NO];
 }
 #endif

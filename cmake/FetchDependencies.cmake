@@ -112,5 +112,16 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(Catch2)
 
+# libdatachannel (WebRTC for WHEP)
+set(NO_WEBSOCKET ON CACHE BOOL "" FORCE)
+set(NO_EXAMPLES ON CACHE BOOL "" FORCE)
+set(NO_TESTS ON CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    libdatachannel
+    GIT_REPOSITORY https://github.com/paullouisageneau/libdatachannel.git
+    GIT_TAG        v0.22.5
+    GIT_SHALLOW    TRUE
+)
+
 # whisper.cpp disabled — CUDA compilation too slow for iterative builds
 

@@ -192,6 +192,9 @@ private:
 #endif
 
 #ifdef HAS_WHEP
+    char m_whepUrlBuf[512] = {};
+    std::shared_ptr<WHEPSource> m_whepConnecting; // tracks in-progress connection
+    std::string m_whepStatus;
     void addWHEPSource(const std::string& whepUrl);
     void addScopeRTMP();
 #endif

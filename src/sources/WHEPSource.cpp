@@ -16,20 +16,21 @@ extern "C" {
 #include <chrono>
 #include <cstring>
 
-static void whepLog(const std::string& msg) {
+void whepLog(const std::string& msg) {
     std::ofstream f("whep_debug.log", std::ios::app);
     f << msg << std::endl;
     f.close();
     std::cerr << msg << std::endl;
 }
 
-// WinHTTP for HTTPS support (WHEP endpoints are often HTTPS)
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <winhttp.h>
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "winhttp.lib")
+#else
+#include <curl/curl.h>
 #endif
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -53,16 +54,17 @@ static void parseUrl(const std::string& url, std::string& host, int& port, std::
     }
 }
 
-// WinHTTP-based HTTP/HTTPS request (POST or GET)
-std::string winHttpRequest(const std::string& method, const std::string& url,
-                                   const std::string& body, const std::string& contentType,
-                                   std::string* outLocationHeader) {
-    bool isHttps = (url.rfind("https", 0) == 0);
+// Cross-platform HTTP request (POSIX sockets on macOS/Linux, WinHTTP on Windows)
+std::string httpRequest(const std::string& method, const std::string& url,
+                        const std::string& body, const std::string& contentType,
+                        std::string* outLocationHeader) {
     std::string host, path;
-    int port = isHttps ? 443 : 80;
+    int port = 80;
     parseUrl(url, host, port, path);
 
-    // Convert to wide strings
+#ifdef _WIN32
+    // --- WinHTTP implementation ---
+    bool isHttps = (url.rfind("https", 0) == 0);
     std::wstring wHost(host.begin(), host.end());
     std::wstring wPath(path.begin(), path.end());
     std::wstring wMethod(method.begin(), method.end());
@@ -80,10 +82,8 @@ std::string winHttpRequest(const std::string& method, const std::string& url,
                                              WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
     if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return ""; }
 
-    // Set timeouts (10s)
     WinHttpSetTimeouts(hRequest, 10000, 10000, 10000, 10000);
 
-    // Add content-type header if body present
     std::wstring headers;
     if (!contentType.empty()) {
         headers = L"Content-Type: " + std::wstring(contentType.begin(), contentType.end());
@@ -102,7 +102,6 @@ std::string winHttpRequest(const std::string& method, const std::string& url,
         return "";
     }
 
-    // Read Location header if requested
     if (outLocationHeader) {
         DWORD headerSize = 0;
         WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_LOCATION, WINHTTP_HEADER_NAME_BY_INDEX,
@@ -120,7 +119,6 @@ std::string winHttpRequest(const std::string& method, const std::string& url,
         }
     }
 
-    // Read response body
     std::string response;
     DWORD bytesAvail = 0;
     while (WinHttpQueryDataAvailable(hRequest, &bytesAvail) && bytesAvail > 0) {
@@ -135,6 +133,82 @@ std::string winHttpRequest(const std::string& method, const std::string& url,
     WinHttpCloseHandle(hConnect);
     WinHttpCloseHandle(hSession);
     return response;
+
+#else
+    // --- libcurl implementation (HTTP + HTTPS) ---
+    struct CurlWriteCtx {
+        std::string data;
+        static size_t callback(char* ptr, size_t size, size_t nmemb, void* userdata) {
+            size_t total = size * nmemb;
+            static_cast<CurlWriteCtx*>(userdata)->data.append(ptr, total);
+            return total;
+        }
+    };
+    struct CurlHeaderCtx {
+        std::string location;
+        static size_t callback(char* ptr, size_t size, size_t nmemb, void* userdata) {
+            size_t total = size * nmemb;
+            std::string line(ptr, total);
+            auto* ctx = static_cast<CurlHeaderCtx*>(userdata);
+            if (line.compare(0, 10, "Location: ") == 0 || line.compare(0, 10, "location: ") == 0) {
+                ctx->location = line.substr(10);
+                while (!ctx->location.empty() && (ctx->location.back() == '\r' || ctx->location.back() == '\n'))
+                    ctx->location.pop_back();
+            }
+            return total;
+        }
+    };
+
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        whepLog("[HTTP] curl_easy_init failed");
+        return "";
+    }
+
+    CurlWriteCtx writeCtx;
+    CurlHeaderCtx headerCtx;
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlWriteCtx::callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &writeCtx);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, CurlHeaderCtx::callback);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &headerCtx);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+
+    struct curl_slist* curlHeaders = nullptr;
+    if (!contentType.empty()) {
+        curlHeaders = curl_slist_append(curlHeaders, ("Content-Type: " + contentType).c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, curlHeaders);
+    }
+
+    if (method == "POST") {
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)body.size());
+    } else if (method == "DELETE") {
+        curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "DELETE");
+    }
+
+    CURLcode res = curl_easy_perform(curl);
+    if (curlHeaders) curl_slist_free_all(curlHeaders);
+
+    if (res != CURLE_OK) {
+        whepLog("[HTTP] curl error: " + std::string(curl_easy_strerror(res)) + " for " + url);
+        curl_easy_cleanup(curl);
+        return "";
+    }
+
+    long httpCode = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+    whepLog("[HTTP] " + method + " " + url + " -> " + std::to_string(httpCode) + " (" + std::to_string(writeCtx.data.size()) + " bytes)");
+
+    if (outLocationHeader && !headerCtx.location.empty()) {
+        *outLocationHeader = headerCtx.location;
+    }
+
+    curl_easy_cleanup(curl);
+    return writeCtx.data;
+#endif
 }
 
 // ─── WHEP HTTP POST (supports HTTP and HTTPS via WinHTTP) ─────────
@@ -155,8 +229,9 @@ std::string WHEPSource::whepPost(const std::string& url, const std::string& sdpO
             else if (c == '\\') escapedSdp += "\\\\";
             else escapedSdp += c;
         }
-        std::string jsonBody = "{\"sdp\":\"" + escapedSdp + "\",\"type\":\"offer\"}";
-        std::string jsonResponse = winHttpRequest("POST", url, jsonBody, "application/json", &location);
+        std::string jsonBody = "{\"sdp\":\"" + escapedSdp + "\",\"type\":\"offer\","
+            "\"initialParameters\":{\"input_mode\":\"text\"}}";
+        std::string jsonResponse = httpRequest("POST", url, jsonBody, "application/json", &location);
 
         // Extract SDP from JSON response {"sdp": "...", "type": "answer"}
         size_t sdpPos = jsonResponse.find("\"sdp\"");
@@ -188,7 +263,7 @@ std::string WHEPSource::whepPost(const std::string& url, const std::string& sdpO
         }
     } else {
         // Standard WHEP — send/receive raw SDP
-        answer = winHttpRequest("POST", url, sdpOffer, "application/sdp", &location);
+        answer = httpRequest("POST", url, sdpOffer, "application/sdp", &location);
     }
 
     if (!location.empty()) {
@@ -283,6 +358,22 @@ void WHEPSource::decodeLoop() {
 
         for (auto& nal : nals) {
             if (!m_running.load()) break;
+            if (nal.empty()) continue;
+
+            uint8_t nalType = nal[0] & 0x1F;
+
+            // Wait for SPS (7) before feeding anything to the decoder
+            if (!m_gotKeyframe) {
+                if (nalType == 7) {
+                    m_gotKeyframe = true;
+                    whepLog("[WHEP] Got SPS — starting decode");
+                } else {
+                    continue; // Discard until we get SPS
+                }
+            }
+
+            // On packet loss (detected by sequence gap), reset and wait for next keyframe
+            // This is handled by clearing m_gotKeyframe when we detect loss
             if (!decodeNalUnit(nal.data(), (int)nal.size(), frame)) continue;
 
             int w = frame->width;
@@ -314,6 +405,25 @@ void WHEPSource::decodeLoop() {
 
             buf.ready.store(true);
             m_writeIndex.store(writeIdx);
+
+            // Debug: save first good frame to disk
+            static bool savedFrame = false;
+            if (!savedFrame) {
+                savedFrame = true;
+                FILE* f = fopen("/tmp/whep_frame.ppm", "wb");
+                if (f) {
+                    fprintf(f, "P6\n%d %d\n255\n", w, h);
+                    // RGBA -> RGB
+                    for (int y = 0; y < h; y++) {
+                        for (int x = 0; x < w; x++) {
+                            int idx = (y * w + x) * 4;
+                            fwrite(&buf.data[idx], 1, 3, f);
+                        }
+                    }
+                    fclose(f);
+                    whepLog("[WHEP] Saved debug frame to /tmp/whep_frame.ppm (" + std::to_string(w) + "x" + std::to_string(h) + ")");
+                }
+            }
         }
     }
 
@@ -324,7 +434,7 @@ void WHEPSource::decodeLoop() {
 
 std::string WHEPSource::discoverUrl(const std::string& baseUrl) {
     // First, ensure the local mediamtx has the stream by setting up the pull source
-    std::string statusJson = winHttpRequest("GET", baseUrl + "/api/scope/status", "", "");
+    std::string statusJson = httpRequest("GET", baseUrl + "/api/scope/status", "", "");
     if (!statusJson.empty()) {
         // Extract rtmp_url
         size_t pos = statusJson.find("\"rtmp_url\"");
@@ -336,7 +446,7 @@ std::string WHEPSource::discoverUrl(const std::string& baseUrl) {
                     std::string rtmpUrl = statusJson.substr(valStart + 1, valEnd - valStart - 1);
                     // Add pull source to local mediamtx (idempotent — ignores if already exists)
                     std::string body = "{\"source\": \"" + rtmpUrl + "\"}";
-                    winHttpRequest("POST", "http://localhost:9997/v3/config/paths/add/longlive", body, "application/json");
+                    httpRequest("POST", "http://localhost:9997/v3/config/paths/add/longlive", body, "application/json");
                     whepLog("[WHEP] Configured local mediamtx pull from: " + rtmpUrl);
                 }
             }
@@ -354,6 +464,34 @@ bool WHEPSource::connect(const std::string& whepUrl) {
 
     whepLog("[WHEP] connect() called with url: " + whepUrl);
 
+    // For remote URLs on macOS, use WKWebView (browser's native WebRTC stack)
+    // This gives identical ICE/DTLS/NACK handling to Safari
+    bool isLocal = (whepUrl.find("localhost") != std::string::npos ||
+                    whepUrl.find("127.0.0.1") != std::string::npos);
+#ifdef __APPLE__
+    if (!isLocal) {
+        m_useWebView = true;
+        m_statusText = "connecting (WebView)";
+        // Build ICE servers JSON from etherea
+        std::string iceJson = "[{\"urls\":\"stun:stun.l.google.com:19302\"}]";
+        std::string turnJson = httpRequest("GET", "http://localhost:7860/api/turn-credentials", "", "");
+        if (!turnJson.empty()) {
+            // Convert etherea format to browser RTCIceServer format
+            // The etherea API returns {"iceServers": [...]}
+            size_t arrStart = turnJson.find("[");
+            size_t arrEnd = turnJson.rfind("]");
+            if (arrStart != std::string::npos && arrEnd != std::string::npos) {
+                iceJson = turnJson.substr(arrStart, arrEnd - arrStart + 1);
+                // Fix field names: "urls" (singular in etherea) to "urls" (browser expects "urls")
+                // etherea already uses "urls" so this should work
+            }
+        }
+        whepLog("[WHEP] Using WKWebView for remote WHEP");
+        startWebView(whepUrl, iceJson);
+        return true;
+    }
+#endif
+
     try {
         if (!initDecoder()) {
             whepLog("[WHEP] initDecoder failed");
@@ -370,7 +508,7 @@ bool WHEPSource::connect(const std::string& whepUrl) {
         config.disableAutoNegotiation = true;
 
         // Fetch ICE servers (TURN credentials from Etherea if available)
-        std::string turnJson = winHttpRequest("GET", "http://localhost:7860/api/turn-credentials", "", "");
+        std::string turnJson = httpRequest("GET", "http://localhost:7860/api/turn-credentials", "", "");
         if (!turnJson.empty()) {
             whepLog("[WHEP] Got TURN config (" + std::to_string(turnJson.size()) + " bytes)");
             // Parse iceServers array — extract urls, username, credential per object
@@ -433,25 +571,55 @@ bool WHEPSource::connect(const std::string& whepUrl) {
         m_pc = std::make_shared<rtc::PeerConnection>(config);
         whepLog("[WHEP] PeerConnection created");
 
-        m_pc->onIceStateChange([](rtc::PeerConnection::IceState state) {
-            whepLog("[WHEP] ICE state: " + std::to_string((int)state));
+        m_pc->onIceStateChange([this](rtc::PeerConnection::IceState state) {
+            const char* names[] = {"New", "Checking", "Connected", "Completed", "Disconnected", "Failed", "Closed"};
+            int idx = (int)state;
+            std::string name = (idx >= 0 && idx < 7) ? names[idx] : std::to_string(idx);
+            whepLog("[WHEP] ICE state: " + name);
+            m_statusText = "ICE " + name;
         });
 
         m_pc->onStateChange([this](rtc::PeerConnection::State state) {
-            whepLog("[WHEP] PeerConnection state: " + std::to_string((int)state));
+            const char* names[] = {"New", "Connecting", "Connected", "Disconnected", "Failed", "Closed"};
+            int idx = (int)state;
+            std::string name = (idx >= 0 && idx < 6) ? names[idx] : std::to_string(idx);
+            whepLog("[WHEP] PeerConnection state: " + name);
             if (state == rtc::PeerConnection::State::Connected) {
                 m_connected.store(true);
+                m_failed.store(false);
+                m_statusText = "connected";
                 whepLog("[WHEP] Connected!");
+                // Request a keyframe via RTCP PLI
+                if (m_track) {
+                    try {
+                        // Send PLI (Picture Loss Indication) to request IDR frame
+                        const uint32_t mediaSsrc = 0; // Will be filled by the stack
+                        m_track->requestKeyframe();
+                        whepLog("[WHEP] Requested keyframe (PLI)");
+                    } catch (...) {
+                        whepLog("[WHEP] PLI request not supported");
+                    }
+                }
+            } else if (state == rtc::PeerConnection::State::Failed) {
+                m_connected.store(false);
+                m_failed.store(true);
+                m_statusText = "ICE failed - server may lack TURN config";
+                whepLog("[WHEP] ICE failed - remote server likely missing TURN relay candidates");
             } else if (state == rtc::PeerConnection::State::Disconnected ||
-                       state == rtc::PeerConnection::State::Failed ||
                        state == rtc::PeerConnection::State::Closed) {
                 m_connected.store(false);
             }
         });
 
         m_pc->onGatheringStateChange([this](rtc::PeerConnection::GatheringState state) {
-            whepLog("[WHEP] GatheringState: " + std::to_string((int)state));
+            const char* gatherNames[] = {"New", "InProgress", "Complete"};
+            int gIdx = (int)state;
+            whepLog("[WHEP] GatheringState: " + std::string((gIdx >= 0 && gIdx < 3) ? gatherNames[gIdx] : std::to_string(gIdx)));
+            if (state == rtc::PeerConnection::GatheringState::InProgress) {
+                m_statusText = "gathering ICE candidates";
+            }
             if (state == rtc::PeerConnection::GatheringState::Complete) {
+                m_statusText = "signaling";
                 // Run signaling on a separate thread to avoid blocking libjuice's ICE thread
                 std::thread([this]() {
                     try {
@@ -471,19 +639,41 @@ bool WHEPSource::connect(const std::string& whepUrl) {
 
                         whepLog("[WHEP] Sending offer (" + std::to_string(offer.size()) + " bytes):\n" + offer);
 
-                        std::string answer = whepPost(m_whepUrl, offer);
+                        std::string signalingUrl = m_whepUrl;
+
+                        std::string answer = whepPost(signalingUrl, offer);
                         if (answer.empty()) {
                             whepLog("[WHEP] Empty answer from server");
+                            m_statusText = "no answer from server";
+                            m_failed.store(true);
                             return;
                         }
 
                         whepLog("[WHEP] Got answer (" + std::to_string(answer.size()) + " bytes):\n" + answer);
+
+                        // Remove a=end-of-candidates to allow trickle ICE / peer-reflexive discovery
+                        // (the server only has Docker-internal candidates, but peer-reflexive
+                        //  candidates will be discovered when the server sends STUN through NAT)
+                        size_t eocPos = answer.find("a=end-of-candidates");
+                        if (eocPos != std::string::npos) {
+                            // Find the start of the line
+                            size_t lineStart = answer.rfind('\n', eocPos);
+                            if (lineStart == std::string::npos) lineStart = 0;
+                            else lineStart++;
+                            size_t lineEnd = answer.find('\n', eocPos);
+                            if (lineEnd == std::string::npos) lineEnd = answer.size();
+                            else lineEnd++;
+                            answer.erase(lineStart, lineEnd - lineStart);
+                            whepLog("[WHEP] Removed end-of-candidates to allow peer-reflexive discovery");
+                        }
 
                         rtc::Description remoteDesc(answer, rtc::Description::Type::Answer);
                         m_pc->setRemoteDescription(remoteDesc);
                         whepLog("[WHEP] Remote description set");
                     } catch (const std::exception& e) {
                         whepLog("[WHEP] Signaling error: " + std::string(e.what()));
+                        m_statusText = std::string("signaling error: ") + e.what();
+                        m_failed.store(true);
                     }
                 }).detach();
             }
@@ -511,18 +701,100 @@ bool WHEPSource::connect(const std::string& whepUrl) {
         video.addH264Codec(96);
         m_track = m_pc->addTrack(video);
 
-        // Set up H.264 depacketizer on our track (onTrack won't fire for tracks we add)
-        auto depacketizer = std::make_shared<rtc::H264RtpDepacketizer>();
-        m_track->setMediaHandler(depacketizer);
+        // Receive raw RTP and manually depacketize H.264
+        // (libdatachannel's H264RtpDepacketizer has a bug with mediamtx)
         m_track->onMessage([this](rtc::binary msg) {
             auto* data = reinterpret_cast<const uint8_t*>(msg.data());
             int size = (int)msg.size();
-            if (size <= 0) return;
-            static int msgCount = 0;
-            if (++msgCount <= 5) whepLog("[WHEP] onMessage: " + std::to_string(size) + " bytes (msg #" + std::to_string(msgCount) + ")");
-            std::lock_guard<std::mutex> lk(m_nalMutex);
-            m_pendingNals.emplace_back(data, data + size);
+            if (size < 12) return;
+
+            if ((data[0] & 0xC0) != 0x80) return; // Not RTP
+            uint8_t pt = data[1] & 0x7F;
+            if (pt != 96) return; // Skip RTCP and non-H264
+
+            // Sequence number for packet loss detection
+            uint16_t seq = (data[2] << 8) | data[3];
+            if (m_seqInitialized) {
+                uint16_t expected = m_lastSeq + 1;
+                if (seq != expected) {
+                    // Packet loss — discard in-progress FU-A and wait for next keyframe
+                    if (m_fuInProgress) {
+                        m_fuBuffer.clear();
+                        m_fuInProgress = false;
+                    }
+                    m_gotKeyframe = false;
+                    // Request new keyframe
+                    if (m_track) {
+                        try { m_track->requestKeyframe(); } catch (...) {}
+                    }
+                }
+            }
+            m_lastSeq = seq;
+            m_seqInitialized = true;
+
+            // Parse RTP header
+            bool hasExtension = (data[0] >> 4) & 1;
+            int csrcCount = data[0] & 0x0F;
+            int headerLen = 12 + csrcCount * 4;
+            if (hasExtension && headerLen + 4 <= size) {
+                int extLen = (data[headerLen + 2] << 8) | data[headerLen + 3];
+                headerLen += 4 + extLen * 4;
+            }
+            if (headerLen >= size) return;
+
+            bool hasPadding = (data[0] >> 5) & 1;
+            int payloadLen = size - headerLen;
+            if (hasPadding && payloadLen > 0) payloadLen -= data[size - 1];
+            if (payloadLen <= 0) return;
+            const uint8_t* payload = data + headerLen;
+
+            uint8_t nalType = payload[0] & 0x1F;
+
+            if (nalType >= 1 && nalType <= 23) {
+                // Single NAL unit
+                std::lock_guard<std::mutex> lk(m_nalMutex);
+                m_pendingNals.emplace_back(payload, payload + payloadLen);
+            } else if (nalType == 28) {
+                // FU-A
+                if (payloadLen < 2) return;
+                uint8_t fuHeader = payload[1];
+                bool isStart = (fuHeader >> 7) & 1;
+                bool isEnd = (fuHeader >> 6) & 1;
+
+                if (isStart) {
+                    m_fuBuffer.clear();
+                    m_fuInProgress = true;
+                    uint8_t reconstructed = (payload[0] & 0xE0) | (fuHeader & 0x1F);
+                    m_fuBuffer.push_back(reconstructed);
+                    m_fuBuffer.insert(m_fuBuffer.end(), payload + 2, payload + payloadLen);
+                } else if (m_fuInProgress) {
+                    m_fuBuffer.insert(m_fuBuffer.end(), payload + 2, payload + payloadLen);
+                }
+
+                if (isEnd && m_fuInProgress) {
+                    std::lock_guard<std::mutex> lk(m_nalMutex);
+                    m_pendingNals.push_back(std::move(m_fuBuffer));
+                    m_fuBuffer.clear();
+                    m_fuInProgress = false;
+                }
+            } else if (nalType == 24) {
+                // STAP-A
+                std::lock_guard<std::mutex> lk(m_nalMutex);
+                int offset = 1;
+                while (offset + 2 <= payloadLen) {
+                    int nalSize = (payload[offset] << 8) | payload[offset + 1];
+                    offset += 2;
+                    if (offset + nalSize > payloadLen) break;
+                    m_pendingNals.emplace_back(payload + offset, payload + offset + nalSize);
+                    offset += nalSize;
+                }
+            }
         }, nullptr);
+
+        // Also log track open/close/error
+        m_track->onOpen([this]() { whepLog("[WHEP] Track opened"); });
+        m_track->onClosed([this]() { whepLog("[WHEP] Track closed"); });
+        m_track->onError([this](std::string err) { whepLog("[WHEP] Track error: " + err); });
 
         whepLog("[WHEP] Track added with depacketizer, setting local description...");
 
@@ -548,9 +820,24 @@ void WHEPSource::disconnect() {
     m_running.store(false);
     m_connected.store(false);
 
+    if (m_useWebView) {
+        stopWebView();
+        m_useWebView = false;
+        m_width = 0;
+        m_height = 0;
+        m_whepUrl.clear();
+        return;
+    }
+
     if (m_decodeThread.joinable()) {
         m_decodeThread.join();
     }
+
+    if (m_dataChannel) {
+        m_dataChannel->close();
+        m_dataChannel.reset();
+    }
+    m_useScopeEndpoint = false;
 
     if (m_track) {
         m_track->close();
@@ -566,7 +853,7 @@ void WHEPSource::disconnect() {
 
     // WHEP teardown (DELETE to Location URL)
     if (!m_teardownUrl.empty()) {
-        winHttpRequest("DELETE", m_teardownUrl, "", "");
+        httpRequest("DELETE", m_teardownUrl, "", "");
         m_teardownUrl.clear();
     }
 

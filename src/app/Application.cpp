@@ -1791,6 +1791,7 @@ void Application::renderUI() {
                 ImGui::PopID();
             }
         }
+
     }
     ImGui::End();
 
@@ -2179,6 +2180,103 @@ void Application::renderUI() {
                 ImGui::PopStyleColor();
             }
         }
+
+#ifdef HAS_WHEP
+        // Scope Stream — auto-detect live pods via etherea health API
+        ImGui::Dummy(ImVec2(0, 6));
+        {
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            float w = ImGui::GetContentRegionAvail().x;
+            dl->AddLine(ImVec2(p.x, p.y), ImVec2(p.x + w, p.y), IM_COL32(100, 0, 255, 60));
+            ImGui::Dummy(ImVec2(0, 6));
+        }
+
+        if (ImGui::CollapsingHeader("Scope Stream", ImGuiTreeNodeFlags_DefaultOpen)) {
+            // Auto-refresh scope pods every 5 seconds
+            static float lastScopeFetch = -10.0f;
+            static std::vector<std::pair<std::string, std::string>> scopePods; // {id, prompt snippet}
+            float now = (float)glfwGetTime();
+            if (now - lastScopeFetch > 5.0f) {
+                lastScopeFetch = now;
+                std::string healthStr = httpRequest("GET", "http://localhost:7860/api/scope/health", "", "");
+                scopePods.clear();
+                try {
+                    auto health = nlohmann::json::parse(healthStr);
+                    for (auto& inst : health["instances"]) {
+                        if (inst.value("responding", false)) {
+                            std::string id = inst.value("instance_id", "");
+                            std::string prompt = inst.value("last_confirmed_prompt", "");
+                            if (prompt.size() > 40) prompt = prompt.substr(0, 37) + "...";
+                            if (!id.empty()) scopePods.push_back({id, prompt});
+                        }
+                    }
+                } catch (...) {}
+            }
+
+            // Show WHEP connection status
+            if (m_whepConnecting) {
+                if (m_whepConnecting->isConnected()) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 1.0f, 0.4f, 1.0f));
+                    ImGui::Text("Receiving stream");
+                    ImGui::PopStyleColor();
+                    if (m_whepConnecting->width() > 0) {
+                        ImGui::SameLine();
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.60f, 0.68f, 1.0f));
+                        ImGui::Text("(%dx%d)", m_whepConnecting->width(), m_whepConnecting->height());
+                        ImGui::PopStyleColor();
+                    }
+                } else if (m_whepConnecting->isFailed()) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
+                    ImGui::TextWrapped("Failed: %s", m_whepConnecting->statusText().c_str());
+                    ImGui::PopStyleColor();
+                } else {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.8f, 0.0f, 1.0f));
+                    std::string status = m_whepConnecting->statusText();
+                    ImGui::Text("Connecting%s", status.empty() ? "..." : (" (" + status + ")").c_str());
+                    ImGui::PopStyleColor();
+                }
+                ImGui::Dummy(ImVec2(0, 2));
+            }
+
+            if (scopePods.empty()) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.6f));
+                ImGui::TextWrapped("No active Scope instances");
+                ImGui::PopStyleColor();
+            }
+
+            for (int i = 0; i < (int)scopePods.size(); i++) {
+                ImGui::PushID(2000 + i);
+                auto& [podId, podPrompt] = scopePods[i];
+
+                // Pod ID (truncated)
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.65f, 0.75f, 1.0f));
+                ImGui::Text("%s", podId.substr(0, 12).c_str());
+                ImGui::PopStyleColor();
+                if (!podPrompt.empty()) {
+                    ImGui::SameLine();
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.7f));
+                    ImGui::Text("%s", podPrompt.c_str());
+                    ImGui::PopStyleColor();
+                }
+
+                ImGui::SameLine(ImGui::GetContentRegionAvail().x - 30);
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.0f, 1.0f, 0.15f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.6f, 0.0f, 1.0f, 0.30f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.0f, 1.0f, 0.50f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.8f, 0.5f, 1.0f, 1.0f));
+                if (ImGui::SmallButton("Add")) {
+                    // Use the mediamtx WHEP URL for this pod — the WKWebView path
+                    // will automatically route through Scope's native WebRTC
+                    std::string whepUrl = "https://" + podId + "-18889.proxy.runpod.net/longlive/whep";
+                    addWHEPSource(whepUrl);
+                }
+                ImGui::PopStyleColor(4);
+
+                ImGui::PopID();
+            }
+        }
+#endif
     }
     ImGui::End();
 
@@ -3269,16 +3367,21 @@ void Application::addNDISource(const std::string& senderName) {
 void Application::addWHEPSource(const std::string& whepUrl) {
     m_undoStack.pushState(m_layerStack, m_selectedLayer);
     auto source = std::make_shared<WHEPSource>();
+    m_whepConnecting = source;
+    m_whepStatus = "signaling";
+
     if (!source->connect(whepUrl)) {
-        std::cerr << "[Scope] WHEP failed, falling back to RTMP\n";
-        addScopeRTMP();
+        m_whepStatus = "signaling failed";
+        std::cerr << "[WHEP] Connection failed for: " << whepUrl << std::endl;
         return;
     }
+
+    m_whepStatus = "ICE connecting";
 
     auto layer = std::make_shared<Layer>();
     layer->id = m_nextLayerId++;
     layer->source = source;
-    layer->name = "Scope Stream";
+    layer->name = "WHEP: " + whepUrl.substr(whepUrl.rfind('/') + 1);
 
     m_layerStack.addLayer(layer);
     m_selectedLayer = m_layerStack.count() - 1;
@@ -3286,7 +3389,7 @@ void Application::addWHEPSource(const std::string& whepUrl) {
 
 void Application::addScopeRTMP() {
     // Query Etherea status API for RTMP URL
-    std::string statusJson = winHttpRequest("GET", "http://localhost:7860/api/scope/status", "", "");
+    std::string statusJson = httpRequest("GET", "http://localhost:7860/api/scope/status", "", "");
     if (statusJson.empty()) {
         std::cerr << "[Scope] Failed to query Etherea status API\n";
         return;
