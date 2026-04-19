@@ -2040,23 +2040,35 @@ void Application::renderUI() {
         }
     }
 
-    // Stage View (3D pre-viz)
-    if (m_ui.isPanelVisible("Stage")) {
-        // Collect zone textures for the stage view
+    // Stage View (3D pre-viz) + Scene panel (displays / projectors / surfaces)
+    {
+        // Collect zone textures shared between the 3D viewport and the Scene panel.
         std::vector<GLuint> zoneTextures;
         for (auto& zp : m_zones) {
             zoneTextures.push_back(zp->warpFBO.textureId());
         }
-        m_stageView.render(zoneTextures,
-                           [this]() { renderStageInlineSetup(activeZone()); });
 
-        // Handle import request from StageView
-        if (m_stageView.wantsImport()) {
-            m_stageView.clearImportSignal();
-            std::string path = openFileDialog("3D Models\0*.obj;*.gltf;*.glb\0All Files\0*.*\0");
-            if (!path.empty()) {
-                m_stageView.loadModel(path);
+        if (m_ui.isPanelVisible("Stage")) {
+            // No inline top section — Composition + Output are in the Canvas
+            // zone bar now, so the Stage panel is pure 3D viewport.
+            m_stageView.render(zoneTextures, nullptr);
+
+            // Handle import request from StageView
+            if (m_stageView.wantsImport()) {
+                m_stageView.clearImportSignal();
+                std::string path = openFileDialog("3D Models\0*.obj;*.gltf;*.glb\0All Files\0*.*\0");
+                if (!path.empty()) {
+                    m_stageView.loadModel(path);
+                }
             }
+        }
+
+        // Scene panel — lists of displays/projectors/surfaces/clusters, docked
+        // on the right so the 3D viewport in the Stage tab gets full height.
+        if (m_ui.isPanelVisible("Scene")) {
+            ImGui::Begin("Scene");
+            m_stageView.renderSceneInspector(zoneTextures);
+            ImGui::End();
         }
     }
 
@@ -3793,41 +3805,6 @@ void Application::renderMenuBar() {
             }
         }
 
-        // Canvas / Show — primary workspace switcher, center-aligned inside
-        // the main menu bar. Each remaps the dock layout + panel whitelist
-        // for setup-and-authoring vs live-ops modes.
-        {
-            const float btnW = 110.0f * m_ui.uiScale();
-            const float spacing = ImGui::GetStyle().ItemSpacing.x;
-            const float groupW = btnW * 2.0f + spacing;
-            const float barW = ImGui::GetWindowSize().x;
-            const float startX = (barW - groupW) * 0.5f;
-            if (startX > ImGui::GetCursorPosX()) {
-                ImGui::SetCursorPosX(startX);
-            }
-
-            Workspace current = m_ui.workspace();
-            auto drawBtn = [&](const char* label, Workspace ws) {
-                bool active = (current == ws);
-                if (active) {
-                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.20f, 0.45f, 0.95f, 1.00f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.26f, 0.52f, 1.00f, 1.00f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.16f, 0.38f, 0.88f, 1.00f));
-                    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
-                } else {
-                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1.00f, 1.00f, 1.00f, 0.04f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 1.00f, 1.00f, 0.10f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.00f, 1.00f, 1.00f, 0.16f));
-                    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.00f, 1.00f, 1.00f, 0.70f));
-                }
-                if (ImGui::Button(label, ImVec2(btnW, 0))) m_ui.setWorkspace(ws);
-                ImGui::PopStyleColor(4);
-            };
-            drawBtn("Canvas", Workspace::Canvas);
-            ImGui::SameLine();
-            drawBtn("Show",   Workspace::Show);
-        }
-
         ImGui::EndMainMenuBar();
     }
 }
@@ -4892,89 +4869,11 @@ void Application::pollScreenshotTrigger() {
     }
 }
 
-// Stage tab: Composition resolution + Output destination (collapsible sections).
+// Stage tab inline header — intentionally empty. Composition + Output now
+// live in the Canvas zone bar (see ViewportPanel::render). The Stage tab's
+// 3D viewport needs its full height, so no inline header clutters the top.
 void Application::renderStageInlineSetup(OutputZone& zone) {
-    // Stage section — sections always expanded, no collapse toggle. Users are
-    // here to wire up their stage, so surface the controls instead of hiding
-    // them behind an extra click.
-    {
-        ImGui::SeparatorText("Composition");
-        static const char* presetLabels[] = {
-            "1920x1080 (1080p)", "3840x2160 (4K)", "1280x720 (720p)",
-            "2560x1440 (1440p)", "8000x2000 (Ultra-wide)", "1024x768", "Custom"
-        };
-        static const int presetW[] = { 1920, 3840, 1280, 2560, 8000, 1024, 0 };
-        static const int presetH[] = { 1080, 2160, 720, 1440, 2000, 768, 0 };
-        const int presetCount = 7;
-
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-        ImGui::Text("Resolution");
-        ImGui::PopStyleColor();
-        ImGui::SameLine();
-        ImGui::Text("%dx%d", zone.width, zone.height);
-
-        ImGui::SetNextItemWidth(-1);
-        if (ImGui::Combo("##CompRes", &zone.compPreset, presetLabels, presetCount)) {
-            if (zone.compPreset < presetCount - 1) {
-                int nw = presetW[zone.compPreset];
-                int nh = presetH[zone.compPreset];
-                zone.resize(nw, nh);
-            }
-        }
-
-        if (zone.compPreset == presetCount - 1) {
-            float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
-            ImGui::SetNextItemWidth(half);
-            int cw = zone.width;
-            if (ImGui::DragInt("##CW", &cw, 1, 128, 16384, "%d")) {
-                if (cw >= 128 && cw <= 16384) zone.resize(cw, zone.height);
-            }
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(half);
-            int ch = zone.height;
-            if (ImGui::DragInt("##CH", &ch, 1, 128, 16384, "%d")) {
-                if (ch >= 128 && ch <= 16384) zone.resize(zone.width, ch);
-            }
-        }
-    }
-
-    ImGui::Dummy(ImVec2(0, 6));
-
-    {
-        ImGui::SeparatorText("Output");
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-        ImGui::Text("Destination");
-        ImGui::PopStyleColor();
-        ImGui::SameLine();
-
-        if (zone.outputDest == OutputDest::None) {
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.6f));
-            ImGui::Text("Preview only");
-            ImGui::PopStyleColor();
-        } else if (zone.outputDest == OutputDest::Fullscreen) {
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
-            auto monitors = ProjectorOutput::enumerateMonitors();
-            if (zone.outputMonitor >= 0 && zone.outputMonitor < (int)monitors.size()) {
-                ImGui::Text("Fullscreen: %s", monitors[zone.outputMonitor].name.c_str());
-            } else {
-                ImGui::Text("Fullscreen");
-            }
-            ImGui::PopStyleColor();
-        } else if (zone.outputDest == OutputDest::NDI) {
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
-            ImGui::Text("NDI: %s", zone.ndiStreamName.empty() ? zone.name.c_str() : zone.ndiStreamName.c_str());
-            ImGui::PopStyleColor();
-        }
-
-        ImGui::Checkbox("Auto-detect", &m_projectorAutoConnect);
-        ImGui::SameLine();
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-        ImGui::Text("(?)");
-        ImGui::PopStyleColor();
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Automatically open projector when a\nsecond display is connected");
-        }
-    }
+    (void)zone;
 }
 
 // Masks tab: Edge Blend (collapsible).

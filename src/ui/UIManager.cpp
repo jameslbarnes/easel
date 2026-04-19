@@ -423,63 +423,35 @@ void UIManager::setupDockspace(float bottomBarHeight) {
             if (isPanelVisible(name)) ImGui::DockBuilderDockWindow(name, node);
         };
 
-        // --- Canvas always gets its own dedicated region (never a tab) ---
-        dockIfVisible("Canvas", canvasId);
+        // Left: Canvas + Stage as peer tabs. Canvas is the default focused tab.
+        dockIfVisible("Canvas",        canvasId);
+        dockIfVisible("Stage",         canvasId);
 
-        switch (m_workspace) {
-        case Workspace::Canvas:
-            // Tools: Mapping is the default focused tab — it's the first thing
-            // users want while designing against a warped surface.
-            dockIfVisible("Mapping",       toolsId);
-            dockIfVisible("Masks",         toolsId);
-            dockIfVisible("Stage",         toolsId);
-            dockIfVisible("Scene Scanner", toolsId);
-            // Sources middle (Layers focused)
-            dockIfVisible("Layers",        rightTopId);
-            dockIfVisible("ShaderClaw",    rightTopId);
-            dockIfVisible("Etherea",       rightTopId);
-            dockIfVisible("Capture",       rightTopId);
-            dockIfVisible("Audio Mixer",   rightTopId);
-            // Inspectors + I/O bottom (Properties focused)
-            dockIfVisible("Properties",    rightBottomId);
-            dockIfVisible("Audio",         rightBottomId);
-            dockIfVisible("NDI",           rightBottomId);
-            dockIfVisible("Spout",         rightBottomId);
-            dockIfVisible("Stream",        rightBottomId);
-            break;
+        // Tools (top-right): warp / masks / scanner. Mapping focused first.
+        dockIfVisible("Mapping",       toolsId);
+        dockIfVisible("Masks",         toolsId);
+        dockIfVisible("Scene Scanner", toolsId);
 
-        case Workspace::Show:
-            // Tools: typically untouched in show — Masks on top for quick toggles
-            dockIfVisible("Masks",         toolsId);
-            dockIfVisible("Stage",         toolsId);
-            dockIfVisible("Mapping",       toolsId);
-            dockIfVisible("Scene Scanner", toolsId);
-            // Right top: monitoring (Audio focused)
-            dockIfVisible("Audio",         rightTopId);
-            dockIfVisible("Audio Mixer",   rightTopId);
-            dockIfVisible("MIDI",          rightTopId);
-            dockIfVisible("Layers",        rightTopId);
-            dockIfVisible("Capture",       rightTopId);
-            dockIfVisible("ShaderClaw",    rightTopId);
-            dockIfVisible("Etherea",       rightTopId);
-            // Right bottom: broadcast / feeds (NDI focused)
-            dockIfVisible("NDI",           rightBottomId);
-            dockIfVisible("Spout",         rightBottomId);
-            dockIfVisible("Stream",        rightBottomId);
-            dockIfVisible("Properties",    rightBottomId);
-            break;
-        }
+        // Sources + Scene (middle-right): Layers focused. Scene holds the
+        // 3D stage's display/projector/surface lists, off the 3D viewport.
+        dockIfVisible("Layers",        rightTopId);
+        dockIfVisible("Scene",         rightTopId);
+        dockIfVisible("ShaderClaw",    rightTopId);
+        dockIfVisible("Etherea",       rightTopId);
+        dockIfVisible("Capture",       rightTopId);
+        dockIfVisible("Audio Mixer",   rightTopId);
+
+        // Properties + I/O (bottom-right): Properties focused.
+        dockIfVisible("Properties",    rightBottomId);
+        dockIfVisible("Audio",         rightBottomId);
+        dockIfVisible("MIDI",          rightBottomId);
+        dockIfVisible("NDI",           rightBottomId);
+        dockIfVisible("Spout",         rightBottomId);
+        dockIfVisible("Stream",        rightBottomId);
 
         ImGui::DockBuilderFinish(dockspaceId);
 
-        // Focus the signature tab for this workspace on rebuild. DockBuilder
-        // dock order doesn't reliably pick the initial active tab across all
-        // ImGui versions, so we explicitly set focus after the layout lands.
-        // Runs deferred to next frame via m_pendingFocus.
-        switch (m_workspace) {
-        case Workspace::Canvas: m_pendingFocus = "Mapping"; break;
-        case Workspace::Show:   m_pendingFocus = "Audio";   break;
-        }
+        m_pendingFocus = "Canvas";
         m_pendingFocusFramesLeft = 3;
     } else {
         // Track size for change detection even when not rebuilding
@@ -507,32 +479,11 @@ void UIManager::setWorkspace(Workspace w) {
 }
 
 bool UIManager::isPanelVisible(const char* title) const {
-    // Per-workspace whitelist. Names must match ImGui::Begin() titles exactly.
-    // Canvas — setup + authoring (everything you touch before/while composing).
-    // Show   — live ops (minimal chrome, trigger + monitor).
-    auto contains = [title](std::initializer_list<const char*> list) {
-        for (const char* s : list) {
-            if (std::strcmp(title, s) == 0) return true;
-        }
-        return false;
-    };
-
-    switch (m_workspace) {
-    case Workspace::Canvas:
-        return contains({
-            "Canvas",
-            "Mapping", "Masks", "Stage", "Scene Scanner",
-            "Layers", "ShaderClaw", "Etherea", "Capture", "Audio Mixer",
-            "Properties", "Audio",
-            "NDI", "Spout", "Stream",
-        });
-    case Workspace::Show:
-        return contains({
-            "Canvas", "Layers", "Properties",
-            "MIDI", "Audio",
-            "ShaderClaw", "Etherea", "Capture",
-        });
-    }
+    // Single unified layout — every tracked panel renders + docks. The
+    // workspace concept is retired for now (Canvas/Show switcher removed
+    // from the menu bar). Kept as a no-op so future curated views can
+    // plug back in if we bring modes back.
+    (void)title;
     return true;
 }
 

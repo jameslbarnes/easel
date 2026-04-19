@@ -98,6 +98,9 @@ public:
     // Render the 3D stage panel (call inside ImGui frame)
     void render(const std::vector<GLuint>& zoneTextures,
                 std::function<void()> inlineTopSection = nullptr);
+    // Render the Scene panel — displays / projectors / surfaces / clusters.
+    // Split out of the Stage 3D panel so the 3D viewport gets full height.
+    void renderSceneInspector(const std::vector<GLuint>& zoneTextures);
 
     // Model management
     bool loadModel(const std::string& path);

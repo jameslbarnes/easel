@@ -401,8 +401,10 @@ void StageView::renderUI(const std::vector<GLuint>& zoneTextures) {
     float panelW = ImGui::GetContentRegionAvail().x;
     float panelH = ImGui::GetContentRegionAvail().y;
 
-    if (!hasModel()) {
-        // No model loaded - show import button
+    // Empty state only if BOTH materials and displays are empty.
+    // A default display is added during init() so the 3D view shows a plane
+    // with the live canvas content out of the box.
+    if (m_materials.empty() && m_displays.empty()) {
         ImGui::Dummy(ImVec2(0, panelH * 0.3f));
         float btnW = 200.0f;
         ImGui::SetCursorPosX((panelW - btnW) * 0.5f);
@@ -452,8 +454,9 @@ void StageView::renderUI(const std::vector<GLuint>& zoneTextures) {
         ImGui::PopStyleColor(3);
     }
 
-    // 3D viewport area
-    float viewH = panelH - 120; // leave room for projector/surface lists
+    // 3D viewport area — displays/projectors/surfaces lists moved out to the
+    // Scene panel, so the viewport takes the full remaining height.
+    float viewH = panelH - 40;
     if (viewH < 100) viewH = 100;
 
     ImVec2 viewStart = ImGui::GetCursorScreenPos();
@@ -705,7 +708,13 @@ void StageView::renderUI(const std::vector<GLuint>& zoneTextures) {
             m_selectedProjector = -1;
         }
     }
+}
 
+// Lists of displays / projectors / surfaces / clusters — rendered in the
+// separate "Scene" panel so they don't eat vertical space from the 3D
+// viewport. Everything below still refers to the same member state, so
+// selection / add / remove flow exactly as before.
+void StageView::renderSceneInspector(const std::vector<GLuint>& zoneTextures) {
     // --- Displays list ---
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
     ImGui::Text("Displays");

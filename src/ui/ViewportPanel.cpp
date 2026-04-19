@@ -403,6 +403,42 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
                 }
             }
 
+            // --- Composition (canvas resolution) — same row, to the right of Mapping ---
+            {
+                static const char* presetLabels[] = {
+                    "1920x1080 (1080p)", "3840x2160 (4K)", "1280x720 (720p)",
+                    "2560x1440 (1440p)", "8000x2000 (Ultra-wide)", "1024x768", "Custom"
+                };
+                static const int presetW[] = { 1920, 3840, 1280, 2560, 8000, 1024, 0 };
+                static const int presetH[] = { 1080, 2160, 720, 1440, 2000, 768, 0 };
+                const int presetCount = 7;
+
+                ImGui::SameLine(0, 12);
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+                ImGui::Text("Composition");
+                ImGui::PopStyleColor();
+                ImGui::SameLine();
+
+                char compLabel[48];
+                snprintf(compLabel, sizeof(compLabel), "%dx%d", az.width, az.height);
+
+                ImGui::SetNextItemWidth(150.0f);
+                if (ImGui::BeginCombo("##ZoneComp", compLabel)) {
+                    for (int p = 0; p < presetCount - 1; p++) {
+                        bool sel = (az.width == presetW[p] && az.height == presetH[p]);
+                        if (ImGui::Selectable(presetLabels[p], sel)) {
+                            az.resize(presetW[p], presetH[p]);
+                            az.compPreset = p;
+                        }
+                    }
+                    ImGui::Separator();
+                    if (ImGui::Selectable("Custom...", az.compPreset == presetCount - 1)) {
+                        az.compPreset = presetCount - 1;
+                    }
+                    ImGui::EndCombo();
+                }
+            }
+
             ImGui::PopStyleVar(2);
         }
 
