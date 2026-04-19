@@ -20,7 +20,17 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     return 0;
 }
 #else
+
+#ifdef __APPLE__
+// Defined in main_mac.mm — chdirs to the .app's Resources/ if running from a
+// bundle so relative loads like "shaders/foo.frag" still find their files.
+void setBundleWorkingDir();
+#endif
+
 int main() {
+#ifdef __APPLE__
+    setBundleWorkingDir();
+#endif
     Application app;
     if (!app.init()) return 1;
     app.run();

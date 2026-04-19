@@ -152,7 +152,37 @@ if(HAS_SPOUT)
     target_compile_definitions(spout_gl PRIVATE NOMINMAX)
     target_link_libraries(spout_gl PRIVATE d3d11 d3d9 dxguid shlwapi winmm)
 endif()
-add_executable(${PROJECT_NAME} WIN32 ${SOURCES} ${KISS_FFT_SRC} "${CMAKE_BINARY_DIR}/easel_icon.rc")
+if(APPLE)
+    # Build as a proper .app bundle so we get a dock icon, Cmd+Tab name,
+    # and menu bar identity. Resources/ holds icon + shaders + default
+    # preset; main_mac.mm chdirs to it on launch so relative loads work.
+    set(EASEL_ICON "${CMAKE_SOURCE_DIR}/resources/icon.icns")
+    set_source_files_properties("${EASEL_ICON}" PROPERTIES
+        MACOSX_PACKAGE_LOCATION "Resources")
+    file(GLOB EASEL_SHADERS "${CMAKE_SOURCE_DIR}/shaders/*")
+    foreach(s ${EASEL_SHADERS})
+        set_source_files_properties("${s}" PROPERTIES
+            MACOSX_PACKAGE_LOCATION "Resources/shaders")
+    endforeach()
+    set(EASEL_DEFAULT_PRESET "${CMAKE_SOURCE_DIR}/default.easel")
+    set_source_files_properties("${EASEL_DEFAULT_PRESET}" PROPERTIES
+        MACOSX_PACKAGE_LOCATION "Resources")
+
+    add_executable(${PROJECT_NAME} MACOSX_BUNDLE
+        ${SOURCES} ${KISS_FFT_SRC}
+        "${EASEL_ICON}" ${EASEL_SHADERS} "${EASEL_DEFAULT_PRESET}")
+    set_target_properties(${PROJECT_NAME} PROPERTIES
+        MACOSX_BUNDLE_BUNDLE_NAME "Easel"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.etherealmachine.easel"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+        MACOSX_BUNDLE_ICON_FILE "icon.icns"
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/cmake/MacOSXBundleInfo.plist.in")
+elseif(WIN32)
+    add_executable(${PROJECT_NAME} WIN32 ${SOURCES} ${KISS_FFT_SRC} "${CMAKE_BINARY_DIR}/easel_icon.rc")
+else()
+    add_executable(${PROJECT_NAME} ${SOURCES} ${KISS_FFT_SRC} "${CMAKE_BINARY_DIR}/easel_icon.rc")
+endif()
 
 find_package(OpenGL REQUIRED)
 
