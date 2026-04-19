@@ -4,9 +4,23 @@
 #include "sources/WHEPSource.h"
 #include <iostream>
 #include <fstream>
+#include <mach/mach.h>
 #include <objc/runtime.h>
 
 extern void whepLog(const std::string& msg);
+
+// Resident memory in MB — used to verify WKWebView teardown actually frees
+// across reconnects. Logged at startWebView/stopWebView so a grep of
+// whep_debug.log for "RSS:" shows whether the process is leaking.
+static size_t getProcessRSS_MB() {
+    mach_task_basic_info_data_t info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                  (task_info_t)&info, &count) == KERN_SUCCESS) {
+        return info.resident_size / (1024 * 1024);
+    }
+    return 0;
+}
 
 // WHEP player HTML — replicates etherea dashboard's WebRTC flow exactly:
 // 1. Fetch ICE servers from etherea
@@ -54,7 +68,7 @@ async function connect() {
         S('got-track: ' + e.track.kind);
         if (e.track.kind === 'video') {
             document.getElementById('v').srcObject = e.streams[0];
-            requestAnimationFrame(captureFrame);
+            scheduleNextFrame();
         }
     };
 
@@ -132,31 +146,51 @@ async function connect() {
     S('remote-description-set');
 }
 
-// Frame capture: draw video to canvas, extract raw RGBA, send to native
+// Frame capture: draw video to canvas, extract raw RGBA, send to native.
+// Uses requestVideoFrameCallback so we fire once per *new* video frame
+// (~30Hz) instead of once per display refresh (60-120Hz on Pro Display).
+// This ~halves JS allocation churn and stops capturing duplicate frames.
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d', { willReadFrequently: true });
 const video = document.getElementById('v');
+
+// Fast base64: prefers Uint8Array.toBase64() (Safari 18+) which avoids the
+// huge intermediate `binary` string and skips the chunked apply(). Falls
+// back to the chunked path on older WebKit. Output is byte-identical.
+const hasFastB64 = typeof Uint8Array.prototype.toBase64 === 'function';
+function bytesToBase64(bytes) {
+    if (hasFastB64) return bytes.toBase64();
+    let binary = '';
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i += 8192) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + 8192, len)));
+    }
+    return btoa(binary);
+}
 
 function captureFrame() {
     if (video.videoWidth > 0 && video.videoHeight > 0) {
         if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
             canvas.width = video.videoWidth;
             canvas.height = video.videoHeight;
-            S('video-size: ' + canvas.width + 'x' + canvas.height);
+            S('video-size: ' + canvas.width + 'x' + canvas.height +
+              (hasFastB64 ? ' (fast-b64)' : ' (slow-b64)'));
         }
         ctx.drawImage(video, 0, 0);
         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const bytes = imageData.data;
-        let binary = '';
-        const len = bytes.byteLength;
-        for (let i = 0; i < len; i += 8192) {
-            binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + 8192, len)));
-        }
         window.webkit.messageHandlers.frame.postMessage(
-            canvas.width + ',' + canvas.height + ',' + btoa(binary)
+            canvas.width + ',' + canvas.height + ',' + bytesToBase64(imageData.data)
         );
     }
-    requestAnimationFrame(captureFrame);
+    scheduleNextFrame();
+}
+
+function scheduleNextFrame() {
+    if (video.requestVideoFrameCallback) {
+        video.requestVideoFrameCallback(captureFrame);
+    } else {
+        requestAnimationFrame(captureFrame);
+    }
 }
 
 window.onerror = (msg, src, line) => S('js-error: ' + msg + ' line:' + line);
@@ -218,7 +252,8 @@ void WHEPSource::startWebView(const std::string& whepUrl, const std::string& ice
             m_webViewHandler = nullptr;
         }
 
-        whepLog("[WHEP-WebView] Starting WKWebView for: " + url);
+        whepLog("[WHEP-WebView] Starting WKWebView (RSS: " +
+                std::to_string(getProcessRSS_MB()) + "MB) for: " + url);
 
         WKWebViewConfiguration* config = [[WKWebViewConfiguration alloc] init];
         config.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
@@ -246,7 +281,8 @@ void WHEPSource::startWebView(const std::string& whepUrl, const std::string& ice
         // Use localhost as baseURL so fetch to localhost:7860 works without CORS
         [webView loadHTMLString:html baseURL:[NSURL URLWithString:@"http://localhost:7860"]];
 
-        whepLog("[WHEP-WebView] WKWebView created and loading");
+        whepLog("[WHEP-WebView] WKWebView created and loading (RSS: " +
+                std::to_string(getProcessRSS_MB()) + "MB)");
     });
 }
 
@@ -270,6 +306,8 @@ void WHEPSource::stopWebView() {
             handler = nil;
             m_webViewHandler = nullptr;
         }
+        whepLog("[WHEP-WebView] stopWebView complete (RSS: " +
+                std::to_string(getProcessRSS_MB()) + "MB)");
     });
 }
 

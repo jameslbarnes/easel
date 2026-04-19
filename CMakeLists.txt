@@ -302,6 +302,42 @@ if(APPLE)
     )
 endif()
 
+if(HAS_WHEP)
+    set(TEST_WHEP_SOURCES
+        tests/test_whep_source.cpp
+        src/sources/WHEPSource.cpp
+        src/render/Texture.cpp
+    )
+    if(APPLE)
+        list(APPEND TEST_WHEP_SOURCES src/sources/WHEPSource_mac.mm)
+    endif()
+    add_executable(test_whep_source ${TEST_WHEP_SOURCES})
+    target_compile_definitions(test_whep_source PRIVATE HAS_WHEP=1)
+    if(WIN32)
+        target_compile_definitions(test_whep_source PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    endif()
+    target_include_directories(test_whep_source PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${stb_SOURCE_DIR}
+        "${FFMPEG_DIR}/include"
+    )
+    target_link_directories(test_whep_source PRIVATE "${FFMPEG_DIR}/lib")
+    target_link_libraries(test_whep_source PRIVATE
+        Catch2::Catch2WithMain
+        LibDataChannel::LibDataChannel
+        glad glm::glm OpenGL::GL
+        avformat avcodec avutil swscale swresample
+    )
+    if(NOT WIN32)
+        target_link_libraries(test_whep_source PRIVATE CURL::libcurl)
+    endif()
+    if(APPLE)
+        target_link_libraries(test_whep_source PRIVATE
+            "-framework WebKit" "-framework Cocoa" "-framework CoreFoundation"
+        )
+    endif()
+endif()
+
 if(HAS_NDI)
     add_executable(test_ndi_receive
         tests/test_ndi_receive.cpp src/sources/NDIRuntime.cpp src/sources/NDISource.cpp
