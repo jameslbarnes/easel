@@ -245,14 +245,66 @@ void StageView::renderDisplays(const std::vector<GLuint>& zoneTextures, const gl
     }
 }
 
+// Floor + back wall. Lazily builds two large quads and draws them with the
+// objmesh shader in solid-color mode. Keeps the 3D viewport from feeling
+// like a void so users can read depth and orientation at a glance.
+void StageView::renderEnvironment(const glm::mat4& viewProj) {
+    if (!m_envReady) {
+        // Floor: 40m × 40m horizontal quad, centered at origin, y = -0.55 so
+        // the default 1.08m-tall display (centered at origin) sits just above it.
+        const float fHalf = 20.0f;
+        const float fY    = -0.55f;
+        std::vector<Vertex3D> fv = {
+            {-fHalf, fY, -fHalf, 0.0f, 0.0f},
+            { fHalf, fY, -fHalf, 1.0f, 0.0f},
+            { fHalf, fY,  fHalf, 1.0f, 1.0f},
+            {-fHalf, fY,  fHalf, 0.0f, 1.0f},
+        };
+        std::vector<unsigned int> fi = { 0, 1, 2, 0, 2, 3 };
+        m_floorMesh.upload(fv, fi);
+
+        // Back wall: 40m wide × 8m tall, at z = -3 behind the origin.
+        const float wHalfX = 20.0f;
+        const float wYBot  = -0.55f;
+        const float wYTop  =  7.45f;
+        const float wZ     = -3.0f;
+        std::vector<Vertex3D> wv = {
+            {-wHalfX, wYBot, wZ, 0.0f, 0.0f},
+            { wHalfX, wYBot, wZ, 1.0f, 0.0f},
+            { wHalfX, wYTop, wZ, 1.0f, 1.0f},
+            {-wHalfX, wYTop, wZ, 0.0f, 1.0f},
+        };
+        std::vector<unsigned int> wi = { 0, 1, 2, 0, 2, 3 };
+        m_wallMesh.upload(wv, wi);
+
+        m_envReady = true;
+    }
+
+    m_shader.use();
+    m_shader.setMat4("uMVP", viewProj);  // identity model — vertices are in world space
+    m_shader.setBool("uTextured", false);
+
+    // Floor — slightly lighter to catch the eye as "ground".
+    m_shader.setVec4("uSolidColor", glm::vec4(0.16f, 0.17f, 0.20f, 1.0f));
+    m_floorMesh.draw();
+
+    // Back wall — a touch darker so it reads as behind the floor.
+    m_shader.setVec4("uSolidColor", glm::vec4(0.12f, 0.13f, 0.16f, 1.0f));
+    m_wallMesh.draw();
+}
+
 void StageView::renderScene(const std::vector<GLuint>& zoneTextures, float aspect) {
     glm::mat4 mdl = glm::scale(glm::mat4(1.0f), glm::vec3(m_modelScale));
     glm::mat4 view = m_camera.viewMatrix();
     glm::mat4 proj = m_camera.projMatrix(aspect);
     glm::mat4 mvp = proj * view * mdl;
+    glm::mat4 viewProjStage = proj * view;
 
     glEnable(GL_DEPTH_TEST);
     glClear(GL_DEPTH_BUFFER_BIT);
+
+    // Floor + back wall first, so displays and frustums render on top of them.
+    renderEnvironment(viewProjStage);
 
     m_shader.use();
     m_shader.setMat4("uMVP", mvp);
@@ -299,7 +351,6 @@ void StageView::renderScene(const std::vector<GLuint>& zoneTextures, float aspec
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 
     // Draw projector frustums
-    glm::mat4 viewProjStage = proj * view;
     for (int i = 0; i < (int)m_projectors.size(); i++) {
         if (!m_projectors[i].visible) continue;
         renderFrustum(m_projectors[i], viewProjStage, i == m_selectedProjector);

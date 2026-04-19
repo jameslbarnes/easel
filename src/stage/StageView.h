@@ -194,7 +194,13 @@ private:
     void renderScene(const std::vector<GLuint>& zoneTextures, float aspect);
     void renderDisplays(const std::vector<GLuint>& zoneTextures, const glm::mat4& viewProj);
     void renderFrustum(const VirtualProjector& proj, const glm::mat4& viewProj, bool selected);
+    void renderEnvironment(const glm::mat4& viewProj);   // floor + back wall
     void renderUI(const std::vector<GLuint>& zoneTextures);
+
+    // Stage environment — light floor + back wall so the 3D space has ground.
+    Mesh3D m_floorMesh;
+    Mesh3D m_wallMesh;
+    bool m_envReady = false;
 
     // Display quad mesh (unit quad, scaled per display)
     Mesh m_displayQuad;
