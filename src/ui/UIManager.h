@@ -3,6 +3,12 @@
 struct GLFWwindow;
 struct ImFont;
 
+// Three top-level modes that map to the phases of a live show:
+//   Stage  — physical/spatial setup (projector layout, warp, masks, scanner)
+//   Canvas — content authoring (layers, properties, sources)
+//   Show   — live ops (preview + I/O monitoring)
+enum class Workspace { Stage, Canvas, Show };
+
 class UIManager {
 public:
     bool init(GLFWwindow* window);
@@ -20,6 +26,9 @@ public:
     void handleZoom();  // call each frame to handle Cmd+/- zoom
     float uiScale() const { return m_uiZoom; }
 
+    Workspace workspace() const { return m_workspace; }
+    void setWorkspace(Workspace w);
+
 private:
     void applyTheme(float dpiScale);
 
@@ -32,4 +41,5 @@ private:
     ImFont* m_monoFont = nullptr;
     float m_uiZoom = 1.0f;
     float m_baseFontGlobalScale = 1.0f;
+    Workspace m_workspace = Workspace::Canvas;
 };

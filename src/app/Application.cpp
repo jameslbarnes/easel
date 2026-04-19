@@ -3659,6 +3659,35 @@ void Application::renderMenuBar() {
             }
         }
 
+        // Workspace switcher — right-aligned Stage / Canvas / Show buttons.
+        // Each remaps the dock layout for the corresponding phase of a show.
+        {
+            Workspace current = m_ui.workspace();
+            auto drawBtn = [&](const char* label, Workspace ws) {
+                bool active = (current == ws);
+                if (active) {
+                    ImVec4 a = ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive);
+                    ImGui::PushStyleColor(ImGuiCol_Button, a);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, a);
+                }
+                if (ImGui::Button(label)) m_ui.setWorkspace(ws);
+                if (active) ImGui::PopStyleColor(2);
+            };
+            // Approx width of 3 buttons + spacing — right-align inside menu bar.
+            float btnEstW = ImGui::CalcTextSize("Canvas").x
+                            + ImGui::GetStyle().FramePadding.x * 2;
+            float total = btnEstW * 3
+                          + ImGui::GetStyle().ItemSpacing.x * 2
+                          + 20.0f;
+            float cursorX = ImGui::GetContentRegionMax().x - total;
+            if (cursorX > ImGui::GetCursorPosX()) ImGui::SetCursorPosX(cursorX);
+            drawBtn("Stage",  Workspace::Stage);
+            ImGui::SameLine();
+            drawBtn("Canvas", Workspace::Canvas);
+            ImGui::SameLine();
+            drawBtn("Show",   Workspace::Show);
+        }
+
         ImGui::EndMainMenuBar();
     }
 }

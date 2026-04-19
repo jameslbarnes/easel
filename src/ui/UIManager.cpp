@@ -404,26 +404,60 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         ImGuiID rightTopId, rightBottomId;
         ImGui::DockBuilderSplitNode(rightId, ImGuiDir_Up, 0.25f, &rightTopId, &rightBottomId);
 
-        // Dock windows into regions
-        //   leftId         = Main viewport tab group: Canvas, Projector, Mapping, Masks, Stage
-        //   rightTopId     = Sources / outputs (Layers, feeds, NDI/Stream/Spout)
-        //   rightBottomId  = Inspectors (Properties, MIDI, Audio)
-        // Tab order mirrors the workflow sequence.
-        ImGui::DockBuilderDockWindow("Canvas", leftId);
-        ImGui::DockBuilderDockWindow("Mapping", leftId);
-        ImGui::DockBuilderDockWindow("Masks", leftId);
-        ImGui::DockBuilderDockWindow("Stage", leftId);
-        ImGui::DockBuilderDockWindow("Layers", rightTopId);
-        ImGui::DockBuilderDockWindow("ShaderClaw", rightTopId);
-        ImGui::DockBuilderDockWindow("Etherea", rightTopId);
-        ImGui::DockBuilderDockWindow("NDI", rightTopId);
-        ImGui::DockBuilderDockWindow("Stream", rightTopId);
-        ImGui::DockBuilderDockWindow("Spout", rightTopId);
-        ImGui::DockBuilderDockWindow("Capture", rightTopId);
-        ImGui::DockBuilderDockWindow("Audio Mixer", rightTopId);
-        ImGui::DockBuilderDockWindow("Properties", rightBottomId);
-        ImGui::DockBuilderDockWindow("MIDI", rightBottomId);
-        ImGui::DockBuilderDockWindow("Audio", rightBottomId);
+        // Dock windows into regions per workspace.
+        //   Stage  — 3D layout/warp/masks take center; Canvas preview + Layers on side.
+        //   Canvas — Canvas center; sources + properties on sides. (Default authoring view.)
+        //   Show   — Canvas center; live-ops panels (Audio, MIDI, NDI/Stream/Spout) on sides.
+        // First DockBuilderDockWindow call for a region wins focus, so the focused
+        // tab per workspace is deliberate.
+        switch (m_workspace) {
+        case Workspace::Stage:
+            // Center: spatial setup tools (Stage focused)
+            ImGui::DockBuilderDockWindow("Stage", leftId);
+            ImGui::DockBuilderDockWindow("Mapping", leftId);
+            ImGui::DockBuilderDockWindow("Masks", leftId);
+            ImGui::DockBuilderDockWindow("Scene Scanner", leftId);
+            ImGui::DockBuilderDockWindow("Canvas", leftId);
+            // Side: minimal — layer picking + properties
+            ImGui::DockBuilderDockWindow("Layers", rightTopId);
+            ImGui::DockBuilderDockWindow("Capture", rightTopId);
+            ImGui::DockBuilderDockWindow("Properties", rightBottomId);
+            ImGui::DockBuilderDockWindow("Audio", rightBottomId);
+            break;
+
+        case Workspace::Canvas:
+            // Center: authoring preview (Canvas focused)
+            ImGui::DockBuilderDockWindow("Canvas", leftId);
+            ImGui::DockBuilderDockWindow("Mapping", leftId);
+            ImGui::DockBuilderDockWindow("Masks", leftId);
+            ImGui::DockBuilderDockWindow("Stage", leftId);
+            // Right top: sources (Layers focused)
+            ImGui::DockBuilderDockWindow("Layers", rightTopId);
+            ImGui::DockBuilderDockWindow("ShaderClaw", rightTopId);
+            ImGui::DockBuilderDockWindow("Etherea", rightTopId);
+            ImGui::DockBuilderDockWindow("Capture", rightTopId);
+            ImGui::DockBuilderDockWindow("Audio Mixer", rightTopId);
+            // Right bottom: inspectors (Properties focused)
+            ImGui::DockBuilderDockWindow("Properties", rightBottomId);
+            ImGui::DockBuilderDockWindow("Audio", rightBottomId);
+            ImGui::DockBuilderDockWindow("MIDI", rightBottomId);
+            break;
+
+        case Workspace::Show:
+            // Center: live preview (Canvas focused)
+            ImGui::DockBuilderDockWindow("Canvas", leftId);
+            ImGui::DockBuilderDockWindow("Stage", leftId);
+            // Right top: live I/O monitoring (Audio focused)
+            ImGui::DockBuilderDockWindow("Audio", rightTopId);
+            ImGui::DockBuilderDockWindow("Audio Mixer", rightTopId);
+            ImGui::DockBuilderDockWindow("MIDI", rightTopId);
+            // Right bottom: broadcast / feeds (NDI focused)
+            ImGui::DockBuilderDockWindow("NDI", rightBottomId);
+            ImGui::DockBuilderDockWindow("Spout", rightBottomId);
+            ImGui::DockBuilderDockWindow("Stream", rightBottomId);
+            ImGui::DockBuilderDockWindow("Properties", rightBottomId);
+            break;
+        }
 
         ImGui::DockBuilderFinish(dockspaceId);
     } else {
@@ -433,4 +467,11 @@ void UIManager::setupDockspace(float bottomBarHeight) {
     }
 
     ImGui::End();
+}
+
+void UIManager::setWorkspace(Workspace w) {
+    if (w == m_workspace) return;
+    m_workspace = w;
+    // Force dock layout rebuild on next setupDockspace call
+    m_firstFrame = true;
 }
