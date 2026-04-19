@@ -427,16 +427,15 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         dockIfVisible("Canvas",        canvasId);
         dockIfVisible("Stage",         canvasId);
 
-        // Tools (top-right): warp / masks / scanner. Mapping focused first.
+        // Top-right: primary tabs in the requested order — Layers focused.
+        dockIfVisible("Layers",        toolsId);
         dockIfVisible("Mapping",       toolsId);
         dockIfVisible("Masks",         toolsId);
-        dockIfVisible("Scene Scanner", toolsId);
+        dockIfVisible("Sources",       toolsId);
 
-        // Middle-right: Layers + Sources (consolidated input panel) + Scene
-        // (3D stage's display/projector/surface lists) + Mixer.
-        dockIfVisible("Layers",        rightTopId);
-        dockIfVisible("Sources",       rightTopId);
+        // Middle-right: Scene (3D stage lists) + Scanner + Mixer.
         dockIfVisible("Scene",         rightTopId);
+        dockIfVisible("Scene Scanner", rightTopId);
         dockIfVisible("Audio Mixer",   rightTopId);
 
         // Properties + I/O bottom-right. NDI/Spout/Capture/ShaderClaw/Etherea
@@ -448,7 +447,10 @@ void UIManager::setupDockspace(float bottomBarHeight) {
 
         ImGui::DockBuilderFinish(dockspaceId);
 
-        m_pendingFocus = "Canvas";
+        // Two deferred focus passes: Canvas in the big left slot, Layers as
+        // the active tab in the top-right. SetWindowFocus is called every
+        // frame while m_pendingFocusFramesLeft > 0 so both settle correctly.
+        m_pendingFocus = "Layers";
         m_pendingFocusFramesLeft = 3;
     } else {
         // Track size for change detection even when not rebuilding
