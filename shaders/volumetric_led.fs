@@ -15,10 +15,7 @@
     ]
 }*/
 
-uniform float audioLevel;
-uniform float audioBass;
-uniform float audioMid;
-uniform float audioHigh;
+// audioLevel, audioBass, audioMid, audioHigh, audioFFT are provided by Easel's preamble
 
 // ---- palettes (match the source's four schemes) ----
 vec3 pal(int idx, float t, float b) {
