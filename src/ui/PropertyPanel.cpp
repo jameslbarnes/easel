@@ -848,12 +848,8 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     ImGui::PopStyleColor(3);
 
                     if (ImGui::BeginPopup("##audiobind")) {
-<<<<<<< Updated upstream
-                        static const char* signalNames[] = { "None", "Level", "Bass", "Mid", "High", "Beat" };
-                        bool isNew = (bindings.find(input.name) == bindings.end());
-=======
                         static const char* signalNames[] = { "None", "Level", "Bass", "Mid", "High", "Beat", "MIDI" };
->>>>>>> Stashed changes
+                        bool isNew = (bindings.find(input.name) == bindings.end());
                         AudioBinding& ab = bindings[input.name];
                         if (isNew) { ab.rangeMin = input.minVal; ab.rangeMax = input.maxVal; }
                         int sigIdx = (int)ab.signal;

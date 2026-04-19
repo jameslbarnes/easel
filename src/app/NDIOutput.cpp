@@ -38,14 +38,9 @@ void NDIOutput::destroy() {
         }
         m_send = nullptr;
     }
-<<<<<<< Updated upstream
     if (m_pbo[0]) { glDeleteBuffers(2, m_pbo); m_pbo[0] = m_pbo[1] = 0; }
     m_pixelBuffer[0].clear();
     m_pixelBuffer[1].clear();
-=======
-    m_pixelBuffer.clear();
-    m_flipRow.clear();
->>>>>>> Stashed changes
     m_lastW = 0;
     m_lastH = 0;
     m_pboReady = false;
@@ -70,13 +65,8 @@ void NDIOutput::send(GLuint texture, int w, int h) {
 
     // Resize buffers if dimensions changed
     if (w != m_lastW || h != m_lastH) {
-<<<<<<< Updated upstream
         m_pixelBuffer[0].resize(bytes);
         m_pixelBuffer[1].resize(bytes);
-=======
-        m_pixelBuffer.resize(w * h * 4);
-        m_flipRow.resize(w * 4);
->>>>>>> Stashed changes
         m_lastW = w;
         m_lastH = h;
         m_pboReady = false;
@@ -101,7 +91,6 @@ void NDIOutput::send(GLuint texture, int w, int h) {
     glGetTexImage(GL_TEXTURE_2D, 0, GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
     glBindTexture(GL_TEXTURE_2D, 0);
 
-<<<<<<< Updated upstream
     // Step 2: Map the OTHER PBO (previous frame) — this one is already done
     if (m_pboReady) {
         glBindBuffer(GL_PIXEL_PACK_BUFFER, m_pbo[mapPBO]);
@@ -124,7 +113,6 @@ void NDIOutput::send(GLuint texture, int w, int h) {
             frame.p_data = buf.data();
             frame.line_stride_in_bytes = w * 4;
 
-            auto& rt = NDIRuntime::instance();
             rt.api()->send_send_video_async_v2(m_send, &frame);
 
             // Swap send buffer so next frame writes to the other one
@@ -137,32 +125,6 @@ void NDIOutput::send(GLuint texture, int w, int h) {
     // Swap PBO index for next frame
     m_pboIndex = 1 - m_pboIndex;
     m_pboReady = true;
-=======
-    // Flip vertically (OpenGL bottom-up → NDI top-down)
-    int stride = w * 4;
-    for (int y = 0; y < h / 2; y++) {
-        uint8_t* top = m_pixelBuffer.data() + y * stride;
-        uint8_t* bot = m_pixelBuffer.data() + (h - 1 - y) * stride;
-        std::memcpy(m_flipRow.data(), top, stride);
-        std::memcpy(top, bot, stride);
-        std::memcpy(bot, m_flipRow.data(), stride);
-    }
-
-    // Build and send the frame asynchronously
-    NDIlib_video_frame_v2_t frame = {};
-    frame.xres = w;
-    frame.yres = h;
-    frame.FourCC = NDIlib_FourCC_video_type_BGRA;
-    frame.frame_rate_N = 60000;
-    frame.frame_rate_D = 1001;
-    frame.picture_aspect_ratio = (float)w / (float)h;
-    frame.frame_format_type = NDIlib_frame_format_type_progressive;
-    frame.p_data = m_pixelBuffer.data();
-    frame.line_stride_in_bytes = stride;
-
-    // Async send — NDI copies the buffer internally, returns immediately
-    rt.api()->send_send_video_async_v2(m_send, &frame);
->>>>>>> Stashed changes
 }
 
 #endif // HAS_NDI

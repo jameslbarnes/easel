@@ -46,64 +46,51 @@ bool UIManager::init(GLFWwindow* window) {
         0,
     };
 
-<<<<<<< Updated upstream
-    // Load system font with DPI-aware sizing
-    float fontSize = 16.0f * fontScale;
-=======
-    // Font loading — prefer Segoe UI Variable (Windows 11, Inter-like) with
-    // Segoe UI static fallback. Variable font gives us the "510 weight" feel
-    // that Linear's design system leans on.
+    // Font loading — prefer Segoe UI Variable (Windows 11, Inter-like) on
+    // Windows with Segoe UI static fallback; Apple system fonts on macOS.
+    // Variable font gives the "510 weight" feel Linear's design system leans on.
     const char* primaryFontPath = "C:/Windows/Fonts/SegUIVar.ttf";
     const char* primaryFallback = "C:/Windows/Fonts/segoeui.ttf";
-    const char* boldFontPath    = "C:/Windows/Fonts/seguisb.ttf";       // SemiBold — closer to Linear's 590
+    const char* boldFontPath    = "C:/Windows/Fonts/seguisb.ttf";       // SemiBold
     const char* boldFallback    = "C:/Windows/Fonts/segoeuib.ttf";      // Bold
-    const char* monoFontPath    = "C:/Windows/Fonts/CascadiaMono.ttf";  // Berkeley Mono stand-in
+    const char* monoFontPath    = "C:/Windows/Fonts/CascadiaMono.ttf";
+    const char* macPrimaryPath  = "/System/Library/Fonts/Helvetica.ttc";
+    const char* macPrimaryFB    = "/System/Library/Fonts/Supplemental/Arial.ttf";
+    const char* macBoldPath     = "/System/Library/Fonts/Supplemental/Arial Bold.ttf";
+    const char* macMonoPath     = "/System/Library/Fonts/Menlo.ttc";
 
-    float fontSize = 15.0f * dpiScale;   // a touch smaller for Linear's denser feel
->>>>>>> Stashed changes
+    float fontSize = 15.0f * fontScale;  // denser feel; scaled for DPI
     ImFontConfig fontCfg;
     fontCfg.OversampleH = 3;
     fontCfg.OversampleV = 1;
-<<<<<<< Updated upstream
-#ifdef _WIN32
-    ImFont* mainFont = io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeui.ttf", fontSize, &fontCfg, glyphRanges);
-#elif defined(__APPLE__)
-    ImFont* mainFont = io.Fonts->AddFontFromFileTTF("/System/Library/Fonts/Supplemental/Arial.ttf", fontSize, &fontCfg, glyphRanges);
-#else
-    ImFont* mainFont = nullptr;
-#endif
-=======
     fontCfg.PixelSnapH = false;
-    ImFont* mainFont = io.Fonts->AddFontFromFileTTF(primaryFontPath, fontSize, &fontCfg, glyphRanges);
+    ImFont* mainFont = nullptr;
+#ifdef _WIN32
+    mainFont = io.Fonts->AddFontFromFileTTF(primaryFontPath, fontSize, &fontCfg, glyphRanges);
     if (!mainFont) mainFont = io.Fonts->AddFontFromFileTTF(primaryFallback, fontSize, &fontCfg, glyphRanges);
->>>>>>> Stashed changes
+#elif defined(__APPLE__)
+    mainFont = io.Fonts->AddFontFromFileTTF(macPrimaryPath, fontSize, &fontCfg, glyphRanges);
+    if (!mainFont) mainFont = io.Fonts->AddFontFromFileTTF(macPrimaryFB, fontSize, &fontCfg, glyphRanges);
+#endif
     if (!mainFont) {
         ImFontConfig defCfg;
         defCfg.SizePixels = fontSize;
         io.Fonts->AddFontDefault(&defCfg);
     }
 
-<<<<<<< Updated upstream
-    // Slightly smaller font for secondary text
-    float smallSize = 14.0f * fontScale;
-    ImFontConfig smallCfg;
-    smallCfg.OversampleH = 2;
-#ifdef _WIN32
-    m_smallFont = io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeui.ttf", smallSize, &smallCfg, glyphRanges);
-#elif defined(__APPLE__)
-    m_smallFont = io.Fonts->AddFontFromFileTTF("/System/Library/Fonts/Supplemental/Arial.ttf", smallSize, &smallCfg, glyphRanges);
-#else
-    m_smallFont = nullptr;
-#endif
-=======
     // Small font — for captions, metadata, tertiary labels
-    float smallSize = 13.0f * dpiScale;
+    float smallSize = 13.0f * fontScale;
     ImFontConfig smallCfg;
     smallCfg.OversampleH = 3;
     smallCfg.PixelSnapH = false;
+    m_smallFont = nullptr;
+#ifdef _WIN32
     m_smallFont = io.Fonts->AddFontFromFileTTF(primaryFontPath, smallSize, &smallCfg, glyphRanges);
     if (!m_smallFont) m_smallFont = io.Fonts->AddFontFromFileTTF(primaryFallback, smallSize, &smallCfg, glyphRanges);
->>>>>>> Stashed changes
+#elif defined(__APPLE__)
+    m_smallFont = io.Fonts->AddFontFromFileTTF(macPrimaryPath, smallSize, &smallCfg, glyphRanges);
+    if (!m_smallFont) m_smallFont = io.Fonts->AddFontFromFileTTF(macPrimaryFB, smallSize, &smallCfg, glyphRanges);
+#endif
     if (!m_smallFont) {
         ImFontConfig defCfg;
         defCfg.SizePixels = smallSize;
@@ -112,38 +99,34 @@ bool UIManager::init(GLFWwindow* window) {
 
     // Semibold for headers / emphasis (Linear's ~590 weight)
     ImFontConfig boldCfg;
-<<<<<<< Updated upstream
-    boldCfg.OversampleH = 2;
-#ifdef _WIN32
-    m_boldFont = io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeuib.ttf", fontSize, &boldCfg, glyphRanges);
-#elif defined(__APPLE__)
-    m_boldFont = io.Fonts->AddFontFromFileTTF("/System/Library/Fonts/Supplemental/Arial Bold.ttf", fontSize, &boldCfg, glyphRanges);
-#else
+    boldCfg.OversampleH = 3;
+    boldCfg.PixelSnapH = false;
     m_boldFont = nullptr;
+#ifdef _WIN32
+    m_boldFont = io.Fonts->AddFontFromFileTTF(boldFontPath, fontSize, &boldCfg, glyphRanges);
+    if (!m_boldFont) m_boldFont = io.Fonts->AddFontFromFileTTF(boldFallback, fontSize, &boldCfg, glyphRanges);
+#elif defined(__APPLE__)
+    m_boldFont = io.Fonts->AddFontFromFileTTF(macBoldPath, fontSize, &boldCfg, glyphRanges);
 #endif
     if (!m_boldFont) m_boldFont = mainFont ? mainFont : io.Fonts->Fonts[0];
+
+    // Mono font for uppercase section labels / technical metadata
+    float monoSize = 11.0f * fontScale;
+    ImFontConfig monoCfg;
+    monoCfg.OversampleH = 3;
+    monoCfg.PixelSnapH = false;
+    m_monoFont = nullptr;
+#ifdef _WIN32
+    m_monoFont = io.Fonts->AddFontFromFileTTF(monoFontPath, monoSize, &monoCfg, glyphRanges);
+#elif defined(__APPLE__)
+    m_monoFont = io.Fonts->AddFontFromFileTTF(macMonoPath, monoSize, &monoCfg, glyphRanges);
+#endif
+    if (!m_monoFont) m_monoFont = m_smallFont;
 
     applyTheme(uiScale);
 
     // Set font global scale (on Retina: 0.5 to counteract 2x font texture)
     io.FontGlobalScale = m_baseFontGlobalScale * m_uiZoom;
-=======
-    boldCfg.OversampleH = 3;
-    boldCfg.PixelSnapH = false;
-    m_boldFont = io.Fonts->AddFontFromFileTTF(boldFontPath, fontSize, &boldCfg, glyphRanges);
-    if (!m_boldFont) m_boldFont = io.Fonts->AddFontFromFileTTF(boldFallback, fontSize, &boldCfg, glyphRanges);
-    if (!m_boldFont) m_boldFont = mainFont ? mainFont : io.Fonts->Fonts[0];
-
-    // Mono font for uppercase section labels / technical metadata
-    float monoSize = 11.0f * dpiScale;
-    ImFontConfig monoCfg;
-    monoCfg.OversampleH = 3;
-    monoCfg.PixelSnapH = false;
-    m_monoFont = io.Fonts->AddFontFromFileTTF(monoFontPath, monoSize, &monoCfg, glyphRanges);
-    if (!m_monoFont) m_monoFont = m_smallFont;
-
-    applyTheme(dpiScale);
->>>>>>> Stashed changes
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
 #ifdef __APPLE__

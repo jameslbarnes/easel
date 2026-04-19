@@ -29,10 +29,7 @@ private:
     float m_lastDockH = 0;
     ImFont* m_smallFont = nullptr;
     ImFont* m_boldFont = nullptr;
-<<<<<<< Updated upstream
+    ImFont* m_monoFont = nullptr;
     float m_uiZoom = 1.0f;
     float m_baseFontGlobalScale = 1.0f;
-=======
-    ImFont* m_monoFont = nullptr;
->>>>>>> Stashed changes
 };

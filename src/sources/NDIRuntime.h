@@ -19,11 +19,7 @@ public:
     static NDIRuntime& instance();
 
     bool isAvailable() const { return m_loaded; }
-<<<<<<< Updated upstream
     const NDIlib_api* api() const { return m_loaded ? m_api : nullptr; }
-=======
-    const NDIlib_v6* api() const { return m_loaded ? m_pApi : nullptr; }
->>>>>>> Stashed changes
 
     bool init();
     void shutdown();
@@ -34,11 +30,7 @@ private:
     NDIRuntime(const NDIRuntime&) = delete;
     NDIRuntime& operator=(const NDIRuntime&) = delete;
 
-<<<<<<< Updated upstream
     const NDIlib_api* m_api = nullptr;
-=======
-    const NDIlib_v6* m_pApi = nullptr;
->>>>>>> Stashed changes
     bool m_loaded = false;
     bool m_initialized = false;
 };

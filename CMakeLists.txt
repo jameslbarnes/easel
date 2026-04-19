@@ -134,27 +134,20 @@ endif()
 # kiss_fft (public domain FFT library for AudioAnalyzer)
 set(KISS_FFT_SRC "${CMAKE_SOURCE_DIR}/external/kiss_fft/kiss_fft.c")
 
-<<<<<<< Updated upstream
 # Main executable
 if(WIN32)
     file(WRITE "${CMAKE_BINARY_DIR}/easel_icon.rc" "1 ICON \"${CMAKE_SOURCE_DIR}/resources/icon.ico\"\n")
+    if(HAS_SPOUT)
+        add_library(spout_gl STATIC ${SPOUT_SOURCES})
+        target_include_directories(spout_gl PUBLIC "${SPOUT_DIR}")
+        # Spout needs full Windows headers (no LEAN_AND_MEAN) for multimedia timer APIs
+        target_compile_definitions(spout_gl PRIVATE NOMINMAX)
+        target_link_libraries(spout_gl PRIVATE d3d11 d3d9 dxguid shlwapi winmm)
+    endif()
     add_executable(${PROJECT_NAME} WIN32 ${SOURCES} ${KISS_FFT_SRC} "${CMAKE_BINARY_DIR}/easel_icon.rc")
 else()
     add_executable(${PROJECT_NAME} ${SOURCES} ${KISS_FFT_SRC})
 endif()
-=======
-# Windows app icon resource — generate RC with absolute path to ICO
-# Use resource ID 1 to ensure Windows picks it as the main app icon
-file(WRITE "${CMAKE_BINARY_DIR}/easel_icon.rc" "1 ICON \"${CMAKE_SOURCE_DIR}/resources/icon.ico\"\n")
-if(HAS_SPOUT)
-    add_library(spout_gl STATIC ${SPOUT_SOURCES})
-    target_include_directories(spout_gl PUBLIC "${SPOUT_DIR}")
-    # Spout needs full Windows headers (no LEAN_AND_MEAN) for multimedia timer APIs
-    target_compile_definitions(spout_gl PRIVATE NOMINMAX)
-    target_link_libraries(spout_gl PRIVATE d3d11 d3d9 dxguid shlwapi winmm)
-endif()
-add_executable(${PROJECT_NAME} WIN32 ${SOURCES} ${KISS_FFT_SRC} "${CMAKE_BINARY_DIR}/easel_icon.rc")
->>>>>>> Stashed changes
 
 find_package(OpenGL REQUIRED)
 
@@ -166,28 +159,14 @@ add_executable(test_shaders
     src/render/Framebuffer.cpp
     src/render/Mesh.cpp
     src/render/Texture.cpp
-<<<<<<< Updated upstream
     src/render/FontAtlas.cpp
+    src/app/MIDIManager.cpp
 )
 if(WIN32)
     target_compile_definitions(test_shaders PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 target_include_directories(test_shaders PRIVATE ${CMAKE_SOURCE_DIR}/src ${stb_SOURCE_DIR})
 target_link_libraries(test_shaders PRIVATE glfw glad glm::glm nlohmann_json::nlohmann_json OpenGL::GL)
-=======
-    src/app/MIDIManager.cpp
-    src/render/FontAtlas.cpp
-    src/render/Screenshot.cpp
-)
-target_compile_definitions(test_shaders PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-target_include_directories(test_shaders PRIVATE
-    ${CMAKE_SOURCE_DIR}/src
-    ${stb_SOURCE_DIR}
-)
-target_link_libraries(test_shaders PRIVATE
-    glfw glad glm::glm nlohmann_json::nlohmann_json opengl32 winmm
-)
->>>>>>> Stashed changes
 
 if(WIN32)
     target_compile_definitions(${PROJECT_NAME} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -272,19 +251,14 @@ if(HAS_NDI)
     target_compile_definitions(${PROJECT_NAME} PRIVATE HAS_NDI=1)
 endif()
 
-<<<<<<< Updated upstream
-# Test suites
-=======
-# Spout2 (static lib, uses DirectX shared textures)
-if(HAS_SPOUT)
+# Spout2 (static lib, uses DirectX shared textures, Windows-only)
+if(WIN32 AND HAS_SPOUT)
     target_include_directories(${PROJECT_NAME} PRIVATE "${SPOUT_DIR}")
     target_compile_definitions(${PROJECT_NAME} PRIVATE HAS_SPOUT=1)
     target_link_libraries(${PROJECT_NAME} PRIVATE spout_gl)
 endif()
 
-
-# Scanning test suite (requires OpenCV)
->>>>>>> Stashed changes
+# Test suites
 if(HAS_OPENCV)
     add_executable(test_scanning
         tests/test_scanning.cpp src/scanning/GrayCodePattern.cpp src/scanning/SceneScanner.cpp
