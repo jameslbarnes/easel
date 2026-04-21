@@ -143,22 +143,26 @@ bool UIManager::init(GLFWwindow* window) {
 void UIManager::applyTheme(float dpiScale) {
     ImGuiStyle& s = ImGui::GetStyle();
 
-    // Geometry — more breathing room so rows don't feel squeezed
-    s.WindowPadding     = ImVec2(14, 14);
-    s.FramePadding      = ImVec2(12, 8);
+    // Geometry — Apple/Vercel-density: tight enough to feel intentional,
+    // loose enough to breathe. 10x6 frame padding fits "Masks"/"Mapping" tabs
+    // without truncation at any reasonable dock width.
+    s.WindowPadding     = ImVec2(16, 14);
+    s.FramePadding      = ImVec2(10, 6);
     s.CellPadding       = ImVec2(8, 5);
-    s.ItemSpacing       = ImVec2(12, 8);
-    s.ItemInnerSpacing  = ImVec2(8, 5);
-    s.IndentSpacing     = 18.0f;
+    s.ItemSpacing       = ImVec2(8, 6);
+    s.ItemInnerSpacing  = ImVec2(6, 4);
+    s.IndentSpacing     = 16.0f;
     s.ScrollbarSize     = 10.0f;
     s.GrabMinSize       = 12.0f;
+    s.SeparatorTextBorderSize = 1.0f;
+    s.SeparatorTextPadding    = ImVec2(12, 4);
 
-    // Rounding — matches the 6/8/12 scale from the Linear mockup
-    s.WindowRounding    = 10.0f;
-    s.ChildRounding     = 8.0f;
+    // Rounding — unified on 6/4 scale (Vercel-style consistent geometry)
+    s.WindowRounding    = 6.0f;
+    s.ChildRounding     = 6.0f;
     s.FrameRounding     = 6.0f;
-    s.PopupRounding     = 10.0f;
-    s.ScrollbarRounding = 8.0f;
+    s.PopupRounding     = 6.0f;
+    s.ScrollbarRounding = 4.0f;
     s.GrabRounding      = 4.0f;
     s.TabRounding       = 6.0f;
 
@@ -400,18 +404,22 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         // Responsive split based on window width
         float splitRatio = (dockSize.x > 1600) ? 0.65f : (dockSize.x > 1200) ? 0.60f : 0.55f;
 
-        // Layout — Canvas fills the left, everything else stacks on the right:
-        //   canvasId      = dedicated left slot — Canvas, always visible
+        // Layout — Timeline docked to the bottom (full width), main area above it:
+        //   timelineId    = bottom strip — Timeline panel
+        //   mainId        = everything else (split below)
+        //   canvasId      = left of main — Canvas, always visible
         //   toolsId       = top of right — viewport tools (Stage, Mapping, Masks, Scanner)
-        //   rightTopId    = middle of right — sources (Layers, ShaderClaw, Etherea, Capture, Mixer)
+        //   rightTopId    = middle of right — scanner etc.
         //   rightBottomId = bottom of right — inspectors + I/O (Properties, Audio, MIDI, NDI, ...)
-        // Canvas takes ~60% width; right column = 40%, split 30/35/35 vertically.
+        ImGuiID mainId, timelineDockId;
+        ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Down, 0.24f, &timelineDockId, &mainId);
         ImGuiID canvasId, rightId;
-        ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Left, splitRatio, &canvasId, &rightId);
+        ImGui::DockBuilderSplitNode(mainId, ImGuiDir_Left, splitRatio, &canvasId, &rightId);
 
         // Split right column top-to-bottom: tools → sources → inspectors.
+        // 0.34 gives "Masks"/"Mapping" tabs room to render without truncation.
         ImGuiID toolsId, rightRemainder;
-        ImGui::DockBuilderSplitNode(rightId, ImGuiDir_Up, 0.30f, &toolsId, &rightRemainder);
+        ImGui::DockBuilderSplitNode(rightId, ImGuiDir_Up, 0.34f, &toolsId, &rightRemainder);
         ImGuiID rightTopId, rightBottomId;
         ImGui::DockBuilderSplitNode(rightRemainder, ImGuiDir_Up, 0.45f, &rightTopId, &rightBottomId);
 
@@ -423,9 +431,10 @@ void UIManager::setupDockspace(float bottomBarHeight) {
             if (isPanelVisible(name)) ImGui::DockBuilderDockWindow(name, node);
         };
 
-        // Left: Canvas + Stage as peer tabs. Canvas is the default focused tab.
+        // Left: Canvas + Stage + Scenes as peer tabs. Canvas is the default focused tab.
         dockIfVisible("Canvas",        canvasId);
         dockIfVisible("Stage",         canvasId);
+        dockIfVisible("Scenes",        canvasId);
 
         // Top-right: primary tabs in the requested order — Layers focused.
         dockIfVisible("Layers",        toolsId);
@@ -433,11 +442,8 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         dockIfVisible("Masks",         toolsId);
         dockIfVisible("Sources",       toolsId);
 
-        // Middle-right: Scene (3D stage lists) + Scanner + Mixer + Scenes (presets).
-        dockIfVisible("Scene",         rightTopId);
-        dockIfVisible("Scenes",        rightTopId);
+        // Middle-right: Scanner only (Scene merged into Scenes; Mixer merged into Audio).
         dockIfVisible("Scene Scanner", rightTopId);
-        dockIfVisible("Audio Mixer",   rightTopId);
 
         // Properties + I/O bottom-right. NDI/Spout/Capture/ShaderClaw/Etherea
         // are no longer separate docks — they live as tabs inside Sources.
@@ -445,6 +451,9 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         dockIfVisible("Audio",         rightBottomId);
         dockIfVisible("MIDI",          rightBottomId);
         dockIfVisible("Stream",        rightBottomId);
+
+        // Bottom strip: the Timeline lives here, spanning the full width.
+        dockIfVisible("Timeline",      timelineDockId);
 
         ImGui::DockBuilderFinish(dockspaceId);
 

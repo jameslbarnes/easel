@@ -1,6 +1,45 @@
 #include "compositing/CompositeEngine.h"
+#include "sources/ShaderSource.h"
 #include <glm/glm.hpp>
 #include <iostream>
+
+// Render a shader-based A→B transition. Uses layer->transitionShaderInst
+// (lazy-loaded from transitionShaderPath) with two ISF image inputs "from"/"to"
+// and a float input "progress". Returns the shader's output texture, or 0 on
+// failure (caller falls back to source A).
+static GLuint renderLayerShaderTransition(const std::shared_ptr<Layer>& layer) {
+    if (!layer->source || !layer->nextSource) return 0;
+    if (layer->transitionShaderPath.empty()) return 0;
+
+    // Lazy load / reload on path change
+    if (!layer->transitionShaderInst ||
+        layer->transitionShaderInst->sourcePath() != layer->transitionShaderPath) {
+        auto inst = std::make_shared<ShaderSource>();
+        if (!inst->loadFromFile(layer->transitionShaderPath)) {
+            std::cerr << "[Transition] Failed to load shader: " << layer->transitionShaderPath << std::endl;
+            return 0;
+        }
+        layer->transitionShaderInst = inst;
+    }
+    auto& shader = layer->transitionShaderInst;
+
+    GLuint texA = layer->source->textureId();
+    GLuint texB = layer->nextSource->textureId();
+    if (!texA || !texB) return 0;
+
+    int wA = layer->source->width(),  hA = layer->source->height();
+    int wB = layer->nextSource->width(), hB = layer->nextSource->height();
+    int w = std::max(wA, wB), h = std::max(hA, hB);
+    if (w <= 0 || h <= 0) return 0;
+    shader->setResolution(w, h);
+
+    shader->bindImageInput("from", texA, wA, hA, 0, layer->source->isFlippedV());
+    shader->bindImageInput("to",   texB, wB, hB, 0, layer->nextSource->isFlippedV());
+    shader->setFloat("progress", layer->transitionProgress);
+
+    shader->update();
+    return shader->textureId();
+}
 
 bool CompositeEngine::init(int width, int height) {
     m_width = width;
@@ -270,7 +309,7 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
     for (int i = 0; i < (int)layers.size(); i++) {
         const auto& layer = layers[i];
 
-        // Update transition state
+        // Update transition state (opacity-based fade)
         if (layer->transitionActive && layer->transitionDuration > 0.0f) {
             float step = dt / std::max(0.01f, layer->transitionDuration);
             if (layer->transitionDirection) {
@@ -286,9 +325,22 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
             }
         }
 
-        // Compute effective opacity including transition
+        // Shader-based A→B transition: advance progress, swap sources on completion
+        if (layer->shaderTransitionActive && layer->transitionDuration > 0.0f) {
+            float step = dt / std::max(0.01f, layer->transitionDuration);
+            layer->transitionProgress = std::min(1.0f, layer->transitionProgress + step);
+            if (layer->transitionProgress >= 1.0f) {
+                // Promote B → A, clear B
+                layer->source = std::move(layer->nextSource);
+                layer->nextSource.reset();
+                layer->shaderTransitionActive = false;
+                layer->transitionProgress = 1.0f;
+            }
+        }
+
+        // Compute effective opacity (skip for shader-based A→B — A and B both fully visible)
         float effectiveOpacity = layer->opacity;
-        if (layer->transitionDuration > 0.0f) {
+        if (layer->transitionDuration > 0.0f && !layer->shaderTransitionActive) {
             effectiveOpacity *= layer->transitionProgress;
         }
 
@@ -321,8 +373,16 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
             }
         }
 
+        // If a shader transition is active, blend source A and B via the transition
+        // shader and use that as the layer texture. Falls back to source A on failure.
+        GLuint baseTex = layer->textureId();
+        if (layer->shaderTransitionActive && layer->nextSource) {
+            GLuint ttex = renderLayerShaderTransition(layer);
+            if (ttex) baseTex = ttex;
+        }
+
         // Apply per-layer effects chain
-        GLuint layerTex = applyEffects(layer, layer->textureId());
+        GLuint layerTex = applyEffects(layer, baseTex);
 
         // Combine per-layer masks into a single mask texture (additive union)
         GLuint layerMaskTex = 0;

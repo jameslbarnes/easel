@@ -302,6 +302,64 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
         ImGui::SameLine();
         ImGui::SetNextItemWidth(w);
         namedDrag("##TransDur", "Dur", &layer->transitionDuration, 0.01f, 0.0f, 5.0f, "%.2fs");
+
+        // Shader transition controls: path + source-B picker + trigger
+        if (layer->transitionType == TransitionType::Shader) {
+            static char pathBuf[512];
+            // Sync buffer when layer/path changes so user always sees the current value
+            static const Layer* lastLayer = nullptr;
+            static std::string lastPath;
+            if (lastLayer != layer.get() || lastPath != layer->transitionShaderPath) {
+                std::snprintf(pathBuf, sizeof(pathBuf), "%s", layer->transitionShaderPath.c_str());
+                lastLayer = layer.get();
+                lastPath = layer->transitionShaderPath;
+            }
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            if (ImGui::InputText("##TransShader", pathBuf, sizeof(pathBuf))) {
+                layer->transitionShaderPath = pathBuf;
+                layer->transitionShaderInst.reset(); // force reload
+            }
+            if (ImGui::SmallButton("Dissolve")) {
+                layer->transitionShaderPath = "shaders/transitions/dissolve_noise.fs";
+                layer->transitionShaderInst.reset();
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Wet Paint")) {
+                layer->transitionShaderPath = "shaders/transitions/wet_paint.fs";
+                layer->transitionShaderInst.reset();
+            }
+
+            // Trigger: queue another layer's source as B and start transition
+            if (layerStack) {
+                static int triggerTargetIdx = -1;
+                const char* preview = "<pick source layer>";
+                if (triggerTargetIdx >= 0 && triggerTargetIdx < layerStack->count() &&
+                    (*layerStack)[triggerTargetIdx].get() != layer.get()) {
+                    preview = (*layerStack)[triggerTargetIdx]->name.c_str();
+                }
+                ImGui::SetNextItemWidth(-60.0f);
+                if (ImGui::BeginCombo("##TransB", preview)) {
+                    for (int li = 0; li < layerStack->count(); li++) {
+                        auto other = (*layerStack)[li];
+                        if (!other || other.get() == layer.get() || !other->source) continue;
+                        bool sel = (triggerTargetIdx == li);
+                        if (ImGui::Selectable(other->name.c_str(), sel)) triggerTargetIdx = li;
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::SameLine();
+                bool canTrigger = triggerTargetIdx >= 0 && triggerTargetIdx < layerStack->count()
+                                  && (*layerStack)[triggerTargetIdx].get() != layer.get()
+                                  && (*layerStack)[triggerTargetIdx]->source
+                                  && !layer->transitionShaderPath.empty()
+                                  && !layer->shaderTransitionActive;
+                if (!canTrigger) ImGui::BeginDisabled();
+                if (ImGui::Button("Trigger", ImVec2(-FLT_MIN, 0))) {
+                    layer->startShaderTransition((*layerStack)[triggerTargetIdx]->source);
+                }
+                if (!canTrigger) ImGui::EndDisabled();
+            }
+        }
     }
 
     thinSep();

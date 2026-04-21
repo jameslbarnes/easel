@@ -11,7 +11,7 @@
 #include <string>
 #include <memory>
 
-enum class TransitionType { Fade = 0, WipeLeft, WipeRight, WipeUp, WipeDown, Dissolve, COUNT };
+enum class TransitionType { Fade = 0, WipeLeft, WipeRight, WipeUp, WipeDown, Dissolve, Shader, COUNT };
 
 inline const char* transitionTypeName(TransitionType t) {
     switch (t) {
@@ -21,6 +21,7 @@ inline const char* transitionTypeName(TransitionType t) {
         case TransitionType::WipeUp: return "Wipe Up";
         case TransitionType::WipeDown: return "Wipe Down";
         case TransitionType::Dissolve: return "Dissolve";
+        case TransitionType::Shader: return "Shader";
         default: return "Fade";
     }
 }
@@ -71,6 +72,14 @@ public:
     float transitionProgress = 1.0f;  // 0 = fully out, 1 = fully in
     bool transitionActive = false;
     bool transitionDirection = true;  // true = fading in, false = fading out
+
+    // Shader-based A→B transition (when transitionType == Shader)
+    // Queue a next source + trigger: transition shader blends source (A) with nextSource (B)
+    // over transitionDuration, then source := nextSource and nextSource is cleared.
+    std::string transitionShaderPath; // path to ISF transition shader
+    std::shared_ptr<ContentSource> nextSource; // queued "B" source for shader transition
+    std::shared_ptr<class ShaderSource> transitionShaderInst; // lazy-loaded shader instance
+    bool shaderTransitionActive = false; // distinct from transitionActive (opacity fade)
 
     // Edge feather (0.0 = hard edge, 0.5 = max soft blend)
     float feather = 0.0f;
@@ -123,6 +132,15 @@ public:
     // Content source
     std::shared_ptr<ContentSource> source;
 
+
+    // Kick off a shader-based A→B transition: blend current source with nextSrc
+    // using the ISF shader at transitionShaderPath over transitionDuration.
+    void startShaderTransition(std::shared_ptr<ContentSource> nextSrc) {
+        if (!nextSrc || transitionShaderPath.empty()) return;
+        nextSource = std::move(nextSrc);
+        transitionProgress = 0.0f;
+        shaderTransitionActive = true;
+    }
 
     // Toggle visibility with transition
     void toggleVisibility() {

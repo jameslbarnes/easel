@@ -43,6 +43,7 @@
 #include "app/BPMSync.h"
 #include "app/SceneManager.h"
 #include "app/OSCManager.h"
+#include "timeline/Timeline.h"
 #include "app/MIDIManager.h"
 #include "app/DataBus.h"
 #include "stage/StageView.h"
@@ -120,6 +121,7 @@ private:
     int m_mixerOutputDevice = -1;       // -1 = default output
     BPMSync m_bpmSync;
     SceneManager m_sceneManager;
+    Timeline m_timeline;
     OSCManager m_oscManager;
     MIDIManager m_midiManager;
     // Latest normalized MIDI CC values, indexed [channel][cc]. Updated each frame from polled events.
@@ -236,6 +238,7 @@ private:
     std::vector<RecAudioDevice> m_audioDevices;
     std::vector<RecAudioDevice> m_outputDevices; // render devices for mixer output
     void renderTransportBar();
+    void renderTimelinePanel();
 
     // Audio level meter (WASAPI IAudioMeterInformation)
     void* m_audioMeterInfo = nullptr;
