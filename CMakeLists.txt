@@ -479,3 +479,15 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
     ${CMAKE_SOURCE_DIR}/shaders $<TARGET_FILE_DIR:${PROJECT_NAME}>/shaders
 )
+
+# macOS: ad-hoc codesign the .app bundle after every build so macOS TCC
+# (screen recording, microphone, camera) remembers granted permissions across
+# rebuilds. Without this the binary hash changes each compile and macOS
+# re-prompts every launch.
+if(APPLE)
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND codesign --force --deep --sign - --preserve-metadata=entitlements,requirements,flags,runtime "$<TARGET_BUNDLE_DIR:${PROJECT_NAME}>"
+        COMMENT "Ad-hoc codesigning Easel.app (persists TCC permissions across rebuilds)"
+        VERBATIM
+    )
+endif()

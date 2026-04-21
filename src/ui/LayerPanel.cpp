@@ -150,6 +150,7 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
     ImGui::Begin("Layers");
 
     wantsAddImage = wantsAddVideo = wantsAddShader = false;
+    removedLayerIds.clear();
 
     ImDrawList* draw = ImGui::GetWindowDrawList();
     ImDrawList* fg = ImGui::GetForegroundDrawList();
@@ -582,6 +583,8 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
             ImGui::Separator();
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
             if (ImGui::MenuItem("Delete")) {
+                if (ci >= 0 && ci < stack.count() && stack[ci])
+                    removedLayerIds.push_back(stack[ci]->id);
                 stack.removeLayer(ci);
                 selectedLayer = std::min(selectedLayer, stack.count() - 1);
             }
@@ -593,6 +596,8 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
     // Keyboard shortcuts
     if (!m_renaming && selectedLayer >= 0 && selectedLayer < stack.count() && !ImGui::IsAnyItemActive()) {
         if (ImGui::IsKeyPressed(ImGuiKey_Delete)) {
+            if (selectedLayer >= 0 && selectedLayer < stack.count() && stack[selectedLayer])
+                removedLayerIds.push_back(stack[selectedLayer]->id);
             stack.removeLayer(selectedLayer);
             selectedLayer = std::min(selectedLayer, stack.count() - 1);
         }

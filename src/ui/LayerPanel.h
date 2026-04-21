@@ -16,6 +16,10 @@ public:
     bool wantsAddVideo = false;
     bool wantsAddShader = false;
 
+    // Layer IDs removed during the last render() call — Application consumes these
+    // to notify the Timeline (so orphaned tracks can be cleaned up).
+    std::vector<uint32_t> removedLayerIds;
+
 private:
     // Manual drag state
     bool m_dragActive = false;

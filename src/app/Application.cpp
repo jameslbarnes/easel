@@ -470,6 +470,10 @@ void Application::run() {
             m_audioAnalyzer.update(dt);
             m_audioRMS = m_audioAnalyzer.smoothedRMS();
             m_bpmSync.update(dt);
+
+            // Advance timeline playhead and push clip → layer state before compositing.
+            m_timeline.advance(dt);
+            m_timeline.applyToLayers(m_layerStack);
         }
 
         compositeAndWarp();
@@ -723,7 +727,6 @@ void Application::updateSources() {
                     m_audioAnalyzer.beatDecay(),
                     &m_midiManager
                 );
-                shaderSrc->applyMidiBindings(m_midiCCValues);
                 shaderSrc->setMouseState(normMX, normMY, mousePressed);
 
                 // Refresh image input bindings (texture IDs may change each frame)
@@ -745,6 +748,9 @@ void Application::updateSources() {
             }
 
             layer->source->update();
+            if (layer->shaderTransitionActive && layer->nextSource) {
+                layer->nextSource->update();
+            }
 
             // Auto-crop: detect black borders once when source first has a valid texture
             if (layer->autoCrop && !layer->autoCropDone &&
@@ -1638,6 +1644,11 @@ void Application::renderUI() {
         m_layerPanel.render(m_layerStack, m_selectedLayer, &m_zones, m_activeZone);
     }
 
+    // Clean up orphaned timeline tracks for layers removed during LayerPanel render
+    for (uint32_t rid : m_layerPanel.removedLayerIds) {
+        m_timeline.removeTrackForLayer(rid);
+    }
+
     // Handle "+" button signals from layer panel
     if (m_layerPanel.wantsAddImage) {
         std::string path = openFileDialog("Images\0*.png;*.jpg;*.jpeg;*.bmp;*.tga\0All Files\0*.*\0");
@@ -2090,11 +2101,49 @@ void Application::renderUI() {
             }
         }
 
-        // Scene panel — lists of displays/projectors/surfaces/clusters, docked
-        // on the right so the 3D viewport in the Stage tab gets full height.
-        if (m_ui.isPanelVisible("Scene")) {
-            ImGui::Begin("Scene");
-            m_stageView.renderSceneInspector(zoneTextures);
+        // Unified "Scenes" panel: two tabs — Presets (save/recall) and Stage (3D inspector).
+        if (m_ui.isPanelVisible("Scenes")) {
+            ImGui::Begin("Scenes");
+            if (ImGui::BeginTabBar("##ScenesTabs")) {
+                if (ImGui::BeginTabItem("Presets")) {
+                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1.00f, 1.00f, 1.00f, 0.10f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 1.00f, 1.00f, 0.25f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.00f, 1.00f, 1.00f, 0.40f));
+                    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
+                    if (ImGui::Button("Save Scene", ImVec2(-1, 0))) {
+                        char nm[32];
+                        snprintf(nm, sizeof(nm), "Scene %d", m_sceneManager.count() + 1);
+                        m_sceneManager.saveScene(nm, m_layerStack);
+                    }
+                    ImGui::PopStyleColor(4);
+
+                    int removeIdx = -1;
+                    for (int s = 0; s < m_sceneManager.count(); s++) {
+                        ImGui::PushID(30000 + s);
+                        auto& scene = m_sceneManager[s];
+                        float w = ImGui::GetContentRegionAvail().x - 24;
+                        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.06f, 0.07f, 0.10f, 0.90f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 1.00f, 1.00f, 0.20f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.00f, 1.00f, 1.00f, 0.35f));
+                        if (ImGui::Button(scene.name.c_str(), ImVec2(w, 0))) {
+                            m_sceneManager.recallScene(s, m_layerStack);
+                        }
+                        ImGui::PopStyleColor(3);
+                        ImGui::SameLine();
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.3f, 0.3f, 0.7f));
+                        if (ImGui::SmallButton("x")) removeIdx = s;
+                        ImGui::PopStyleColor();
+                        ImGui::PopID();
+                    }
+                    if (removeIdx >= 0) m_sceneManager.removeScene(removeIdx);
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("Stage")) {
+                    m_stageView.renderSceneInspector(zoneTextures);
+                    ImGui::EndTabItem();
+                }
+                ImGui::EndTabBar();
+            }
             ImGui::End();
         }
     }
@@ -3089,6 +3138,107 @@ void Application::renderUI() {
             m_audioAnalyzer.trebleGain() = 1.0f;
             m_audioAnalyzer.noiseGate() = 0.0f;
         }
+
+#ifdef HAS_FFMPEG
+        // --- Mixer (merged from the old Audio Mixer panel) ---
+        ImGui::Dummy(ImVec2(0, 6));
+        ImGui::SeparatorText("Mixer");
+        if (ImGui::Checkbox("Enable Mixer", &m_mixerEnabled)) {
+            if (m_mixerEnabled) {
+                m_audioAnalyzer.setExternalFeed(true);
+                if (m_audioMixer.inputCount() == 0)
+                    m_audioMixer.addInput("", "System Audio", false);
+                m_audioMixer.start();
+            } else {
+                m_audioMixer.stop();
+                m_audioAnalyzer.setExternalFeed(false);
+            }
+        }
+        if (m_mixerEnabled) {
+            ImGui::Dummy(ImVec2(0, 4));
+            {
+                std::string outName = m_audioMixer.outputDeviceName();
+                if (outName.empty()) outName = "Default Output";
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::BeginCombo("##MixerOut", outName.c_str())) {
+                    if (ImGui::Selectable("Default Output", m_mixerOutputDevice == -1)) {
+                        m_mixerOutputDevice = -1;
+                        m_audioMixer.setOutputDevice("", "Default Output");
+                    }
+                    if (ImGui::Selectable("None (NDI only)", m_mixerOutputDevice == -2)) {
+                        m_mixerOutputDevice = -2;
+                        m_audioMixer.setOutputDevice("__none__", "None");
+                    }
+                    for (int i = 0; i < (int)m_outputDevices.size(); i++) {
+                        ImGui::PushID(i + 1000);
+                        if (ImGui::Selectable(m_outputDevices[i].name.c_str(), m_mixerOutputDevice == i)) {
+                            m_mixerOutputDevice = i;
+                            m_audioMixer.setOutputDevice(m_outputDevices[i].id, m_outputDevices[i].name);
+                        }
+                        ImGui::PopID();
+                    }
+                    ImGui::EndCombo();
+                }
+            }
+            float master = m_audioMixer.masterVolume() * 100.0f;
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::SliderFloat("##Master", &master, 0.0f, 100.0f, "Master  %.0f%%")) {
+                m_audioMixer.setMasterVolume(master / 100.0f);
+            }
+#ifdef HAS_NDI
+            {
+                bool ndiAudio = m_audioMixer.isNDIAudioEnabled();
+                if (ImGui::Checkbox("Send NDI Audio", &ndiAudio)) {
+                    m_audioMixer.setNDIAudioEnabled(ndiAudio);
+                }
+                if (ndiAudio) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(Easel Audio)");
+                }
+            }
+#endif
+            ImGui::Separator();
+            int numInputs = m_audioMixer.inputCount();
+            for (int i = 0; i < numInputs; i++) {
+                ImGui::PushID(i + 2000);
+                std::string iname = m_audioMixer.inputName(i);
+                if (iname.empty()) iname = "Input " + std::to_string(i);
+                bool muted = m_audioMixer.isInputMuted(i);
+                if (ImGui::Checkbox("##mute", &muted)) {
+                    m_audioMixer.setInputMuted(i, muted);
+                }
+                ImGui::SameLine();
+                float vol = m_audioMixer.inputVolume(i) * 100.0f;
+                ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 30);
+                if (ImGui::SliderFloat(("##vol" + std::to_string(i)).c_str(), &vol, 0.0f, 100.0f, (iname + "  %.0f%%").c_str())) {
+                    m_audioMixer.setInputVolume(i, vol / 100.0f);
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("X")) {
+                    m_audioMixer.removeInput(i);
+                }
+                ImGui::PopID();
+            }
+            ImGui::Dummy(ImVec2(0, 2));
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::BeginCombo("##AddInput", "+ Add Input")) {
+                for (int i = 0; i < (int)m_audioDevices.size(); i++) {
+                    ImGui::PushID(i + 3000);
+                    if (ImGui::Selectable(m_audioDevices[i].name.c_str())) {
+                        m_audioMixer.addInput(m_audioDevices[i].id,
+                                              m_audioDevices[i].name,
+                                              m_audioDevices[i].isCapture);
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::EndCombo();
+            }
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+            ImGui::TextWrapped("Enable the mixer to blend multiple audio inputs and route to an output device.");
+            ImGui::PopStyleColor();
+        }
+#endif
     }
     ImGui::End();
     }  // end Audio visibility guard
@@ -3262,168 +3412,315 @@ void Application::renderUI() {
     }
 #endif
 
-    // Audio Mixer panel
+    // Audio Mixer panel merged into Audio; transport bar renders below.
 #ifdef HAS_FFMPEG
-    if (m_ui.isPanelVisible("Audio Mixer")) {
-    ImGui::Begin("Audio Mixer");
-    {
-        // Enable/disable toggle
-        if (ImGui::Checkbox("Enable Mixer", &m_mixerEnabled)) {
-            if (m_mixerEnabled) {
-                m_audioAnalyzer.setExternalFeed(true);
-                if (m_audioMixer.inputCount() == 0)
-                    m_audioMixer.addInput("", "System Audio", false);
-                m_audioMixer.start();
-            } else {
-                m_audioMixer.stop();
-                m_audioAnalyzer.setExternalFeed(false);
-            }
-        }
-
-        if (m_mixerEnabled) {
-            ImGui::Dummy(ImVec2(0, 4));
-
-            // Output device selector
-            {
-                std::string outName = m_audioMixer.outputDeviceName();
-                if (outName.empty()) outName = "Default Output";
-                ImGui::SetNextItemWidth(-1);
-                if (ImGui::BeginCombo("##MixerOut", outName.c_str())) {
-                    if (ImGui::Selectable("Default Output", m_mixerOutputDevice == -1)) {
-                        m_mixerOutputDevice = -1;
-                        m_audioMixer.setOutputDevice("", "Default Output");
-                    }
-                    if (ImGui::Selectable("None (NDI only)", m_mixerOutputDevice == -2)) {
-                        m_mixerOutputDevice = -2;
-                        m_audioMixer.setOutputDevice("__none__", "None");
-                    }
-                    for (int i = 0; i < (int)m_outputDevices.size(); i++) {
-                        ImGui::PushID(i + 1000);
-                        if (ImGui::Selectable(m_outputDevices[i].name.c_str(), m_mixerOutputDevice == i)) {
-                            m_mixerOutputDevice = i;
-                            m_audioMixer.setOutputDevice(m_outputDevices[i].id, m_outputDevices[i].name);
-                        }
-                        ImGui::PopID();
-                    }
-                    ImGui::EndCombo();
-                }
-            }
-
-            // Master volume
-            float master = m_audioMixer.masterVolume() * 100.0f;
-            ImGui::SetNextItemWidth(-1);
-            if (ImGui::SliderFloat("##Master", &master, 0.0f, 100.0f, "Master  %.0f%%")) {
-                m_audioMixer.setMasterVolume(master / 100.0f);
-            }
-
-            // NDI audio output toggle
-#ifdef HAS_NDI
-            {
-                bool ndiAudio = m_audioMixer.isNDIAudioEnabled();
-                if (ImGui::Checkbox("Send NDI Audio", &ndiAudio)) {
-                    m_audioMixer.setNDIAudioEnabled(ndiAudio);
-                }
-                if (ndiAudio) {
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("(Easel Audio)");
-                }
-            }
-#endif
-
-            ImGui::Separator();
-
-            // Per-input channel strips
-            int numInputs = m_audioMixer.inputCount();
-            for (int i = 0; i < numInputs; i++) {
-                ImGui::PushID(i + 2000);
-                std::string iname = m_audioMixer.inputName(i);
-                if (iname.empty()) iname = "Input " + std::to_string(i);
-
-                // Mute checkbox
-                bool muted = m_audioMixer.isInputMuted(i);
-                if (ImGui::Checkbox("##mute", &muted)) {
-                    m_audioMixer.setInputMuted(i, muted);
-                }
-                ImGui::SameLine();
-
-                // Volume slider
-                float vol = m_audioMixer.inputVolume(i) * 100.0f;
-                ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 30);
-                if (ImGui::SliderFloat(("##vol" + std::to_string(i)).c_str(), &vol, 0.0f, 100.0f, (iname + "  %.0f%%").c_str())) {
-                    m_audioMixer.setInputVolume(i, vol / 100.0f);
-                }
-                ImGui::SameLine();
-                if (ImGui::SmallButton("X")) {
-                    m_audioMixer.removeInput(i);
-                }
-                ImGui::PopID();
-            }
-
-            // Add input
-            ImGui::Dummy(ImVec2(0, 2));
-            ImGui::SetNextItemWidth(-1);
-            if (ImGui::BeginCombo("##AddInput", "+ Add Input")) {
-                for (int i = 0; i < (int)m_audioDevices.size(); i++) {
-                    ImGui::PushID(i + 3000);
-                    if (ImGui::Selectable(m_audioDevices[i].name.c_str())) {
-                        m_audioMixer.addInput(m_audioDevices[i].id,
-                                              m_audioDevices[i].name,
-                                              m_audioDevices[i].isCapture);
-                    }
-                    ImGui::PopID();
-                }
-                ImGui::EndCombo();
-            }
-        } else {
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-            ImGui::TextWrapped("Enable the mixer to blend multiple audio inputs and route to an output device.");
-            ImGui::PopStyleColor();
-        }
-    }
-    ImGui::End();
-    }  // end Audio Mixer visibility guard
-
     renderTransportBar();
 #endif
 
-    // Scenes panel — save / recall presets. Moved out of Properties so
-    // Properties only shows selected-layer content.
-    if (m_ui.isPanelVisible("Scenes")) {
-        ImGui::Begin("Scenes");
-        {
-            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1.00f, 1.00f, 1.00f, 0.10f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 1.00f, 1.00f, 0.25f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.00f, 1.00f, 1.00f, 0.40f));
-            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
-            if (ImGui::Button("Save Scene", ImVec2(-1, 0))) {
-                char nm[32];
-                snprintf(nm, sizeof(nm), "Scene %d", m_sceneManager.count() + 1);
-                m_sceneManager.saveScene(nm, m_layerStack);
-            }
-            ImGui::PopStyleColor(4);
-
-            int removeIdx = -1;
-            for (int s = 0; s < m_sceneManager.count(); s++) {
-                ImGui::PushID(30000 + s);
-                auto& scene = m_sceneManager[s];
-                float w = ImGui::GetContentRegionAvail().x - 24;
-                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.06f, 0.07f, 0.10f, 0.90f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 1.00f, 1.00f, 0.20f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.00f, 1.00f, 1.00f, 0.35f));
-                if (ImGui::Button(scene.name.c_str(), ImVec2(w, 0))) {
-                    m_sceneManager.recallScene(s, m_layerStack);
-                }
-                ImGui::PopStyleColor(3);
-                ImGui::SameLine();
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.3f, 0.3f, 0.7f));
-                if (ImGui::SmallButton("x")) removeIdx = s;
-                ImGui::PopStyleColor();
-                ImGui::PopID();
-            }
-            if (removeIdx >= 0) m_sceneManager.removeScene(removeIdx);
-        }
-        ImGui::End();
+    // Timeline panel — shows per-layer tracks with clips along a time ruler.
+    // Single playhead, linear time, clip-on-track model (AE/Resolume style).
+    if (m_ui.isPanelVisible("Timeline")) {
+        renderTimelinePanel();
     }
+
+    // Scenes panel now renders in the Stage-view scope above (where zoneTextures is live).
+}
+
+// Minimal show-programming timeline UI. Transport + ruler + per-layer tracks.
+// Interactions: click ruler to seek, drag playhead to scrub, drag clip body to
+// move, drag clip edges to trim, "+Clip" adds a 5-second clip at the playhead.
+void Application::renderTimelinePanel() {
+    // Generous inner padding so the ruler and tracks don't kiss the window edges.
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(20, 14));
+    ImGui::Begin("Timeline");
+    ImGui::PopStyleVar();
+
+    // Keyboard shortcuts (only when the Timeline window is focused)
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Space)) m_timeline.togglePlay();
+        if (ImGui::IsKeyPressed(ImGuiKey_Home))  m_timeline.seek(0.0);
+        if (ImGui::IsKeyPressed(ImGuiKey_End))   m_timeline.seek(m_timeline.duration());
+    }
+
+    // --- Layout constants (shared with ruler + tracks so everything aligns) ---
+    const float labelW   = 120.0f;   // track-name / mute-solo column width
+    const float trackH   = 36.0f;
+    const float rulerH   = 20.0f;
+
+    // --- Transport row — shifted to align with the ruler region so the timeline
+    //     reads as one vertical stack instead of ruler-indented-from-transport.
+    {
+        // Icon buttons: drawn with ImDrawList so glyph coverage is never a factor.
+        auto iconBtn = [&](const char* id, int kind, bool active = false) -> bool {
+            // kind: 0 = play ▶, 1 = pause ‖, 2 = stop ■, 3 = loop ↻
+            ImVec2 size(28, 22);
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            bool clicked = ImGui::InvisibleButton(id, size);
+            bool hov = ImGui::IsItemHovered();
+            ImDrawList* d = ImGui::GetWindowDrawList();
+            ImU32 bg = active ? IM_COL32(255, 255, 255, 36)
+                     : hov    ? IM_COL32(255, 255, 255, 22)
+                              : IM_COL32(255, 255, 255, 10);
+            ImU32 fg = IM_COL32(235, 238, 244, 240);
+            d->AddRectFilled(p, ImVec2(p.x + size.x, p.y + size.y), bg, 6.0f);
+            float cx = p.x + size.x * 0.5f;
+            float cy = p.y + size.y * 0.5f;
+            if (kind == 0) {
+                // Play — right-pointing triangle
+                d->AddTriangleFilled(ImVec2(cx - 3, cy - 5),
+                                     ImVec2(cx + 5, cy),
+                                     ImVec2(cx - 3, cy + 5), fg);
+            } else if (kind == 1) {
+                // Pause — two vertical bars
+                d->AddRectFilled(ImVec2(cx - 4, cy - 5), ImVec2(cx - 1, cy + 5), fg, 1.0f);
+                d->AddRectFilled(ImVec2(cx + 1, cy - 5), ImVec2(cx + 4, cy + 5), fg, 1.0f);
+            } else if (kind == 2) {
+                // Stop — filled square
+                d->AddRectFilled(ImVec2(cx - 4, cy - 4), ImVec2(cx + 4, cy + 4), fg, 1.0f);
+            } else if (kind == 3) {
+                // Loop — circular arrow approximation (arc + arrow head)
+                d->PathArcTo(ImVec2(cx, cy), 5.0f, -2.8f, 2.0f, 20);
+                d->PathStroke(fg, 0, 1.6f);
+                // arrow head
+                d->AddTriangleFilled(ImVec2(cx + 5, cy - 1),
+                                     ImVec2(cx + 2, cy - 4),
+                                     ImVec2(cx + 7, cy - 4), fg);
+            }
+            return clicked;
+        };
+
+        // Transport sits flush-left against the window padding — same left edge
+        // as the REC / output-route buttons in the bottom transport bar.
+        bool playing = m_timeline.isPlaying();
+        if (iconBtn("##PlayPause", playing ? 1 : 0, playing)) m_timeline.togglePlay();
+        ImGui::SameLine();
+        if (iconBtn("##Stop", 2)) m_timeline.stop();
+        ImGui::SameLine();
+        bool loop = m_timeline.looping();
+        if (iconBtn("##Loop", 3, loop)) m_timeline.setLooping(!loop);
+
+        ImGui::SameLine(0, 16);
+        double ph = m_timeline.playhead();
+        int pm = (int)ph / 60, ps = (int)ph % 60;
+        double dur = m_timeline.duration();
+        int dm = (int)dur / 60, ds = (int)dur % 60;
+        ImGui::Text("%02d:%02d / %02d:%02d", pm, ps, dm, ds);
+
+        ImGui::SameLine(0, 16);
+        ImGui::TextDisabled("Dur");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(72);
+        float dsec = (float)m_timeline.duration();
+        if (ImGui::DragFloat("##Dur", &dsec, 1.0f, 1.0f, 3600.0f * 4.0f, "%.0fs")) {
+            m_timeline.setDuration((double)dsec);
+        }
+    }
+
+    ImGui::Dummy(ImVec2(0, 6));
+
+    // --- Track list header: full-width ghost button, flush-left like the transport.
+    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.18f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.0f, 1.0f, 1.0f, 0.28f));
+    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.0f, 1.0f, 1.0f, 0.92f));
+    if (ImGui::Button("+ Track for each layer", ImVec2(-FLT_MIN, 0))) {
+        for (int i = 0; i < m_layerStack.count(); i++) {
+            auto l = m_layerStack[i];
+            if (!l || l->id == 0) continue;
+            if (!m_timeline.findTrack(l->id)) m_timeline.ensureTrack(l->id, l->name);
+        }
+    }
+    ImGui::PopStyleColor(4);
+    ImGui::Dummy(ImVec2(0, 4));
+
+    // --- Ruler + tracks area ---
+    float availW = ImGui::GetContentRegionAvail().x;
+    float trackAreaW = availW - labelW - 4.0f;
+    if (trackAreaW < 50.0f) trackAreaW = 50.0f;
+
+    double duration = m_timeline.duration();
+    double playhead = m_timeline.playhead();
+    auto timeToX = [&](double t) {
+        return (float)(t / duration) * trackAreaW;
+    };
+    auto xToTime = [&](float x) {
+        return (double)(x / trackAreaW) * duration;
+    };
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    // Ruler row
+    ImVec2 rulerOrigin = ImGui::GetCursorScreenPos();
+    rulerOrigin.x += labelW + 4.0f;
+    ImGui::Dummy(ImVec2(availW, rulerH));
+    // Background
+    dl->AddRectFilled(rulerOrigin, ImVec2(rulerOrigin.x + trackAreaW, rulerOrigin.y + rulerH),
+                      IM_COL32(30, 34, 42, 255));
+    // Tick marks — adaptive: pick interval so ~10-12 major ticks fit
+    double majorInterval = 10.0;
+    while (duration / majorInterval > 18.0) majorInterval *= 2.0;
+    while (duration / majorInterval < 6.0 && majorInterval > 1.0) majorInterval *= 0.5;
+    for (double t = 0; t <= duration + 0.01; t += majorInterval) {
+        float x = rulerOrigin.x + timeToX(t);
+        dl->AddLine(ImVec2(x, rulerOrigin.y + rulerH - 6),
+                    ImVec2(x, rulerOrigin.y + rulerH),
+                    IM_COL32(180, 190, 210, 200));
+        char lbl[16]; snprintf(lbl, sizeof(lbl), "%d:%02d", (int)t / 60, (int)t % 60);
+        dl->AddText(ImVec2(x + 2, rulerOrigin.y + 2), IM_COL32(170, 180, 200, 220), lbl);
+    }
+    // Ruler interaction: click/drag to seek.
+    ImGui::SetCursorScreenPos(rulerOrigin);
+    ImGui::InvisibleButton("##TL_Ruler", ImVec2(trackAreaW, rulerH));
+    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(0, 0.0f)) {
+        float mx = ImGui::GetIO().MousePos.x - rulerOrigin.x;
+        m_timeline.seek(xToTime(mx));
+    } else if (ImGui::IsItemClicked()) {
+        float mx = ImGui::GetIO().MousePos.x - rulerOrigin.x;
+        m_timeline.seek(xToTime(mx));
+    }
+
+    // Clip drag state — track → clip id + drag mode (0 move, 1 left trim, 2 right trim)
+    static uint32_t dragLayerId = 0, dragClipId = 0;
+    static int dragMode = 0;
+    static double dragStartTime = 0, dragStartDur = 0;
+    static ImVec2 dragAnchor(0, 0);
+
+    // --- Track rows ---
+    for (auto& track : m_timeline.tracks()) {
+        ImGui::PushID((int)track.layerId);
+        ImVec2 rowOrigin = ImGui::GetCursorScreenPos();
+        float rowY = rowOrigin.y;
+
+        // Label column (left)
+        dl->AddRectFilled(rowOrigin, ImVec2(rowOrigin.x + labelW, rowY + trackH),
+                          IM_COL32(24, 28, 36, 255));
+        dl->AddText(ImVec2(rowOrigin.x + 6, rowY + 4),
+                    track.muted ? IM_COL32(110, 110, 120, 200) : IM_COL32(220, 225, 235, 255),
+                    track.name.empty() ? "Layer" : track.name.c_str());
+
+        // Mute / Solo mini buttons (below name)
+        ImGui::SetCursorScreenPos(ImVec2(rowOrigin.x + 4, rowY + trackH - 18));
+        if (ImGui::SmallButton(track.muted ? "M*" : "M")) track.muted = !track.muted;
+        ImGui::SameLine();
+        if (ImGui::SmallButton(track.solo ? "S*" : "S")) track.solo = !track.solo;
+        ImGui::SameLine();
+        if (ImGui::SmallButton("+Clip")) {
+            m_timeline.addClip(track.layerId, m_timeline.playhead(), 5.0, track.name);
+        }
+
+        // Track area (right)
+        ImVec2 taOrigin = ImVec2(rowOrigin.x + labelW + 4.0f, rowY);
+        ImGui::SetCursorScreenPos(taOrigin);
+        ImGui::InvisibleButton("##track", ImVec2(trackAreaW, trackH));
+        dl->AddRectFilled(taOrigin, ImVec2(taOrigin.x + trackAreaW, rowY + trackH),
+                          IM_COL32(18, 20, 26, 255));
+
+        // Clips
+        for (auto& clip : track.clips) {
+            float x0 = taOrigin.x + timeToX(clip.startTime);
+            float x1 = taOrigin.x + timeToX(clip.endTime());
+            if (x1 - x0 < 2.0f) x1 = x0 + 2.0f;
+            ImVec2 a(x0, rowY + 4), b(x1, rowY + trackH - 4);
+            bool selected = (dragLayerId == track.layerId && dragClipId == clip.id);
+            ImU32 fill = selected ? IM_COL32(90, 170, 220, 220) : IM_COL32(60, 120, 170, 200);
+            dl->AddRectFilled(a, b, fill, 3.0f);
+            dl->AddRect(a, b, IM_COL32(200, 220, 240, 255), 3.0f, 0, 1.5f);
+            {
+                char dlbl[64];
+                if (clip.name.empty()) snprintf(dlbl, sizeof(dlbl), "%.1fs", clip.duration);
+                else snprintf(dlbl, sizeof(dlbl), "%s (%.1fs)", clip.name.c_str(), clip.duration);
+                dl->AddText(ImVec2(x0 + 4, rowY + 7), IM_COL32(255, 255, 255, 240), dlbl);
+            }
+
+            // Hit-test for drag start on the invisible-button above
+            if (ImGui::IsMouseHoveringRect(a, b) && ImGui::IsItemHovered()
+                && ImGui::IsMouseClicked(0) && dragClipId == 0) {
+                float mx = ImGui::GetIO().MousePos.x;
+                int mode = 0;
+                if (mx < x0 + 6.0f) mode = 1;        // left trim
+                else if (mx > x1 - 6.0f) mode = 2;   // right trim
+                else mode = 0;                        // move
+                dragLayerId = track.layerId;
+                dragClipId = clip.id;
+                dragMode = mode;
+                dragStartTime = clip.startTime;
+                dragStartDur = clip.duration;
+                dragAnchor = ImGui::GetIO().MousePos;
+            }
+        }
+
+        // Right-click on empty track area → add clip at mouse
+        if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(1)) {
+            float mx = ImGui::GetIO().MousePos.x - taOrigin.x;
+            double t = xToTime(mx);
+            m_timeline.addClip(track.layerId, t, 5.0, track.name);
+        }
+        ImGui::PopID();
+    }
+
+    // Apply drag state
+    if (dragClipId != 0) {
+        // If the drag target was removed mid-drag (e.g. user deleted the layer
+        // or the clip), bail out so the UI doesn't stay wedged in drag mode.
+        if (!m_timeline.findClip(dragLayerId, dragClipId)) {
+            dragLayerId = dragClipId = 0;
+            dragMode = 0;
+        } else if (ImGui::IsMouseReleased(0)) {
+            dragLayerId = dragClipId = 0;
+            dragMode = 0;
+        } else {
+            float dx = ImGui::GetIO().MousePos.x - dragAnchor.x;
+            double dt = xToTime(dx) - xToTime(0.0f); // pixels → seconds
+            if (auto* clip = m_timeline.findClip(dragLayerId, dragClipId)) {
+                // Playhead snap: pull within 6px to the playhead time.
+                double ph = m_timeline.playhead();
+                auto maybeSnap = [&](double& t) {
+                    float dxp = timeToX(t) - timeToX(ph);
+                    if (std::abs(dxp) < 6.0f) t = ph;
+                };
+                if (dragMode == 0) { // move
+                    clip->startTime = dragStartTime + dt;
+                    if (clip->startTime < 0) clip->startTime = 0;
+                    maybeSnap(clip->startTime);
+                } else if (dragMode == 1) { // left trim
+                    double newStart = dragStartTime + dt;
+                    double newDur = dragStartDur - dt;
+                    if (newDur < 0.1) { newDur = 0.1; newStart = dragStartTime + dragStartDur - 0.1; }
+                    if (newStart < 0) { newDur -= (0.0 - newStart); newStart = 0; }
+                    clip->startTime = newStart;
+                    clip->duration = newDur;
+                    maybeSnap(clip->startTime);
+                } else if (dragMode == 2) { // right trim
+                    double newDur = dragStartDur + dt;
+                    if (newDur < 0.1) newDur = 0.1;
+                    clip->duration = newDur;
+                    double e = clip->startTime + clip->duration;
+                    maybeSnap(e);
+                    clip->duration = e - clip->startTime;
+                    if (clip->duration < 0.1) clip->duration = 0.1;
+                }
+                m_timeline.sortTrack(dragLayerId);
+            }
+        }
+    }
+
+    // --- Playhead line (drawn on top) ---
+    {
+        float phX = rulerOrigin.x + timeToX(playhead);
+        float phY0 = rulerOrigin.y;
+        float phY1 = ImGui::GetCursorScreenPos().y + 4.0f;
+        dl->AddLine(ImVec2(phX, phY0), ImVec2(phX, phY1),
+                    IM_COL32(255, 200, 60, 230), 2.0f);
+        // Playhead triangle handle on ruler
+        dl->AddTriangleFilled(ImVec2(phX - 6, phY0),
+                              ImVec2(phX + 6, phY0),
+                              ImVec2(phX, phY0 + 10),
+                              IM_COL32(255, 200, 60, 255));
+        // Timecode readout is already shown in the transport row above — no
+        // second label here. (Drawing it over the ruler collided with tick labels.)
+    }
+
+    ImGui::End();
 }
 
 #ifdef HAS_FFMPEG
@@ -3635,8 +3932,7 @@ void Application::renderTransportBar() {
             m_recorder.setAudioDevice(m_selectedAudioDevice);
             m_recorder.start(fname, zone.warpFBO.width(), zone.warpFBO.height(), 30);
         }
-        // Rec dot
-        draw->AddCircleFilled(ImVec2(curX + 14, cy + btnH * 0.5f), 4.0f, kRed);
+        // Idle: the button's red text is enough; no extra dot (it overlapped the label).
     } else {
         // Recording active: show timer + stop
         float pulse = 0.5f + 0.5f * sinf(time * 4.0f);
@@ -3776,7 +4072,10 @@ void Application::renderMenuBar() {
             if (ImGui::MenuItem("New Project")) {
                 m_undoStack.pushState(m_layerStack, m_selectedLayer);
                 while (m_layerStack.count() > 0) {
-                    m_layerStack.removeLayer(m_layerStack.count() - 1);
+                    int li = m_layerStack.count() - 1;
+                    uint32_t rid = m_layerStack[li] ? m_layerStack[li]->id : 0;
+                    m_layerStack.removeLayer(li);
+                    if (rid) m_timeline.removeTrackForLayer(rid);
                 }
                 m_selectedLayer = -1;
                 // Reset mappings, masks, and zones to defaults
@@ -3858,7 +4157,10 @@ void Application::renderMenuBar() {
         if (ImGui::BeginMenu("Layer")) {
             if (ImGui::MenuItem("Remove Selected") && m_selectedLayer >= 0) {
                 m_undoStack.pushState(m_layerStack, m_selectedLayer);
+                uint32_t rid = (m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count() && m_layerStack[m_selectedLayer])
+                    ? m_layerStack[m_selectedLayer]->id : 0;
                 m_layerStack.removeLayer(m_selectedLayer);
+                if (rid) m_timeline.removeTrackForLayer(rid);
                 m_selectedLayer = std::min(m_selectedLayer, m_layerStack.count() - 1);
             }
             if (ImGui::MenuItem("Move Up") && m_selectedLayer < m_layerStack.count() - 1) {
@@ -4448,9 +4750,18 @@ void Application::saveProject(const std::string& path) {
             layerJson["masks"] = masksJson;
         }
 
+        // Transition fields (opacity fade + shader-based A→B swap)
+        layerJson["transitionType"] = (int)layer->transitionType;
+        layerJson["transitionDuration"] = layer->transitionDuration;
+        if (!layer->transitionShaderPath.empty())
+            layerJson["transitionShaderPath"] = layer->transitionShaderPath;
+
         layers.push_back(layerJson);
     }
     j["layers"] = layers;
+
+    // Timeline: tracks, clips, playhead, duration, loop.
+    j["timeline"] = m_timeline.toJson();
 
     // Save layer groups
     if (!m_layerStack.groups().empty()) {
@@ -4493,7 +4804,9 @@ void Application::loadProject(const std::string& path) {
 
     // Clear current state
     while (m_layerStack.count() > 0) {
+        uint32_t rid = m_layerStack[0] ? m_layerStack[0]->id : 0;
         m_layerStack.removeLayer(0);
+        if (rid) m_timeline.removeTrackForLayer(rid);
     }
     m_selectedLayer = -1;
 
@@ -4741,6 +5054,11 @@ void Application::loadProject(const std::string& path) {
             layer->shaderWidth = layerJson.value("shaderWidth", 0);
             layer->shaderHeight = layerJson.value("shaderHeight", 0);
             layer->groupId = layerJson.value("groupId", (uint32_t)0);
+            // Transition fields
+            if (layerJson.contains("transitionType"))
+                layer->transitionType = (TransitionType)layerJson["transitionType"].get<int>();
+            layer->transitionDuration = layerJson.value("transitionDuration", 0.5f);
+            layer->transitionShaderPath = layerJson.value("transitionShaderPath", std::string{});
 #ifdef HAS_NDI
             layer->ndiEnabled = layerJson.value("ndiEnabled", false);
 #endif
@@ -4868,6 +5186,13 @@ void Application::loadProject(const std::string& path) {
         if (m_layerStack[i]->id == 0) {
             m_layerStack[i]->id = m_nextLayerId++;
         }
+    }
+
+    // Timeline (must come AFTER layer IDs are assigned so track.layerId resolves).
+    if (j.contains("timeline")) {
+        m_timeline.fromJson(j["timeline"]);
+    } else {
+        m_timeline.clear();
     }
 
     // Restore image input bindings (must happen after all layers are loaded)
