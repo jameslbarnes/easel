@@ -36,6 +36,11 @@ struct ISFInput {
 
     // Text default
     std::string defaultText;
+
+    // Long (enum) — parallel arrays for VALUES and LABELS so the UI can show
+    // named pills instead of a numeric slider when labels are present.
+    std::vector<int>         longValues;
+    std::vector<std::string> longLabels;
 };
 
 // Ping-pong FBO pair for persistent ISF pass buffers

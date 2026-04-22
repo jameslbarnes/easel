@@ -38,6 +38,354 @@ static bool accentBtn(const char* label, float w = 0) {
     return c;
 }
 
+// Large bold section header with chevron; click anywhere in the row to toggle.
+// Returns true when the section is OPEN (content should be drawn).
+static bool sectionHeader(const char* label, bool* open) {
+    ImGui::Dummy(ImVec2(0, 4));
+    ImVec2 rowStart = ImGui::GetCursorScreenPos();
+    float rowW  = ImGui::GetContentRegionAvail().x;
+    float rowH  = ImGui::GetFontSize() + 8.0f;
+    ImGui::PushID(label);
+    bool clicked = ImGui::InvisibleButton("##sec", ImVec2(rowW, rowH));
+    bool hovered = ImGui::IsItemHovered();
+    ImGui::PopID();
+    if (clicked && open) *open = !*open;
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    // Label, slightly brighter on hover.
+    ImU32 textCol = hovered ? IM_COL32(255, 255, 255, 255)
+                            : IM_COL32(235, 240, 250, 240);
+    dl->AddText(ImVec2(rowStart.x, rowStart.y + 4), textCol, label);
+    // Right-aligned chevron (▼ open / ▶ closed) drawn as a triangle.
+    float chevCx = rowStart.x + rowW - 10.0f;
+    float chevCy = rowStart.y + rowH * 0.5f;
+    ImU32 chevCol = IM_COL32(160, 170, 190, 220);
+    if (open && *open) {
+        dl->AddTriangleFilled(ImVec2(chevCx - 4, chevCy - 2),
+                              ImVec2(chevCx + 4, chevCy - 2),
+                              ImVec2(chevCx,     chevCy + 3), chevCol);
+    } else {
+        dl->AddTriangleFilled(ImVec2(chevCx - 2, chevCy - 4),
+                              ImVec2(chevCx - 2, chevCy + 4),
+                              ImVec2(chevCx + 3, chevCy),     chevCol);
+    }
+    // Hairline under the header.
+    dl->AddLine(ImVec2(rowStart.x, rowStart.y + rowH + 1),
+                ImVec2(rowStart.x + rowW, rowStart.y + rowH + 1),
+                IM_COL32(255, 255, 255, 18));
+    ImGui::Dummy(ImVec2(0, 6));
+    return open ? *open : true;
+}
+
+// Horizontal pill-group selector: active pill is filled, others are outlined.
+// Returns the newly-selected index, or `current` if nothing changed.
+static int pillGroup(const char* id, const char* const* labels, int count, int current) {
+    ImGui::PushID(id);
+    int result = current;
+    ImGui::Dummy(ImVec2(0, 4)); // breathing room above the row
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 100.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12, 5));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6, 8));
+    float avail = ImGui::GetContentRegionAvail().x;
+    float rowX  = 0.0f;
+    for (int i = 0; i < count; i++) {
+        bool active = (i == current);
+        ImVec2 sz = ImGui::CalcTextSize(labels[i]);
+        float w = sz.x + 24.0f;
+        if (rowX > 0 && rowX + w > avail) {
+            ImGui::NewLine();
+            rowX = 0;
+        } else if (i > 0) {
+            ImGui::SameLine();
+        }
+        if (active) {
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1.0f, 1.0f, 1.0f, 0.95f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.0f, 1.0f, 1.0f, 0.85f));
+            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.06f, 0.07f, 0.10f, 1.0f));
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1.0f, 1.0f, 1.0f, 0.06f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.14f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.0f, 1.0f, 1.0f, 0.22f));
+            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.82f, 0.85f, 0.90f, 1.0f));
+        }
+        if (ImGui::Button(labels[i])) result = i;
+        ImGui::PopStyleColor(4);
+        rowX += w + 6.0f;
+    }
+    ImGui::PopStyleVar(3);
+    ImGui::Dummy(ImVec2(0, 6)); // breathing room below the row
+    ImGui::PopID();
+    return result;
+}
+
+// Soft pill slider: label-left, value-right, thin pill track, circular handle.
+// Draws on its own row, full width. Shift to snap to 0.05.
+static bool pillSlider(const char* label, float* v, float lo, float hi,
+                       const char* fmt = "%.2f") {
+    ImGui::PushID(label);
+    ImGui::Dummy(ImVec2(0, 6)); // top padding
+    float w = ImGui::GetContentRegionAvail().x;
+    ImVec2 rowStart = ImGui::GetCursorScreenPos();
+    float labelH = ImGui::GetFontSize();
+    float trackH = 6.0f;
+    float handleR = 8.0f;
+    float rowH = labelH + 16.0f;
+
+    // Label + value row (drawn via drawlist so we control exact positions)
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    char valbuf[32]; snprintf(valbuf, sizeof(valbuf), fmt, *v);
+    ImVec2 valSize = ImGui::CalcTextSize(valbuf);
+    dl->AddText(rowStart, IM_COL32(170, 175, 185, 220), label);
+    dl->AddText(ImVec2(rowStart.x + w - valSize.x, rowStart.y),
+                IM_COL32(235, 240, 250, 245), valbuf);
+
+    // Track interaction (invisible button under the track region)
+    float trackY = rowStart.y + labelH + 8.0f;
+    ImGui::SetCursorScreenPos(ImVec2(rowStart.x, trackY - 6.0f));
+    bool pressed = ImGui::InvisibleButton("##track", ImVec2(w, trackH + 12.0f));
+    bool active  = ImGui::IsItemActive();
+    bool hovered = ImGui::IsItemHovered();
+    bool changed = false;
+    if (active || pressed) {
+        float mx = ImGui::GetIO().MousePos.x - rowStart.x;
+        float t = mx / w; if (t < 0) t = 0; if (t > 1) t = 1;
+        float newV = lo + t * (hi - lo);
+        if (ImGui::GetIO().KeyShift) newV = std::round(newV / 0.05f) * 0.05f;
+        if (newV != *v) { *v = newV; changed = true; }
+    }
+    float norm = (hi > lo) ? (*v - lo) / (hi - lo) : 0.0f;
+    if (norm < 0) norm = 0; if (norm > 1) norm = 1;
+
+    // Track background (dim) + fill (subtle)
+    dl->AddRectFilled(ImVec2(rowStart.x, trackY),
+                      ImVec2(rowStart.x + w, trackY + trackH),
+                      IM_COL32(255, 255, 255, 14), trackH * 0.5f);
+    dl->AddRectFilled(ImVec2(rowStart.x, trackY),
+                      ImVec2(rowStart.x + w * norm + 0.5f, trackY + trackH),
+                      IM_COL32(255, 255, 255, 44), trackH * 0.5f);
+    // Handle
+    float hx = rowStart.x + w * norm;
+    float hy = trackY + trackH * 0.5f;
+    ImU32 handleCol = active ? IM_COL32(255, 255, 255, 255)
+                    : hovered ? IM_COL32(240, 244, 252, 255)
+                              : IM_COL32(220, 225, 235, 255);
+    dl->AddCircleFilled(ImVec2(hx, hy), handleR, handleCol);
+    dl->AddCircle(ImVec2(hx, hy), handleR, IM_COL32(0, 0, 0, 110), 0, 1.2f);
+
+    // Place cursor after the row so subsequent widgets flow below, plus a
+    // little extra breathing room.
+    ImGui::SetCursorScreenPos(ImVec2(rowStart.x, rowStart.y + rowH + 8.0f));
+    ImGui::PopID();
+    return changed;
+}
+
+// Draw a small lightning-bolt glyph inside a square at (x,y) with size s.
+// Two overlapping triangles produce a classic ⚡ silhouette.
+static void drawBolt(ImDrawList* dl, float cx, float cy, float s, ImU32 col) {
+    float h = s * 0.5f;
+    // Top arm (slants up-right)
+    dl->AddTriangleFilled(ImVec2(cx + h * 0.55f, cy - h),
+                          ImVec2(cx - h * 0.55f, cy + h * 0.15f),
+                          ImVec2(cx + h * 0.15f, cy + h * 0.15f),
+                          col);
+    // Bottom arm (slants down-left), overlapping at the middle
+    dl->AddTriangleFilled(ImVec2(cx - h * 0.55f, cy + h),
+                          ImVec2(cx + h * 0.55f, cy - h * 0.15f),
+                          ImVec2(cx - h * 0.15f, cy - h * 0.15f),
+                          col);
+}
+
+// Parameter row styled after the reference UI: muted label (top-left) + right-aligned
+// value on the label row, a full-width pill track with circular handle below. A small
+// lightning-bolt icon sits at the very left — click it to open the binding menu so the
+// parameter can be driven by audio, MIDI, body tracking, etc. When bound the bolt fills
+// amber and the slider's fill tints to match, echoing the "interactivity" state.
+struct ParamSliderResult {
+    bool changed      = false;
+    bool openBindMenu = false; // bolt clicked OR row right-clicked
+    bool activated    = false; // drag just started — for undo snapshots
+};
+static ParamSliderResult paramSlider(const char* id, const char* label, float* v,
+                                     float lo, float hi, bool bound,
+                                     const char* fmt = "%.2f") {
+    ParamSliderResult r;
+    ImGui::PushID(id);
+    ImGui::Dummy(ImVec2(0, 8)); // top breathing room
+
+    float w = ImGui::GetContentRegionAvail().x;
+    ImVec2 rowStart = ImGui::GetCursorScreenPos();
+    float labelH  = ImGui::GetFontSize();
+    float trackH  = 6.0f;
+    float handleR = 8.0f;
+    float rowH    = labelH + 20.0f;
+    float boltBox = 18.0f; // hit-target square around the bolt glyph
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    // ⚡ Bolt button — leftmost affordance. Clicking opens the bind menu.
+    ImGui::SetCursorScreenPos(ImVec2(rowStart.x - 2.0f,
+                                     rowStart.y + (labelH - boltBox) * 0.5f));
+    bool boltClicked = ImGui::InvisibleButton("##bolt", ImVec2(boltBox, boltBox));
+    bool boltHovered = ImGui::IsItemHovered();
+    if (boltClicked) r.openBindMenu = true;
+
+    ImU32 boltCol = bound       ? IM_COL32(232, 150,  70, 255)
+                  : boltHovered ? IM_COL32(215, 225, 240, 230)
+                                : IM_COL32(120, 128, 142, 180);
+    drawBolt(dl, rowStart.x + boltBox * 0.5f - 2.0f,
+                 rowStart.y + labelH * 0.55f,
+                 12.0f, boltCol);
+
+    float labelX = rowStart.x + boltBox + 4.0f;
+
+    // Label (muted) + right-aligned value (bright).
+    char valbuf[32]; snprintf(valbuf, sizeof(valbuf), fmt, *v);
+    ImVec2 valSize = ImGui::CalcTextSize(valbuf);
+    dl->AddText(ImVec2(labelX, rowStart.y),
+                IM_COL32(150, 158, 172, 230), label);
+    dl->AddText(ImVec2(rowStart.x + w - valSize.x, rowStart.y),
+                IM_COL32(235, 240, 250, 245), valbuf);
+
+    // Right-click anywhere on the row also opens the bind menu.
+    float trackY = rowStart.y + labelH + 10.0f;
+    ImGui::SetCursorScreenPos(ImVec2(labelX, rowStart.y));
+    ImGui::InvisibleButton("##row", ImVec2(w - (labelX - rowStart.x), labelH + 4));
+    if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) r.openBindMenu = true;
+
+    // Track drag hit-target.
+    ImGui::SetCursorScreenPos(ImVec2(rowStart.x, trackY - 6.0f));
+    ImGui::InvisibleButton("##track", ImVec2(w, trackH + 12.0f));
+    bool tActive  = ImGui::IsItemActive();
+    bool hovered  = ImGui::IsItemHovered();
+    if (ImGui::IsItemActivated()) r.activated = true;
+    if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) r.openBindMenu = true;
+    if (tActive) {
+        float mx = ImGui::GetIO().MousePos.x - rowStart.x;
+        float t = mx / w; if (t < 0) t = 0; if (t > 1) t = 1;
+        float newV = lo + t * (hi - lo);
+        if (ImGui::GetIO().KeyShift) newV = std::round(newV / 0.05f) * 0.05f;
+        if (newV != *v) { *v = newV; r.changed = true; }
+    }
+
+    float norm = (hi > lo) ? (*v - lo) / (hi - lo) : 0.0f;
+    if (norm < 0) norm = 0; if (norm > 1) norm = 1;
+
+    // Track background + fill (fill tint shifts to amber when bound).
+    ImU32 fillCol = bound ? IM_COL32(232, 150, 70, 190)
+                          : IM_COL32(255, 255, 255, 52);
+    dl->AddRectFilled(ImVec2(rowStart.x, trackY),
+                      ImVec2(rowStart.x + w, trackY + trackH),
+                      IM_COL32(255, 255, 255, 14), trackH * 0.5f);
+    dl->AddRectFilled(ImVec2(rowStart.x, trackY),
+                      ImVec2(rowStart.x + w * norm + 0.5f, trackY + trackH),
+                      fillCol, trackH * 0.5f);
+    // Handle
+    float hx = rowStart.x + w * norm;
+    float hy = trackY + trackH * 0.5f;
+    ImU32 handleCol = tActive  ? IM_COL32(255, 255, 255, 255)
+                    : hovered  ? IM_COL32(240, 244, 252, 255)
+                               : IM_COL32(220, 225, 235, 255);
+    dl->AddCircleFilled(ImVec2(hx, hy), handleR, handleCol);
+    dl->AddCircle(ImVec2(hx, hy), handleR, IM_COL32(0, 0, 0, 110), 0, 1.2f);
+
+    ImGui::SetCursorScreenPos(ImVec2(rowStart.x, rowStart.y + rowH + 10.0f));
+    ImGui::PopID();
+    return r;
+}
+
+// Color row — muted label on the left, circular swatch on the right that opens
+// the native color picker. One row per color input, matching the reference's
+// quiet layout (no cramped dropdown + tiny chip).
+static bool paramColorRow(const char* id, const char* label, glm::vec4* c) {
+    ImGui::PushID(id);
+    ImGui::Dummy(ImVec2(0, 8));
+    float w = ImGui::GetContentRegionAvail().x;
+    ImVec2 rowStart = ImGui::GetCursorScreenPos();
+    float labelH = ImGui::GetFontSize();
+    float swatchR = 10.0f;
+    float rowH = std::max(labelH, swatchR * 2.0f) + 8.0f;
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddText(ImVec2(rowStart.x, rowStart.y + (rowH - labelH) * 0.5f),
+                IM_COL32(150, 158, 172, 230), label);
+
+    // Reserve the whole row so the invisible button / swatch live on one line.
+    ImGui::InvisibleButton("##row", ImVec2(w, rowH));
+
+    // Circular swatch, right-aligned.
+    float cx = rowStart.x + w - swatchR - 2.0f;
+    float cy = rowStart.y + rowH * 0.5f;
+    ImU32 fill = IM_COL32((int)(c->r * 255), (int)(c->g * 255),
+                          (int)(c->b * 255), (int)(c->a * 255));
+    dl->AddCircleFilled(ImVec2(cx, cy), swatchR, fill);
+    dl->AddCircle(ImVec2(cx, cy), swatchR, IM_COL32(255, 255, 255, 60), 0, 1.0f);
+
+    // A small invisible hit-target around the swatch so clicking it opens the picker.
+    ImVec2 hitMin(cx - swatchR - 4, cy - swatchR - 4);
+    ImGui::SetCursorScreenPos(hitMin);
+    ImGui::InvisibleButton("##swatch", ImVec2(swatchR * 2 + 8, swatchR * 2 + 8));
+    if (ImGui::IsItemClicked()) ImGui::OpenPopup("##picker");
+
+    bool changed = false;
+    if (ImGui::BeginPopup("##picker")) {
+        if (ImGui::ColorPicker4("##cp", &(*c)[0],
+                                ImGuiColorEditFlags_NoLabel |
+                                ImGuiColorEditFlags_AlphaBar)) {
+            changed = true;
+        }
+        ImGui::EndPopup();
+    }
+
+    ImGui::SetCursorScreenPos(ImVec2(rowStart.x, rowStart.y + rowH + 6.0f));
+    ImGui::PopID();
+    return changed;
+}
+
+// Toggle row — label on the left, pill-style switch on the right. One row per bool.
+static bool paramToggleRow(const char* id, const char* label, bool* b) {
+    ImGui::PushID(id);
+    ImGui::Dummy(ImVec2(0, 8));
+    float w = ImGui::GetContentRegionAvail().x;
+    ImVec2 rowStart = ImGui::GetCursorScreenPos();
+    float labelH = ImGui::GetFontSize();
+    float switchW = 30.0f, switchH = 16.0f;
+    float rowH = std::max(labelH, switchH) + 8.0f;
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddText(ImVec2(rowStart.x, rowStart.y + (rowH - labelH) * 0.5f),
+                IM_COL32(150, 158, 172, 230), label);
+
+    float sx = rowStart.x + w - switchW - 2.0f;
+    float sy = rowStart.y + (rowH - switchH) * 0.5f;
+
+    ImGui::SetCursorScreenPos(ImVec2(sx, sy));
+    bool clicked = ImGui::InvisibleButton("##sw", ImVec2(switchW, switchH));
+    if (clicked) { *b = !*b; }
+
+    ImU32 trackCol = *b ? IM_COL32(232, 150, 70, 200) : IM_COL32(255, 255, 255, 28);
+    dl->AddRectFilled(ImVec2(sx, sy), ImVec2(sx + switchW, sy + switchH),
+                      trackCol, switchH * 0.5f);
+    float knobR = switchH * 0.5f - 2.0f;
+    float knobX = *b ? sx + switchW - knobR - 2.0f : sx + knobR + 2.0f;
+    float knobY = sy + switchH * 0.5f;
+    dl->AddCircleFilled(ImVec2(knobX, knobY), knobR, IM_COL32(240, 244, 250, 255));
+
+    ImGui::SetCursorScreenPos(ImVec2(rowStart.x, rowStart.y + rowH + 6.0f));
+    ImGui::PopID();
+    return clicked;
+}
+
+// Small inter-section gap — use between logical groups of controls.
+static void sectionBreak() {
+    ImGui::Dummy(ImVec2(0, 10));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    float w = ImGui::GetContentRegionAvail().x;
+    dl->AddLine(p, ImVec2(p.x + w, p.y), IM_COL32(255, 255, 255, 14));
+    ImGui::Dummy(ImVec2(0, 10));
+}
+
 // --- Two-column labeled drag helpers ---
 // Draws: [Label: value] using format string as the label inside the widget
 
@@ -238,8 +586,9 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
 
     undoNeeded = false;
 
-    // --- Header ---
-    ImGui::SetNextItemWidth(-1);
+    // --- Header: just the layer name, full-width. Dimensions now live in the
+    //     Layer panel row subtitle — no duplication here.
+    ImGui::SetNextItemWidth(-FLT_MIN);
     char nameBuf[256];
     strncpy(nameBuf, layer->name.c_str(), sizeof(nameBuf) - 1);
     nameBuf[sizeof(nameBuf) - 1] = '\0';
@@ -248,19 +597,12 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
     }
     if (ImGui::IsItemActivated()) undoNeeded = true;
 
-    if (layer->source) {
-        ImGui::SameLine();
-        ImGui::PushStyleColor(ImGuiCol_Text, kDimText);
-        ImGui::Text("%dx%d", layer->source->width(), layer->source->height());
-        ImGui::PopStyleColor();
-    }
-
-    thinSep();
+    ImGui::Dummy(ImVec2(0, 8));
 
     // --- Blend + Opacity ---
     {
-        float w = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
-        ImGui::SetNextItemWidth(w);
+        // Blend as a full-width dropdown (12 modes is too many for a pill row).
+        ImGui::SetNextItemWidth(-FLT_MIN);
         const char* currentBlend = blendModeName(layer->blendMode);
         if (ImGui::BeginCombo("##Blend", currentBlend)) {
             for (int i = 0; i < (int)BlendMode::COUNT; i++) {
@@ -274,34 +616,21 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             }
             ImGui::EndCombo();
         }
-        ImGui::SameLine();
-        int opacityPct = (int)(layer->opacity * 100.0f + 0.5f);
-        ImGui::SetNextItemWidth(w);
-        if (ImGui::SliderInt("##Opacity", &opacityPct, 0, 100, "%d%%")) {
-            layer->opacity = opacityPct / 100.0f;
-        }
-        if (ImGui::IsItemActivated()) undoNeeded = true;
+        pillSlider("Opacity", &layer->opacity, 0.0f, 1.0f, "%.2f");
     }
+
+    sectionBreak();
 
     // --- Transition ---
     {
-        float w = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
-        ImGui::SetNextItemWidth(w);
-        const char* currentTrans = transitionTypeName(layer->transitionType);
-        if (ImGui::BeginCombo("##TransType", currentTrans)) {
-            for (int i = 0; i < (int)TransitionType::COUNT; i++) {
-                TransitionType t = (TransitionType)i;
-                bool selected = (layer->transitionType == t);
-                if (ImGui::Selectable(transitionTypeName(t), selected)) {
-                    layer->transitionType = t;
-                }
-                if (selected) ImGui::SetItemDefaultFocus();
-            }
-            ImGui::EndCombo();
-        }
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(w);
-        namedDrag("##TransDur", "Dur", &layer->transitionDuration, 0.01f, 0.0f, 5.0f, "%.2fs");
+        static const char* transLabels[(int)TransitionType::COUNT] = {};
+        for (int i = 0; i < (int)TransitionType::COUNT; i++)
+            transLabels[i] = transitionTypeName((TransitionType)i);
+        int curT = (int)layer->transitionType;
+        int pickedT = pillGroup("##TransType", transLabels, (int)TransitionType::COUNT, curT);
+        if (pickedT != curT) layer->transitionType = (TransitionType)pickedT;
+
+        pillSlider("Duration", &layer->transitionDuration, 0.0f, 5.0f, "%.2fs");
 
         // Shader transition controls: path + source-B picker + trigger
         if (layer->transitionType == TransitionType::Shader) {
@@ -362,7 +691,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
         }
     }
 
-    thinSep();
+    sectionBreak();
 
     // --- Transform (always visible, compact two-column grid) ---
     // Row 1: X / Y
@@ -417,7 +746,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
         layer->cropTop = layer->cropBottom = layer->cropLeft = layer->cropRight = 0.0f;
     }
 
-    thinSep();
+    sectionBreak();
 
     // --- Effects ---
     ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
@@ -458,7 +787,11 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             ImGui::PushStyleColor(ImGuiCol_Text, fx.enabled ? ImVec4(0.85f, 0.90f, 0.95f, 1.0f) : ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
             ImGui::Text("%s", effectTypeName(fx.type));
             ImGui::PopStyleColor();
-            ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - 20);
+            ImGui::SameLine();
+            {
+                float rightX = ImGui::GetWindowContentRegionMax().x - 20.0f;
+                if (ImGui::GetCursorPosX() < rightX) ImGui::SetCursorPosX(rightX);
+            }
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.3f, 0.3f, 0.7f));
             if (ImGui::SmallButton("x")) removeIdx = e;
             ImGui::PopStyleColor();
@@ -657,7 +990,8 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 if (indent > 0) origin.x += indent;
 
                 ImDrawList* draw = ImGui::GetWindowDrawList();
-                ImGui::InvisibleButton("##TileGrid", ImVec2(avail, gridH));
+                ImGui::SetCursorScreenPos(origin);
+                ImGui::InvisibleButton("##TileGrid", ImVec2(gridW, gridH));
 
                 for (int gy = 0; gy < maxTile; gy++) {
                     for (int gx = 0; gx < maxTile; gx++) {
@@ -713,16 +1047,12 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
     }
 
     // --- Feather ---
-    {
-        ImGui::SetNextItemWidth(-1);
-        if (namedDrag("##Feather", "Feather", &layer->feather, 0.005f, 0.0f, 0.5f, "%.3f"))
-            undoNeeded = true;
-    }
+    sectionBreak();
+    pillSlider("Feather", &layer->feather, 0.0f, 0.5f, "%.3f");
 
     // --- Drop Shadow ---
-    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0, 0, 0, 0));
-    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(1, 1, 1, 0.04f));
-    if (ImGui::TreeNode("Drop Shadow")) {
+    static bool dropShadowOpen = false;
+    if (sectionHeader("Drop Shadow", &dropShadowOpen)) {
         if (ImGui::Checkbox("Enable##dshadow", &layer->dropShadowEnabled)) undoNeeded = true;
         if (layer->dropShadowEnabled) {
             if (dragPair("##DsOx", "X", &layer->dropShadowOffsetX,
@@ -747,14 +1077,11 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 undoNeeded = true;
             }
         }
-        ImGui::TreePop();
     }
-    ImGui::PopStyleColor(2);
 
     // --- Crop ---
-    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0, 0, 0, 0));
-    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(1, 1, 1, 0.04f));
-    if (ImGui::TreeNode("Crop")) {
+    static bool cropOpen = false;
+    if (sectionHeader("Crop", &cropOpen)) {
         if (ImGui::Checkbox("Auto-trim black borders", &layer->autoCrop)) {
             if (layer->autoCrop) {
                 // Re-run detection
@@ -771,13 +1098,10 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
         if (dragPair("##CropL", "Left", &layer->cropLeft, "##CropR", "Right", &layer->cropRight,
                      0.005f, 0.0f, 0.49f, "%.3f"))
             undoNeeded = true;
-        ImGui::TreePop();
     }
-    ImGui::PopStyleColor(2);
 
     // --- Video controls ---
     if (layer->source && layer->source->isVideo()) {
-        thinSep();
         if (layer->source->isPlaying()) {
             if (accentBtn("Pause", -1)) layer->source->pause();
         } else {
@@ -825,11 +1149,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
 
         // Shader resolution override
         {
-            thinSep();
-            ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
-            ImGui::Text("Resolution");
-            ImGui::PopStyleColor();
-            ImGui::SameLine();
+            sectionBreak();
 
             bool custom = (layer->shaderWidth > 0 && layer->shaderHeight > 0);
             // Preset resolutions
@@ -860,7 +1180,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     currentLabel = customLabel;
                 }
             }
-            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+            ImGui::SetNextItemWidth(-FLT_MIN);
             if (ImGui::BeginCombo("##ShaderRes", currentLabel)) {
                 for (auto& p : presets) {
                     bool sel = (layer->shaderWidth == p.w && layer->shaderHeight == p.h);
@@ -888,8 +1208,12 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
         }
 
         if (!inputs.empty()) {
-            thinSep();
+            sectionBreak();
 
+            // Wrap the whole shader input list in a collapsible "Parameters"
+            // section so the panel can be folded up out of the way.
+            static bool paramsOpen = true;
+            if (sectionHeader("Parameters", &paramsOpen)) {
             for (int i = 0; i < (int)inputs.size(); i++) {
                 auto& input = inputs[i];
                 ImGui::PushID(i + 10000);
@@ -899,19 +1223,20 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     auto bit = bindings.find(input.name);
                     bool isBound = (bit != bindings.end() && bit->second.signal != AudioSignal::None);
 
-                    ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
-                    ImGui::Text("%s", input.name.c_str());
-                    ImGui::PopStyleColor();
+                    // Pick a format that fits the range.
+                    const char* fmt = "%.2f";
+                    float range = input.maxVal - input.minVal;
+                    if (range > 100.0f)      fmt = "%.0f";
+                    else if (range > 10.0f)  fmt = "%.1f";
+                    else if (range < 1.0f)   fmt = "%.3f";
 
-                    // Audio bind button
-                    ImGui::SameLine(ImGui::GetFontSize() * 6.0f);
-                    ImGui::PushStyleColor(ImGuiCol_Button, isBound ? ImVec4(0.9f, 0.3f, 0.1f, 0.35f) : ImVec4(0.3f, 0.3f, 0.3f, 0.15f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.5f, 0.2f, 0.5f));
-                    ImGui::PushStyleColor(ImGuiCol_Text, isBound ? ImVec4(1.0f, 0.6f, 0.2f, 1.0f) : ImVec4(0.6f, 0.6f, 0.6f, 0.7f));
-                    if (ImGui::SmallButton("~")) {
-                        ImGui::OpenPopup("##audiobind");
-                    }
-                    ImGui::PopStyleColor(3);
+                    float v = std::get<float>(input.value);
+                    ParamSliderResult ps = paramSlider("##val", input.name.c_str(),
+                                                      &v, input.minVal, input.maxVal,
+                                                      isBound, fmt);
+                    if (ps.changed) input.value = v;
+                    if (ps.activated) undoNeeded = true;
+                    if (ps.openBindMenu) ImGui::OpenPopup("##audiobind");
 
                     if (ImGui::BeginPopup("##audiobind")) {
                         static const char* signalNames[] = { "None", "Level", "Bass", "Mid", "High", "Beat", "MIDI" };
@@ -979,66 +1304,67 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                         ImGui::EndPopup();
                     }
 
-                    if (!isBound) {
-                        float v = std::get<float>(input.value);
-                        ImGui::SameLine();
-                        ImGui::SetNextItemWidth(-1);
-                        if (ImGui::SliderFloat("##val", &v, input.minVal, input.maxVal)) {
-                            input.value = v;
-                        }
-                        if (ImGui::IsItemActivated()) undoNeeded = true;
-                    } else {
-                        // Show current value as read-only colored bar
-                        float v = std::get<float>(input.value);
-                        float frac = (input.maxVal > input.minVal) ? (v - input.minVal) / (input.maxVal - input.minVal) : 0.0f;
-                        ImGui::SameLine();
-                        float barW = ImGui::GetContentRegionAvail().x;
-                        ImVec2 p = ImGui::GetCursorScreenPos();
-                        ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + barW, p.y + 14),
-                            IM_COL32(30, 30, 30, 180), 3.0f);
-                        ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + barW * frac, p.y + 14),
-                            IM_COL32(230, 120, 40, 200), 3.0f);
-                        ImGui::Dummy(ImVec2(barW, 14));
-                    }
+                    // (The bound/unbound bar below has been replaced by paramSlider
+                    // above, which draws a unified pill track and tints its fill amber
+                    // when a binding is active.)
                 } else if (input.type == "color") {
                     glm::vec4 c = std::get<glm::vec4>(input.value);
-                    ImGui::PushStyleColor(ImGuiCol_Text, kDimText);
-                    ImGui::Text("%s", input.name.c_str());
-                    ImGui::PopStyleColor();
-                    ImGui::SameLine();
-                    if (ImGui::ColorEdit4("##val", &c[0], ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel)) {
+                    if (paramColorRow("##col", input.name.c_str(), &c)) {
                         input.value = c;
+                        undoNeeded = true;
                     }
-                    if (ImGui::IsItemActivated()) undoNeeded = true;
                 } else if (input.type == "bool") {
                     bool b = std::get<bool>(input.value);
-                    if (ImGui::Checkbox(input.name.c_str(), &b)) {
+                    if (paramToggleRow("##bool", input.name.c_str(), &b)) {
                         input.value = b;
                         undoNeeded = true;
                     }
                 } else if (input.type == "point2D") {
+                    // Two stacked paramSliders (X / Y) keeps the clean
+                    // label-top, pill-track-below rhythm.
                     glm::vec2 p = std::get<glm::vec2>(input.value);
-                    ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
-                    ImGui::Text("%s", input.name.c_str());
-                    ImGui::PopStyleColor();
-                    ImGui::SameLine(ImGui::GetFontSize() * 7.0f);
-                    ImGui::SetNextItemWidth(-1);
-                    if (ImGui::SliderFloat2("##val", &p[0], input.minVec.x, input.maxVec.x)) {
-                        input.value = p;
-                    }
-                    if (ImGui::IsItemActivated()) undoNeeded = true;
+                    std::string labelX = input.name + "  X";
+                    std::string labelY = input.name + "  Y";
+                    auto rx = paramSlider("##px", labelX.c_str(), &p.x,
+                                          input.minVec.x, input.maxVec.x, false);
+                    auto ry = paramSlider("##py", labelY.c_str(), &p.y,
+                                          input.minVec.y, input.maxVec.y, false);
+                    if (rx.changed || ry.changed) input.value = p;
+                    if (rx.activated || ry.activated) undoNeeded = true;
                 } else if (input.type == "long") {
+                    // Named enum → pill group; numeric-only → paramSlider with
+                    // integer format. Pills make multi-choice params readable
+                    // at a glance without cramming a dropdown into the row.
                     float v = std::get<float>(input.value);
                     int iv = (int)v;
-                    ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
-                    ImGui::Text("%s", input.name.c_str());
-                    ImGui::PopStyleColor();
-                    ImGui::SameLine(ImGui::GetFontSize() * 7.0f);
-                    ImGui::SetNextItemWidth(-1);
-                    if (ImGui::SliderInt("##val", &iv, (int)input.minVal, (int)input.maxVal)) {
-                        input.value = (float)iv;
+                    if (!input.longLabels.empty()) {
+                        ImGui::Dummy(ImVec2(0, 6));
+                        ImGui::PushStyleColor(ImGuiCol_Text,
+                                              ImVec4(0.59f, 0.62f, 0.68f, 0.90f));
+                        ImGui::Text("%s", input.name.c_str());
+                        ImGui::PopStyleColor();
+
+                        std::vector<const char*> lbls;
+                        lbls.reserve(input.longLabels.size());
+                        for (auto& s : input.longLabels) lbls.push_back(s.c_str());
+                        int cur = iv;
+                        if (cur < 0) cur = 0;
+                        if (cur > (int)lbls.size() - 1) cur = (int)lbls.size() - 1;
+                        int picked = pillGroup("##pg", lbls.data(),
+                                               (int)lbls.size(), cur);
+                        if (picked != cur) {
+                            input.value = (float)picked;
+                            undoNeeded = true;
+                        }
+                        ImGui::Dummy(ImVec2(0, 2));
+                    } else {
+                        float fv = (float)iv;
+                        auto r = paramSlider("##val", input.name.c_str(),
+                                             &fv, input.minVal, input.maxVal,
+                                             false, "%.0f");
+                        if (r.changed) input.value = (float)(int)(fv + 0.5f);
+                        if (r.activated) undoNeeded = true;
                     }
-                    if (ImGui::IsItemActivated()) undoNeeded = true;
                 } else if (input.type == "text") {
                     std::string text = std::get<std::string>(input.value);
                     int maxLen = (int)input.maxVal;
@@ -1173,13 +1499,13 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
 
                 ImGui::PopID();
             }
+            } // end sectionHeader("Parameters")
         }
 
 #ifdef HAS_WHISPER
         if (speech && speech->available && speech->whisper) {
             auto& devices = speech->whisper->captureDevices();
             if (!devices.empty()) {
-                ImGui::Dummy(ImVec2(0, 4));
                 ImGui::PushStyleColor(ImGuiCol_Text, kDimText);
                 ImGui::Text("Mic");
                 ImGui::PopStyleColor();
@@ -1205,7 +1531,6 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
 #endif
 
         if (!shaderSrc->description().empty()) {
-            ImGui::Dummy(ImVec2(0, 4));
             ImGui::PushStyleColor(ImGuiCol_Text, kDimText);
             ImGui::TextWrapped("%s", shaderSrc->description().c_str());
             ImGui::PopStyleColor();
