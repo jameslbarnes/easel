@@ -122,19 +122,18 @@ bool ShaderSource::parseISF(const std::string& source) {
                     param.minVal = 0;
                     param.maxVal = 0;
                     if (input.contains("VALUES") && input["VALUES"].is_array()) {
-                        param.maxVal = (float)(input["VALUES"].size() - 1);
+                        for (const auto& v : input["VALUES"]) {
+                            if (v.is_number()) param.longValues.push_back(v.get<int>());
+                        }
+                        if (!param.longValues.empty())
+                            param.maxVal = (float)(param.longValues.size() - 1);
                     }
                     param.defaultFloat = input.contains("DEFAULT") ? jsonToFloat(input["DEFAULT"], 0.0f) : 0.0f;
                     param.value = param.defaultFloat;
-                    // Store labels for UI
                     if (input.contains("LABELS") && input["LABELS"].is_array()) {
-                        // Store in description for now
-                        std::string labels;
                         for (const auto& l : input["LABELS"]) {
-                            if (!labels.empty()) labels += "|";
-                            labels += l.get<std::string>();
+                            param.longLabels.push_back(l.get<std::string>());
                         }
-                        // We'll use this later for dropdown UI
                     }
                 } else if (param.type == "event") {
                     // Event trigger — behaves like a momentary bool

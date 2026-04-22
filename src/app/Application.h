@@ -26,6 +26,7 @@
 #endif
 #include "sources/ShaderSource.h"
 #include "sources/ShaderClawBridge.h"
+#include "sources/ParticleSource.h"
 
 #ifdef HAS_OPENCV
 #include "scanning/SceneScanner.h"
@@ -159,6 +160,7 @@ private:
 #if defined(_WIN32) || defined(__APPLE__)
     void addScreenCapture(int monitorIndex);
 #endif
+    void addParticles();
 #ifdef _WIN32
     void addWindowCapture(HWND hwnd, const std::string& title);
 #elif defined(__APPLE__)
@@ -239,6 +241,22 @@ private:
     std::vector<RecAudioDevice> m_outputDevices; // render devices for mixer output
     void renderTransportBar();
     void renderTimelinePanel();
+
+    // Timeline export flow — when true, render loop auto-stops the recorder
+    // and pauses playback when the playhead crosses the Work Area end.
+    bool   m_timelineExporting = false;
+    double m_timelineExportEnd = 0.0;
+    std::string m_timelineExportPath;
+    void   startTimelineExport();
+
+    // Timeline panel visibility. Toggled via the T key or the transport-bar
+    // show/hide button. Defaults to visible so the panel is discoverable.
+    bool   m_timelineOpen = true;
+
+    // When true, the timeline renders only its transport row and hides the
+    // ruler / tracks / audio lane / clip inspector. The panel itself remains
+    // docked — drag the dock splitter to shrink to just the transport.
+    bool   m_timelineMinimized = false;
 
     // Audio level meter (WASAPI IAudioMeterInformation)
     void* m_audioMeterInfo = nullptr;

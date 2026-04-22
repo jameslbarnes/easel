@@ -18,6 +18,9 @@ bool UIManager::init(GLFWwindow* window) {
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    // Any Drag/Slider widget in the app becomes click-to-type — matches the
+    // user expectation that double-clicking a value lets you edit it directly.
+    io.ConfigDragClickToInputText = true;
 
     // Get DPI scale from the monitor
     float xscale = 1.0f, yscale = 1.0f;
@@ -146,25 +149,25 @@ void UIManager::applyTheme(float dpiScale) {
     // Geometry — Apple/Vercel-density: tight enough to feel intentional,
     // loose enough to breathe. 10x6 frame padding fits "Masks"/"Mapping" tabs
     // without truncation at any reasonable dock width.
-    s.WindowPadding     = ImVec2(16, 14);
+    s.WindowPadding     = ImVec2(18, 16);
     s.FramePadding      = ImVec2(10, 6);
     s.CellPadding       = ImVec2(8, 5);
-    s.ItemSpacing       = ImVec2(8, 6);
+    s.ItemSpacing       = ImVec2(8, 8);
     s.ItemInnerSpacing  = ImVec2(6, 4);
     s.IndentSpacing     = 16.0f;
     s.ScrollbarSize     = 10.0f;
-    s.GrabMinSize       = 12.0f;
+    s.GrabMinSize       = 16.0f;
     s.SeparatorTextBorderSize = 1.0f;
-    s.SeparatorTextPadding    = ImVec2(12, 4);
+    s.SeparatorTextPadding    = ImVec2(12, 6);
 
-    // Rounding — unified on 6/4 scale (Vercel-style consistent geometry)
-    s.WindowRounding    = 6.0f;
-    s.ChildRounding     = 6.0f;
+    // Rounding — soft, airy radii (borrowed from floating-panel designs).
+    s.WindowRounding    = 10.0f;
+    s.ChildRounding     = 8.0f;
     s.FrameRounding     = 6.0f;
-    s.PopupRounding     = 6.0f;
-    s.ScrollbarRounding = 4.0f;
-    s.GrabRounding      = 4.0f;
-    s.TabRounding       = 6.0f;
+    s.PopupRounding     = 10.0f;
+    s.ScrollbarRounding = 100.0f; // fully pill-rounded scrollbars
+    s.GrabRounding      = 100.0f; // circular grab handle
+    s.TabRounding       = 8.0f;
 
     // Borders — hairline semi-transparent whites, no solid dark borders
     s.WindowBorderSize  = 1.0f;

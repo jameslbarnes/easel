@@ -90,29 +90,22 @@ static void drawLayerRow(ImDrawList* draw, const std::shared_ptr<Layer>& layer,
     }
     draw->AddRect(tMin, tMax, kThumbBorder, 3.0f);
 
-    // Badge
-    if (layer->source) {
-        const char* badge = getBadgeLabel(layer->source->typeName());
-        ImU32 badgeCol = getBadgeColor(layer->source->typeName());
-        ImVec2 bs = ImGui::CalcTextSize(badge);
-        ImVec2 bMin(tMax.x - bs.x - 6, tMax.y - bs.y - 2);
-        draw->AddRectFilled(bMin, tMax, badgeCol, 2.0f);
-        draw->AddText(ImVec2(bMin.x + 3, bMin.y + 1), kBadgeText, badge);
-    }
-
-    // Name + dims
-    float nameX = thumbX + thumbSize + 8;
-    float nameY = y + 4;
+    // Name + subtitle. Type word lives inline in the subtitle ("Shader · 1920×1080").
+    // The colored type-dot is positioned at the top-right, above the opacity %.
+    float nameX = thumbX + thumbSize + 10;
+    float nameY = y + 5;
     ImU32 nameCol = layer->visible ? kTextPrimary : kTextDim;
     if (dimmed) nameCol = IM_COL32(180, 190, 210, 140);
     draw->AddText(ImVec2(nameX, nameY), nameCol, layer->name.c_str());
     if (layer->source) {
-        char dim[64];
-        snprintf(dim, sizeof(dim), "%dx%d", layer->source->width(), layer->source->height());
-        draw->AddText(ImVec2(nameX, nameY + 16), kTextMuted, dim);
+        char sub[96];
+        snprintf(sub, sizeof(sub), "%s · %dx%d",
+                 layer->source->typeName().c_str(),
+                 layer->source->width(), layer->source->height());
+        draw->AddText(ImVec2(nameX, nameY + 16), kTextMuted, sub);
     }
 
-    // Opacity bar
+    // Opacity bar (right side) + colored type dot above the percentage.
     if (width > 140) {
         float barW = 46.0f, barH = 3.0f;
         float barX = rowMax.x - barW - 8;
@@ -122,7 +115,14 @@ static void drawLayerRow(ImDrawList* draw, const std::shared_ptr<Layer>& layer,
         char opBuf[16];
         snprintf(opBuf, sizeof(opBuf), "%d%%", (int)(layer->opacity * 100.0f + 0.5f));
         ImVec2 opSz = ImGui::CalcTextSize(opBuf);
-        draw->AddText(ImVec2(barX + barW - opSz.x, barY - 13), kTextDim, opBuf);
+        float pctX = barX + barW - opSz.x;
+        float pctY = barY - 13;
+        draw->AddText(ImVec2(pctX, pctY), kTextDim, opBuf);
+        // Type dot — above the percentage, right-aligned with the bar's right edge.
+        if (layer->source) {
+            ImU32 dotCol = getBadgeColor(layer->source->typeName());
+            draw->AddCircleFilled(ImVec2(barX + barW - 3, pctY - 4), 3.5f, dotCol);
+        }
     }
 }
 

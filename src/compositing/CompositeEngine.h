@@ -65,6 +65,12 @@ private:
     // Per-layer feedback FBO (keyed by layer ID)
     std::unordered_map<uint32_t, Framebuffer> m_feedbackFBOs;
 
+    // GL-Transition scratch FBO — receives the A→B blend each frame a
+    // gl-transitions shader is running on any layer. Single buffer is fine
+    // because one layer's transition is resolved into the composite before
+    // the next layer's transition begins rendering.
+    Framebuffer m_glTransitionFBO;
+
     float m_lastTime = 0;
 
     void clear();
