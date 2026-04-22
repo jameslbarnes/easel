@@ -1,7 +1,56 @@
 #include "compositing/CompositeEngine.h"
 #include "sources/ShaderSource.h"
+#include "render/GLTransition.h"
 #include <glm/glm.hpp>
 #include <iostream>
+
+// Render a gl-transitions.com shader blending source A → nextSource B at
+// layer->transitionProgress into the provided scratch FBO. Returns the FBO
+// texture on success, 0 on failure (caller falls back to source A).
+static GLuint renderLayerGLTransition(const std::shared_ptr<Layer>& layer,
+                                      Framebuffer& scratch,
+                                      const AudioState& audio) {
+    if (!layer->source || !layer->nextSource)      return 0;
+    if (layer->glTransitionName.empty())           return 0;
+
+    auto* xition = GLTransitionLibrary::instance().get(layer->glTransitionName);
+    if (!xition || !xition->isValid()) return 0;
+
+    GLuint texA = layer->source->textureId();
+    GLuint texB = layer->nextSource->textureId();
+    if (!texA || !texB) return 0;
+
+    int wA = layer->source->width(),  hA = layer->source->height();
+    int wB = layer->nextSource->width(), hB = layer->nextSource->height();
+    int w = std::max(wA, wB), h = std::max(hA, hB);
+    if (w <= 0 || h <= 0) return 0;
+
+    // Ensure the scratch FBO matches the transition's target size so we don't
+    // oversample or waste fill rate.
+    if (scratch.width() != w || scratch.height() != h) {
+        if (scratch.width() == 0) scratch.create(w, h);
+        else                      scratch.resize(w, h);
+    }
+
+    // Save current viewport — caller has a composite viewport set; we'll
+    // restore after the off-screen render.
+    GLint viewport[4];
+    glGetIntegerv(GL_VIEWPORT, viewport);
+
+    scratch.bind();
+    glViewport(0, 0, w, h);
+    glClearColor(0, 0, 0, 0);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    xition->render(texA, texB, layer->transitionProgress, w, h,
+                   audio.rms, audio.bass,
+                   (audio.lowMid + audio.highMid) * 0.5f, audio.treble,
+                   audio.beatDecay);
+
+    Framebuffer::unbind();
+    glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+    return scratch.textureId();
+}
 
 // Render a shader-based A→B transition. Uses layer->transitionShaderInst
 // (lazy-loaded from transitionShaderPath) with two ISF image inputs "from"/"to"
@@ -338,9 +387,23 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
             }
         }
 
-        // Compute effective opacity (skip for shader-based A→B — A and B both fully visible)
+        // gl-transitions.com A→B transition — same promote-B→A semantics.
+        if (layer->glTransitionActive && layer->transitionDuration > 0.0f) {
+            float step = dt / std::max(0.01f, layer->transitionDuration);
+            layer->transitionProgress = std::min(1.0f, layer->transitionProgress + step);
+            if (layer->transitionProgress >= 1.0f) {
+                layer->source = std::move(layer->nextSource);
+                layer->nextSource.reset();
+                layer->glTransitionActive = false;
+                layer->transitionProgress = 1.0f;
+            }
+        }
+
+        // Compute effective opacity (skip for A→B transitions — A+B are fully visible in the blend)
         float effectiveOpacity = layer->opacity;
-        if (layer->transitionDuration > 0.0f && !layer->shaderTransitionActive) {
+        if (layer->transitionDuration > 0.0f
+            && !layer->shaderTransitionActive
+            && !layer->glTransitionActive) {
             effectiveOpacity *= layer->transitionProgress;
         }
 
@@ -373,10 +436,14 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
             }
         }
 
-        // If a shader transition is active, blend source A and B via the transition
-        // shader and use that as the layer texture. Falls back to source A on failure.
+        // If a transition is active, blend source A and B and use the result
+        // as the layer texture. gl-transitions (named library) takes precedence
+        // over legacy ISF shader transitions.
         GLuint baseTex = layer->textureId();
-        if (layer->shaderTransitionActive && layer->nextSource) {
+        if (layer->glTransitionActive && layer->nextSource) {
+            GLuint ttex = renderLayerGLTransition(layer, m_glTransitionFBO, m_audio);
+            if (ttex) baseTex = ttex;
+        } else if (layer->shaderTransitionActive && layer->nextSource) {
             GLuint ttex = renderLayerShaderTransition(layer);
             if (ttex) baseTex = ttex;
         }

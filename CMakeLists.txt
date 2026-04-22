@@ -175,13 +175,26 @@ if(APPLE)
         set_source_files_properties("${s}" PROPERTIES
             MACOSX_PACKAGE_LOCATION "Resources/shaders")
     endforeach()
+    # Particle subsystem shaders (nested under shaders/particles/).
+    file(GLOB EASEL_PARTICLE_SHADERS "${CMAKE_SOURCE_DIR}/shaders/particles/*")
+    foreach(p ${EASEL_PARTICLE_SHADERS})
+        set_source_files_properties("${p}" PROPERTIES
+            MACOSX_PACKAGE_LOCATION "Resources/shaders/particles")
+    endforeach()
+    # gl-transitions.com shaders bundled as-is. App scans
+    # assets/transitions/gl on startup — main_mac.mm chdirs to Resources/.
+    file(GLOB EASEL_GL_TRANSITIONS "${CMAKE_SOURCE_DIR}/assets/transitions/gl/*.glsl")
+    foreach(g ${EASEL_GL_TRANSITIONS})
+        set_source_files_properties("${g}" PROPERTIES
+            MACOSX_PACKAGE_LOCATION "Resources/assets/transitions/gl")
+    endforeach()
     set(EASEL_DEFAULT_PRESET "${CMAKE_SOURCE_DIR}/default.easel")
     set_source_files_properties("${EASEL_DEFAULT_PRESET}" PROPERTIES
         MACOSX_PACKAGE_LOCATION "Resources")
 
     add_executable(${PROJECT_NAME} MACOSX_BUNDLE
         ${SOURCES} ${KISS_FFT_SRC}
-        "${EASEL_ICON}" ${EASEL_SHADERS} "${EASEL_DEFAULT_PRESET}")
+        "${EASEL_ICON}" ${EASEL_SHADERS} ${EASEL_PARTICLE_SHADERS} ${EASEL_GL_TRANSITIONS} "${EASEL_DEFAULT_PRESET}")
     set_target_properties(${PROJECT_NAME} PROPERTIES
         MACOSX_BUNDLE_BUNDLE_NAME "Easel"
         MACOSX_BUNDLE_GUI_IDENTIFIER "com.etherealmachine.easel"
@@ -480,14 +493,17 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     ${CMAKE_SOURCE_DIR}/shaders $<TARGET_FILE_DIR:${PROJECT_NAME}>/shaders
 )
 
-# macOS: ad-hoc codesign the .app bundle after every build so macOS TCC
-# (screen recording, microphone, camera) remembers granted permissions across
-# rebuilds. Without this the binary hash changes each compile and macOS
-# re-prompts every launch.
+# macOS: re-sign with the stable "Easel Dev" self-signed cert so the Mach-O
+# CDHash is identical across rebuilds. TCC grants (Screen Recording / Mic /
+# Camera) are keyed to CDHash, not path, so without this every rebuild looks
+# like a brand-new app and re-prompts the user. The script falls back to
+# ad-hoc signing if the cert is missing (scripts/setup-codesign.sh creates
+# it; one-time interactive "Always Allow" in Keychain is required the first
+# time codesign touches the private key).
 if(APPLE)
     add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-        COMMAND codesign --force --deep --sign - --preserve-metadata=entitlements,requirements,flags,runtime "$<TARGET_BUNDLE_DIR:${PROJECT_NAME}>"
-        COMMENT "Ad-hoc codesigning Easel.app (persists TCC permissions across rebuilds)"
-        VERBATIM
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/codesign-app.sh
+                $<TARGET_BUNDLE_DIR:${PROJECT_NAME}>
+        COMMENT "Codesigning Easel.app with 'Easel Dev' (stable TCC identity)"
     )
 endif()

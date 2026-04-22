@@ -18,8 +18,10 @@
 #ifdef HAS_WHEP
 #include "sources/WHEPSource.h"
 #endif
+#include "render/GLTransition.h"
 #include <nlohmann/json.hpp>
 #include <imgui.h>
+#include <imgui_internal.h>     // DockBuilderSetNodeSize for timeline minimize
 #include "stb_image.h"
 #include "stb_image_write.h"
 #include <iostream>
@@ -28,6 +30,7 @@
 #include <cstring>
 #include <filesystem>
 #include <set>
+#include <unordered_set>
 #include <chrono>
 
 #ifdef _WIN32
@@ -165,6 +168,9 @@ bool Application::init() {
     std::cout << "Renderer: " << glGetString(GL_RENDERER) << std::endl;
 
     if (!m_ui.init(m_window)) return false;
+
+    // Scan bundled gl-transitions shaders. Lazy-compile on first use.
+    GLTransitionLibrary::instance().scan("assets/transitions/gl");
 
     // Create default mapping profile
     auto mapping = std::make_unique<MappingProfile>();
@@ -474,6 +480,13 @@ void Application::run() {
             // Advance timeline playhead and push clip → layer state before compositing.
             m_timeline.advance(dt);
             m_timeline.applyToLayers(m_layerStack);
+
+            // Export flow: auto-stop recorder + pause when playhead crosses the Work Area end.
+            if (m_timelineExporting && m_timeline.playhead() >= m_timelineExportEnd - 1e-3) {
+                if (m_recorder.isActive()) m_recorder.stop();
+                m_timeline.pause();
+                m_timelineExporting = false;
+            }
         }
 
         compositeAndWarp();
@@ -554,6 +567,23 @@ void Application::run() {
                 if (redoNow && !sRedoPrev) m_undoStack.redo(m_layerStack, m_selectedLayer);
                 sUndoPrev = undoNow;
                 sRedoPrev = redoNow;
+
+                // Delete / Backspace → remove selected layer. Guarded by
+                // WantTextInput so typing in the shader editor or name field
+                // doesn't nuke layers out from under you.
+                if (!ImGui::GetIO().WantTextInput
+                    && m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count()
+                    && (ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_Backspace)))
+                {
+                    m_undoStack.pushState(m_layerStack, m_selectedLayer);
+                    auto l = m_layerStack[m_selectedLayer];
+                    uint32_t rid = l ? l->id : 0;
+                    m_layerStack.removeLayer(m_selectedLayer);
+                    if (rid) m_timeline.removeTrackForLayer(rid);
+                    if (m_selectedLayer >= m_layerStack.count()) {
+                        m_selectedLayer = m_layerStack.count() - 1;
+                    }
+                }
             }
 
             renderUI();
@@ -2086,12 +2116,17 @@ void Application::renderUI() {
             zoneTextures.push_back(zp->warpFBO.textureId());
         }
 
+        // Stage panel: 3D viewport + "Setup" inspector (displays, projectors,
+        // surfaces). Inspector used to live inside Scenes/Stage tab — it
+        // belongs here with the 3D preview it configures, not alongside the
+        // layer-snapshot list.
         if (m_ui.isPanelVisible("Stage")) {
-            // No inline top section — Composition + Output are in the Canvas
-            // zone bar now, so the Stage panel is pure 3D viewport.
+            ImGui::Begin("Stage");
+            if (ImGui::CollapsingHeader("Setup", ImGuiTreeNodeFlags_DefaultOpen)) {
+                m_stageView.renderSceneInspector(zoneTextures);
+            }
+            // 3D viewport fills the remaining space below the inspector.
             m_stageView.render(zoneTextures, nullptr);
-
-            // Handle import request from StageView
             if (m_stageView.wantsImport()) {
                 m_stageView.clearImportSignal();
                 std::string path = openFileDialog("3D Models\0*.obj;*.gltf;*.glb\0All Files\0*.*\0");
@@ -2099,50 +2134,55 @@ void Application::renderUI() {
                     m_stageView.loadModel(path);
                 }
             }
+            ImGui::End();
         }
 
-        // Unified "Scenes" panel: two tabs — Presets (save/recall) and Stage (3D inspector).
+        // Scenes panel: named snapshots of the full layer stack (visibility,
+        // opacity, transform, blend mode). Click a scene to instantly recall
+        // that composition. Useful for live shows (cue a "build" / "drop" /
+        // "outro" look) and A/B-ing compositions while designing.
         if (m_ui.isPanelVisible("Scenes")) {
             ImGui::Begin("Scenes");
-            if (ImGui::BeginTabBar("##ScenesTabs")) {
-                if (ImGui::BeginTabItem("Presets")) {
-                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1.00f, 1.00f, 1.00f, 0.10f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 1.00f, 1.00f, 0.25f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.00f, 1.00f, 1.00f, 0.40f));
-                    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
-                    if (ImGui::Button("Save Scene", ImVec2(-1, 0))) {
-                        char nm[32];
-                        snprintf(nm, sizeof(nm), "Scene %d", m_sceneManager.count() + 1);
-                        m_sceneManager.saveScene(nm, m_layerStack);
-                    }
-                    ImGui::PopStyleColor(4);
+            ImGui::TextDisabled("Snapshots of your layer stack.\n"
+                                "Save one, click to recall it instantly.");
+            ImGui::Spacing();
 
-                    int removeIdx = -1;
-                    for (int s = 0; s < m_sceneManager.count(); s++) {
-                        ImGui::PushID(30000 + s);
-                        auto& scene = m_sceneManager[s];
-                        float w = ImGui::GetContentRegionAvail().x - 24;
-                        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.06f, 0.07f, 0.10f, 0.90f));
-                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 1.00f, 1.00f, 0.20f));
-                        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.00f, 1.00f, 1.00f, 0.35f));
-                        if (ImGui::Button(scene.name.c_str(), ImVec2(w, 0))) {
-                            m_sceneManager.recallScene(s, m_layerStack);
-                        }
-                        ImGui::PopStyleColor(3);
-                        ImGui::SameLine();
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.3f, 0.3f, 0.7f));
-                        if (ImGui::SmallButton("x")) removeIdx = s;
-                        ImGui::PopStyleColor();
-                        ImGui::PopID();
-                    }
-                    if (removeIdx >= 0) m_sceneManager.removeScene(removeIdx);
-                    ImGui::EndTabItem();
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.36f, 0.42f, 0.82f, 0.85f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.46f, 0.54f, 0.94f, 0.95f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.28f, 0.34f, 0.72f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+            if (ImGui::Button("+ Save current composition", ImVec2(-1, 0))) {
+                char nm[32];
+                snprintf(nm, sizeof(nm), "Scene %d", m_sceneManager.count() + 1);
+                m_sceneManager.saveScene(nm, m_layerStack);
+            }
+            ImGui::PopStyleColor(4);
+
+            ImGui::Spacing();
+            int removeIdx = -1;
+            for (int s = 0; s < m_sceneManager.count(); s++) {
+                ImGui::PushID(30000 + s);
+                auto& scene = m_sceneManager[s];
+                float w = ImGui::GetContentRegionAvail().x - 24;
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.06f, 0.07f, 0.10f, 0.90f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 1.00f, 1.00f, 0.20f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.00f, 1.00f, 1.00f, 0.35f));
+                if (ImGui::Button(scene.name.c_str(), ImVec2(w, 0))) {
+                    m_sceneManager.recallScene(s, m_layerStack);
                 }
-                if (ImGui::BeginTabItem("Stage")) {
-                    m_stageView.renderSceneInspector(zoneTextures);
-                    ImGui::EndTabItem();
-                }
-                ImGui::EndTabBar();
+                ImGui::PopStyleColor(3);
+                ImGui::SameLine();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.3f, 0.3f, 0.7f));
+                if (ImGui::SmallButton("x")) removeIdx = s;
+                ImGui::PopStyleColor();
+                ImGui::PopID();
+            }
+            if (removeIdx >= 0) m_sceneManager.removeScene(removeIdx);
+
+            if (m_sceneManager.count() == 0) {
+                ImGui::Spacing();
+                ImGui::TextDisabled("No scenes yet. Arrange your layers the way\n"
+                                    "you want them, then click Save.");
             }
             ImGui::End();
         }
@@ -2784,6 +2824,15 @@ void Application::renderUI() {
     ImGui::EndTabItem();
     }  // end Etherea tab
 
+    if (sourcesTabsOpen && ImGui::BeginTabItem("Particles")) {
+        ImGui::TextWrapped("1 million GPU particles - state-texture ping-pong, GL_POINTS instancing. Drop onto a layer.");
+        ImGui::Dummy(ImVec2(0, 8));
+        if (ImGui::Button("+ Add Particle Field (1M)", ImVec2(-1, 0))) {
+            addParticles();
+        }
+        ImGui::EndTabItem();
+    }
+
     // Capture tab (moved from position 1 to 4)
     if (sourcesTabsOpen && ImGui::BeginTabItem("Capture")) {
     {
@@ -3412,10 +3461,8 @@ void Application::renderUI() {
     }
 #endif
 
-    // Audio Mixer panel merged into Audio; transport bar renders below.
-#ifdef HAS_FFMPEG
-    renderTransportBar();
-#endif
+    // Audio Mixer panel merged into Audio; transport controls now live inside
+    // the Timeline panel's transport row (renderTransportBar() is a no-op).
 
     // Timeline panel — shows per-layer tracks with clips along a time ruler.
     // Single playhead, linear time, clip-on-track model (AE/Resolume style).
@@ -3426,20 +3473,163 @@ void Application::renderUI() {
     // Scenes panel now renders in the Stage-view scope above (where zoneTextures is live).
 }
 
+// Render the timeline's Work Area to a timestamped .mp4. Seeks the playhead to
+// the in-point, starts playback + recorder, and arms the render-loop auto-stop
+// that fires when the playhead crosses the out-point.
+void Application::startTimelineExport() {
+#ifdef HAS_FFMPEG
+    if (m_timelineExporting || m_recorder.isActive()) return;
+
+    auto now = std::chrono::system_clock::now();
+    auto t   = std::chrono::system_clock::to_time_t(now);
+    struct tm tm_buf;
+#ifdef _WIN32
+    localtime_s(&tm_buf, &t);
+#else
+    localtime_r(&t, &tm_buf);
+#endif
+    char fname[160];
+    strftime(fname, sizeof(fname), "recordings/timeline_%Y%m%d_%H%M%S.mp4", &tm_buf);
+
+    auto& zone = activeZone();
+    m_recorder.setAudioDevice(m_selectedAudioDevice);
+    if (!m_recorder.start(fname, zone.warpFBO.width(), zone.warpFBO.height(), 30)) {
+        std::cerr << "[Timeline] Export failed: recorder.start() returned false\n";
+        return;
+    }
+
+    double waStart = m_timeline.workAreaStart();
+    double waEnd   = m_timeline.workAreaEnd();
+    m_timeline.seek(waStart);
+    m_timeline.play();
+
+    m_timelineExporting = true;
+    m_timelineExportEnd = waEnd;
+    m_timelineExportPath = fname;
+    std::cerr << "[Timeline] Exporting " << waStart << "s → " << waEnd
+              << "s to " << fname << "\n";
+#endif
+}
+
 // Minimal show-programming timeline UI. Transport + ruler + per-layer tracks.
 // Interactions: click ruler to seek, drag playhead to scrub, drag clip body to
-// move, drag clip edges to trim, "+Clip" adds a 5-second clip at the playhead.
+// move, drag clip edges to trim, right-click track for +Clip at cursor.
 void Application::renderTimelinePanel() {
     // Generous inner padding so the ruler and tracks don't kiss the window edges.
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(20, 14));
-    ImGui::Begin("Timeline");
+    // NoCollapse disables ImGui's default title-bar chevron — we render our
+    // own minimize button at the far right of the transport row instead.
+    ImGui::Begin("Timeline", nullptr, ImGuiWindowFlags_NoCollapse);
     ImGui::PopStyleVar();
+
+    // Auto-resize the dock node when the minimize flag toggles. Docked windows
+    // don't obey SetNextWindowSize, so we reach into the dock builder and
+    // resize the containing node directly. Previous expanded height is saved
+    // so "expand" restores whatever height the user had dragged to.
+    {
+        static bool   s_prevMinimized = false;
+        static ImVec2 s_savedExpanded(0, 0);
+        if (m_timelineMinimized != s_prevMinimized) {
+            ImGuiID dockId = ImGui::GetWindowDockID();
+            if (ImGuiDockNode* node = ImGui::DockBuilderGetNode(dockId)) {
+                if (m_timelineMinimized) {
+                    s_savedExpanded = node->Size;
+                    float minH = ImGui::GetFrameHeightWithSpacing() + 24.0f;
+                    ImGui::DockBuilderSetNodeSize(dockId, ImVec2(node->Size.x, minH));
+                } else {
+                    float restoreH = (s_savedExpanded.y > 80.0f)
+                                   ? s_savedExpanded.y
+                                   : ImGui::GetMainViewport()->Size.y * 0.28f;
+                    ImGui::DockBuilderSetNodeSize(dockId, ImVec2(node->Size.x, restoreH));
+                }
+            }
+            s_prevMinimized = m_timelineMinimized;
+        }
+    }
+
+    static bool s_tlCollapsed = false;
+
+    // Zoom & horizontal scroll state. Hoisted so the transport-row zoom slider
+    // can drive them (previously hidden inside the ruler block, and wheel-driven).
+    static float  s_tlZoom   = 1.0f;
+    static double s_tlScroll = 0.0;
+    if (s_tlZoom < 1.0f)  s_tlZoom = 1.0f;
+    if (s_tlZoom > 64.0f) s_tlZoom = 64.0f;
+
+    // ── Auto-sync tracks with the layer stack ─────────────────────────────
+    // Every layer gets exactly one track. Newly-added layers also get a default
+    // clip spanning their natural duration (video length if known, otherwise
+    // the full timeline) — layers appear as editable bars immediately, no
+    // right-click ritual required.
+    {
+        std::unordered_set<uint32_t> liveIds;
+        for (int i = 0; i < m_layerStack.count(); i++) {
+            auto l = m_layerStack[i];
+            if (!l || l->id == 0) continue;
+            liveIds.insert(l->id);
+            if (auto* tr = m_timeline.findTrack(l->id)) {
+                tr->name = l->name;  // keep label in sync
+            } else {
+                m_timeline.ensureTrack(l->id, l->name);
+                double d = (l->source) ? l->source->duration() : 0.0;
+                if (d <= 0.0) d = m_timeline.duration();
+                if (d > m_timeline.duration()) d = m_timeline.duration();
+                m_timeline.addClip(l->id, 0.0, d, l->name);
+            }
+        }
+        // Remove tracks for deleted layers.
+        auto& tracks = m_timeline.tracks();
+        for (int i = (int)tracks.size() - 1; i >= 0; i--) {
+            if (!liveIds.count(tracks[i].layerId)) {
+                m_timeline.removeTrackForLayer(tracks[i].layerId);
+            }
+        }
+    }
 
     // Keyboard shortcuts (only when the Timeline window is focused)
     if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) {
         if (ImGui::IsKeyPressed(ImGuiKey_Space)) m_timeline.togglePlay();
         if (ImGui::IsKeyPressed(ImGuiKey_Home))  m_timeline.seek(0.0);
         if (ImGui::IsKeyPressed(ImGuiKey_End))   m_timeline.seek(m_timeline.duration());
+        // Work area: I sets in-point, O sets out-point, Backslash resets.
+        if (ImGui::IsKeyPressed(ImGuiKey_I)) {
+            m_timeline.setWorkArea(m_timeline.playhead(), m_timeline.workAreaEnd());
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_O)) {
+            m_timeline.setWorkArea(m_timeline.workAreaStart(), m_timeline.playhead());
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_Backslash)) {
+            m_timeline.resetWorkArea();
+        }
+        // K = split every clip the playhead touches at the playhead.
+        // (AE uses Ctrl+Shift+D; Premiere uses K then I/O; we pick the most
+        //  direct mnemonic since Space is already Play.)
+        if (ImGui::IsKeyPressed(ImGuiKey_K)) {
+            double ph = m_timeline.playhead();
+            for (auto& tr : m_timeline.tracks()) {
+                // Snapshot: can't mutate clips while iterating.
+                std::vector<uint32_t> hits;
+                for (auto& c : tr.clips) {
+                    if (ph > c.startTime + 0.05 && ph < c.endTime() - 0.05) hits.push_back(c.id);
+                }
+                for (uint32_t cid : hits) {
+                    auto* c = m_timeline.findClip(tr.layerId, cid);
+                    if (!c) continue;
+                    double splitOffset = ph - c->startTime;
+                    double rightDur = c->duration - splitOffset;
+                    // New right-hand clip inherits source + sourceIn offset so video resumes.
+                    auto* nc = m_timeline.addClip(tr.layerId, ph, rightDur, c->name, c->sourcePath);
+                    if (nc) {
+                        nc->kind = c->kind;
+                        nc->tint = c->tint;
+                        nc->sourceIn = c->sourceIn + splitOffset;
+                        nc->sourceOut = c->sourceOut;
+                    }
+                    c->duration = splitOffset;
+                }
+                if (!hits.empty()) m_timeline.sortTrack(tr.layerId);
+            }
+        }
     }
 
     // --- Layout constants (shared with ruler + tracks so everything aligns) ---
@@ -3453,7 +3643,10 @@ void Application::renderTimelinePanel() {
         // Icon buttons: drawn with ImDrawList so glyph coverage is never a factor.
         auto iconBtn = [&](const char* id, int kind, bool active = false) -> bool {
             // kind: 0 = play ▶, 1 = pause ‖, 2 = stop ■, 3 = loop ↻
-            ImVec2 size(28, 22);
+            // Match the height of framed widgets (DragFloat, Button) so the
+            // whole transport row baselines cleanly.
+            float h = ImGui::GetFrameHeight();
+            ImVec2 size(h + 6.0f, h);
             ImVec2 p = ImGui::GetCursorScreenPos();
             bool clicked = ImGui::InvisibleButton(id, size);
             bool hov = ImGui::IsItemHovered();
@@ -3478,19 +3671,47 @@ void Application::renderTimelinePanel() {
                 // Stop — filled square
                 d->AddRectFilled(ImVec2(cx - 4, cy - 4), ImVec2(cx + 4, cy + 4), fg, 1.0f);
             } else if (kind == 3) {
-                // Loop — circular arrow approximation (arc + arrow head)
-                d->PathArcTo(ImVec2(cx, cy), 5.0f, -2.8f, 2.0f, 20);
+                // Loop — infinity (∞) lemniscate: x = sin(t)*A, y = sin(2t)*A/2
+                const int n = 32;
+                for (int i = 0; i <= n; i++) {
+                    float t = (float)i / n * 6.2831853f;
+                    float xo = sinf(t) * 6.5f;
+                    float yo = sinf(t * 2.0f) * 2.8f;
+                    d->PathLineTo(ImVec2(cx + xo, cy + yo));
+                }
                 d->PathStroke(fg, 0, 1.6f);
-                // arrow head
-                d->AddTriangleFilled(ImVec2(cx + 5, cy - 1),
-                                     ImVec2(cx + 2, cy - 4),
-                                     ImVec2(cx + 7, cy - 4), fg);
+            } else if (kind == 4) {
+                // Minimize — horizontal bar (—)
+                d->AddRectFilled(ImVec2(cx - 5, cy - 1), ImVec2(cx + 5, cy + 1), fg, 1.0f);
+            } else if (kind == 5) {
+                // Expand — upward chevron (⌃)
+                d->AddLine(ImVec2(cx - 4, cy + 2), ImVec2(cx, cy - 3), fg, 1.6f);
+                d->AddLine(ImVec2(cx + 4, cy + 2), ImVec2(cx, cy - 3), fg, 1.6f);
+            } else if (kind == 6) {
+                // Panel-collapse — downward chevron (▾)
+                d->AddLine(ImVec2(cx - 4, cy - 2), ImVec2(cx, cy + 3), fg, 1.6f);
+                d->AddLine(ImVec2(cx + 4, cy - 2), ImVec2(cx, cy + 3), fg, 1.6f);
+            } else if (kind == 7) {
+                // Panel-expand — upward chevron (▴)
+                d->AddLine(ImVec2(cx - 4, cy + 2), ImVec2(cx, cy - 3), fg, 1.6f);
+                d->AddLine(ImVec2(cx + 4, cy + 2), ImVec2(cx, cy - 3), fg, 1.6f);
             }
             return clicked;
         };
 
         // Transport sits flush-left against the window padding — same left edge
         // as the REC / output-route buttons in the bottom transport bar.
+        // Minimize toggle — uses the same iconBtn as play/stop/loop to stay in
+        // the same visual family. kind 6/7 draws a tiny down/up chevron instead
+        // of a Unicode character (which rendered as "?" when the font lacked
+        // the glyph — see prior screenshot).
+        if (iconBtn("##TLMin", m_timelineMinimized ? 7 : 6, false)) {
+            m_timelineMinimized = !m_timelineMinimized;
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+            m_timelineMinimized ? "Expand timeline (show tracks)"
+                                : "Minimize timeline (transport only)");
+        ImGui::SameLine(0, 8);
         bool playing = m_timeline.isPlaying();
         if (iconBtn("##PlayPause", playing ? 1 : 0, playing)) m_timeline.togglePlay();
         ImGui::SameLine();
@@ -3500,6 +3721,7 @@ void Application::renderTimelinePanel() {
         if (iconBtn("##Loop", 3, loop)) m_timeline.setLooping(!loop);
 
         ImGui::SameLine(0, 16);
+        ImGui::AlignTextToFramePadding();  // baseline with DragFloat/buttons
         double ph = m_timeline.playhead();
         int pm = (int)ph / 60, ps = (int)ph % 60;
         double dur = m_timeline.duration();
@@ -3507,6 +3729,7 @@ void Application::renderTimelinePanel() {
         ImGui::Text("%02d:%02d / %02d:%02d", pm, ps, dm, ds);
 
         ImGui::SameLine(0, 16);
+        ImGui::AlignTextToFramePadding();
         ImGui::TextDisabled("Dur");
         ImGui::SameLine();
         ImGui::SetNextItemWidth(72);
@@ -3514,70 +3737,440 @@ void Application::renderTimelinePanel() {
         if (ImGui::DragFloat("##Dur", &dsec, 1.0f, 1.0f, 3600.0f * 4.0f, "%.0fs")) {
             m_timeline.setDuration((double)dsec);
         }
+
+        // Zoom slider — replaces the old wheel-zoom. Logarithmic feel so the
+        // whole 1x→64x range fits a short slider without low-zoom being cramped.
+        ImGui::SameLine(0, 14);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("Zoom");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(120);
+        {
+            float logZ = std::log2(s_tlZoom);  // 0..6 for 1..64
+            if (ImGui::SliderFloat("##Zoom", &logZ, 0.0f, 6.0f, "")) {
+                s_tlZoom = std::pow(2.0f, logZ);
+                if (s_tlZoom < 1.0f)  s_tlZoom = 1.0f;
+                if (s_tlZoom > 64.0f) s_tlZoom = 64.0f;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Zoom: %.1fx — shows %.1fs at a time\n"
+                                  "(double-click ruler to reset)",
+                                  s_tlZoom, m_timeline.duration() / s_tlZoom);
+            }
+        }
+
+        // ── REC / audio / GO LIVE cluster: right-anchored AFTER the collapse
+        //    button. We reserve its width first so Export + TLCollapse can be
+        //    positioned to the LEFT of the cluster.
+#ifdef HAS_FFMPEG
+        const float kRecBtnW    = 64.0f;
+        const float kAudioComboW= 150.0f;
+        const float kMeterW     = 100.0f;
+        const float kGoLiveBtnW = 80.0f;
+        const float kClusterGap = 10.0f;
+        const float kClusterBtnPreGap = 14.0f; // gap between TLCollapse and cluster
+        const float kRecClusterW = kRecBtnW + kClusterGap + kAudioComboW
+                                 + kClusterGap + kMeterW + kClusterGap + kGoLiveBtnW;
+#else
+        const float kRecClusterW = 0.0f;
+        const float kClusterBtnPreGap = 0.0f;
+#endif
+
+        // Right-aligned: Work Area readout + Export button.
+        // Export renders the Work Area (or full duration) to an .mp4 —
+        // seeks to the in-point, plays, auto-stops at the out-point.
+        {
+            double wa0 = m_timeline.workAreaStart();
+            double wa1 = m_timeline.workAreaEnd();
+            int wm0 = (int)wa0 / 60, ws0 = (int)wa0 % 60;
+            int wm1 = (int)wa1 / 60, ws1 = (int)wa1 % 60;
+            char waLbl[48];
+            snprintf(waLbl, sizeof(waLbl), "%d:%02d–%d:%02d", wm0, ws0, wm1, ws1);
+
+            float waW  = ImGui::CalcTextSize(waLbl).x;
+            float pad  = 12.0f;
+            float rightReserve = kRecClusterW + kClusterBtnPreGap;
+            float targetX = ImGui::GetWindowContentRegionMax().x - rightReserve - pad - waW;
+
+            ImGui::SameLine();
+            if (targetX > ImGui::GetCursorPosX()) ImGui::SetCursorPosX(targetX);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextDisabled("%s", waLbl);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                "Work Area — the range that Export will render.\n"
+                "Press I at playhead to set in-point, O to set out-point.\n"
+                "Press \\ to reset (full duration).\n"
+                "Trigger Export via right-click on REC.");
+        }
+
+        // (Secondary collapse toggle removed — the panel-level minimize on the
+        // far left of the header is the single authoritative show/hide control.)
+
+#ifdef HAS_FFMPEG
+        // ── REC / System Audio / meter / GO LIVE cluster (merged from old
+        //    bottom transport bar). Right-anchored at the very end of the row.
+        {
+            auto& zone = activeZone();
+            float frameH = ImGui::GetFrameHeight();
+            updateAudioMeter();
+
+            // Jump to the cluster's right-anchored start.
+            ImGui::SameLine(0, 0);
+            float clusterStartX = ImGui::GetWindowContentRegionMax().x - kRecClusterW;
+            if (clusterStartX > ImGui::GetCursorPosX())
+                ImGui::SetCursorPosX(clusterStartX);
+
+            // Custom "pill" button matching iconBtn height — used for REC/STOP/GO LIVE.
+            auto pillBtn = [&](const char* id, const char* label, float w,
+                               ImU32 borderCol, ImU32 textCol, bool enabled = true) -> bool {
+                ImVec2 p = ImGui::GetCursorScreenPos();
+                ImVec2 size(w, frameH);
+                if (!enabled) ImGui::BeginDisabled();
+                bool clicked = ImGui::InvisibleButton(id, size);
+                bool hov = ImGui::IsItemHovered();
+                if (!enabled) ImGui::EndDisabled();
+                ImDrawList* d = ImGui::GetWindowDrawList();
+                ImU32 bg = hov ? IM_COL32(255, 255, 255, 30)
+                               : IM_COL32(255, 255, 255, 15);
+                d->AddRectFilled(p, ImVec2(p.x + size.x, p.y + size.y), bg, 5.0f);
+                d->AddRect(p, ImVec2(p.x + size.x, p.y + size.y), borderCol, 5.0f, 0, 1.0f);
+                ImVec2 ts = ImGui::CalcTextSize(label);
+                d->AddText(ImVec2(p.x + (size.x - ts.x) * 0.5f,
+                                  p.y + (size.y - ts.y) * 0.5f),
+                           textCol, label);
+                return clicked && enabled;
+            };
+
+            // Unified palette — matches the iconBtn family: muted white borders,
+            // bright white icon/text; red only for active-recording / live.
+            const ImU32 kAccent    = IM_COL32(235, 240, 250, 245);
+            const ImU32 kAccentDim = IM_COL32(255, 255, 255, 80);
+            const ImU32 kText      = IM_COL32(235, 240, 250, 245);
+            const ImU32 kTextDim   = IM_COL32(130, 140, 155, 180);
+            const ImU32 kRed       = IM_COL32(255, 70, 70, 255);
+            const ImU32 kRedDim    = IM_COL32(255, 70, 70, 140);
+            float timeNow = (float)ImGui::GetTime();
+
+            // REC / STOP (in-place swap). Right-click opens a menu with
+            // timeline-export — the old separate Export pill is merged here.
+            bool recording  = m_recorder.isActive();
+            bool exporting  = m_timelineExporting;
+            const char* recLabel = (recording || exporting)
+                                     ? (exporting ? "EXPORT" : "STOP")
+                                     : "REC";
+            if (!recording) {
+                if (pillBtn("##Rec", recLabel, kRecBtnW, kRedDim, kRed)) {
+                    if (exporting) {
+                        m_timeline.pause();
+                        m_timelineExporting = false;
+                    } else {
+                        auto now = std::chrono::system_clock::now();
+                        auto t = std::chrono::system_clock::to_time_t(now);
+                        struct tm tm_buf;
+#ifdef _WIN32
+                        localtime_s(&tm_buf, &t);
+#else
+                        localtime_r(&t, &tm_buf);
+#endif
+                        char fname[128];
+                        strftime(fname, sizeof(fname), "recordings/%Y%m%d_%H%M%S.mp4", &tm_buf);
+                        m_recorder.setAudioDevice(m_selectedAudioDevice);
+                        m_recorder.start(fname, zone.warpFBO.width(), zone.warpFBO.height(), 30);
+                    }
+                }
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
+                    ImGui::OpenPopup("##RecMenu");
+                if (ImGui::BeginPopup("##RecMenu")) {
+                    if (ImGui::MenuItem("Record Canvas (MP4)")) {
+                        auto now = std::chrono::system_clock::now();
+                        auto t = std::chrono::system_clock::to_time_t(now);
+                        struct tm tm_buf;
+#ifdef _WIN32
+                        localtime_s(&tm_buf, &t);
+#else
+                        localtime_r(&t, &tm_buf);
+#endif
+                        char fname[128];
+                        strftime(fname, sizeof(fname), "recordings/%Y%m%d_%H%M%S.mp4", &tm_buf);
+                        m_recorder.setAudioDevice(m_selectedAudioDevice);
+                        m_recorder.start(fname, zone.warpFBO.width(), zone.warpFBO.height(), 30);
+                    }
+                    if (ImGui::MenuItem("Export Timeline Work Area", nullptr, false, !exporting)) {
+                        startTimelineExport();
+                    }
+                    ImGui::EndPopup();
+                }
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_None))
+                    ImGui::SetTooltip(
+                        exporting ? "Click to stop timeline export."
+                                  : "Click to record canvas (MP4).\n"
+                                    "Right-click for timeline export.");
+            } else {
+                if (pillBtn("##StopRec", "STOP", kRecBtnW, kRedDim, kRed)) {
+                    m_recorder.stop();
+                }
+                // Pulse dot + timer as overlay on top of the button area.
+                float pulse = 0.5f + 0.5f * sinf(timeNow * 4.0f);
+                ImVec2 itemMin = ImGui::GetItemRectMin();
+                ImVec2 itemMax = ImGui::GetItemRectMax();
+                ImDrawList* d = ImGui::GetWindowDrawList();
+                d->AddCircleFilled(ImVec2(itemMin.x + 8.0f, itemMin.y + (itemMax.y - itemMin.y) * 0.5f),
+                                   3.0f, IM_COL32(255, 70, 70, (int)(pulse * 255)));
+            }
+            ImGui::SameLine(0, kClusterGap);
+
+            // System Audio combo — refresh device list every 3s.
+            {
+                static double lastEnum = 0;
+                double nowT = glfwGetTime();
+                if (m_audioDevices.empty() || nowT - lastEnum > 3.0) {
+                    lastEnum = nowT;
+                    m_audioDevices = VideoRecorder::enumerateAudioDevices();
+                    m_outputDevices.clear();
+                    for (auto& dv : m_audioDevices) {
+                        if (!dv.isCapture) m_outputDevices.push_back(dv);
+                    }
+                }
+            }
+            std::string audioPreview = m_mixerEnabled ? "Mixer" : "System Audio";
+            if (!m_mixerEnabled && m_selectedAudioDevice >= 0 &&
+                m_selectedAudioDevice < (int)m_audioDevices.size()) {
+                audioPreview = m_audioDevices[m_selectedAudioDevice].name;
+                if (audioPreview.length() > 20) audioPreview = audioPreview.substr(0, 17) + "...";
+            }
+            ImGui::SetNextItemWidth(kAudioComboW);
+            if (ImGui::BeginCombo("##AudioSrc", audioPreview.c_str())) {
+                if (ImGui::Selectable("System Audio", !m_mixerEnabled && m_selectedAudioDevice == -1)) {
+                    if (m_mixerEnabled) { m_audioMixer.stop(); m_audioAnalyzer.setExternalFeed(false); m_mixerEnabled = false; }
+                    m_selectedAudioDevice = -1;
+                }
+                for (int i = 0; i < (int)m_audioDevices.size(); i++) {
+                    ImGui::PushID(i);
+                    if (ImGui::Selectable(m_audioDevices[i].name.c_str(), !m_mixerEnabled && m_selectedAudioDevice == i)) {
+                        if (m_mixerEnabled) { m_audioMixer.stop(); m_audioAnalyzer.setExternalFeed(false); m_mixerEnabled = false; }
+                        m_selectedAudioDevice = i;
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::Separator();
+                if (ImGui::Selectable("Mixer", m_mixerEnabled)) {
+                    if (!m_mixerEnabled) {
+                        m_mixerEnabled = true;
+                        m_audioAnalyzer.setExternalFeed(true);
+                        if (m_audioMixer.inputCount() == 0)
+                            m_audioMixer.addInput("", "System Audio", false);
+                        m_audioMixer.start();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine(0, kClusterGap);
+
+            // Compact stereo level meter (two thin bars stacked).
+            {
+                ImVec2 mpos = ImGui::GetCursorScreenPos();
+                float meterH = 14.0f;
+                float meterY = mpos.y + (frameH - meterH) * 0.5f;
+                float gap = 2.0f, singleH = (meterH - gap) * 0.5f;
+                ImU32 trackBg = IM_COL32(20, 24, 35, 200);
+                ImDrawList* d = ImGui::GetWindowDrawList();
+                d->AddRectFilled(ImVec2(mpos.x, meterY),
+                                 ImVec2(mpos.x + kMeterW, meterY + singleH), trackBg, 2.0f);
+                d->AddRectFilled(ImVec2(mpos.x, meterY + singleH + gap),
+                                 ImVec2(mpos.x + kMeterW, meterY + meterH), trackBg, 2.0f);
+                float fillL = m_audioLevelSmoothL * kMeterW;
+                float fillR = m_audioLevelSmoothR * kMeterW;
+                d->AddRectFilled(ImVec2(mpos.x, meterY),
+                                 ImVec2(mpos.x + fillL, meterY + singleH), kAccentDim, 2.0f);
+                d->AddRectFilled(ImVec2(mpos.x, meterY + singleH + gap),
+                                 ImVec2(mpos.x + fillR, meterY + meterH), kAccentDim, 2.0f);
+                ImGui::Dummy(ImVec2(kMeterW, frameH));
+            }
+            ImGui::SameLine(0, kClusterGap);
+
+            // GO LIVE / END
+            static const int aspectNums[] = { 16, 4, 16, 0 };
+            static const int aspectDens[] = { 9,  3, 10, 0 };
+            if (!m_rtmpOutput.isActive()) {
+                bool hasKey = m_streamKeyBuf[0] != '\0';
+                if (pillBtn("##Live", "GO LIVE", kGoLiveBtnW, kAccentDim,
+                            hasKey ? kAccent : kTextDim, hasKey)) {
+                    m_rtmpOutput.start(m_streamKeyBuf, zone.warpFBO.width(), zone.warpFBO.height(),
+                                       aspectNums[m_streamAspect], aspectDens[m_streamAspect], 30);
+                }
+                if (!hasKey && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("Set stream key in the Stream tab");
+            } else {
+                if (pillBtn("##EndLive", "END", kGoLiveBtnW, kRedDim, kRed)) {
+                    m_rtmpOutput.stop();
+                }
+                // Pulse dot overlay on left edge of the END button.
+                float pulse = 0.5f + 0.5f * sinf(timeNow * 3.0f);
+                ImVec2 itemMin = ImGui::GetItemRectMin();
+                ImVec2 itemMax = ImGui::GetItemRectMax();
+                ImDrawList* d = ImGui::GetWindowDrawList();
+                d->AddCircleFilled(ImVec2(itemMin.x + 8.0f, itemMin.y + (itemMax.y - itemMin.y) * 0.5f),
+                                   3.0f, IM_COL32(255, 255, 255, (int)(pulse * 255)));
+                (void)kAccent; // silence unused-variable warning on some paths
+            }
+            (void)kText; (void)kTextDim; // not all paths use these
+        }
+#endif
+    }
+
+    // Minimized — stop after the transport row. Panel stays docked so users
+    // can drag the splitter to shrink it to just this strip.
+    if (m_timelineMinimized) {
+        ImGui::End();
+        return;
     }
 
     ImGui::Dummy(ImVec2(0, 6));
 
-    // --- Track list header: full-width ghost button, flush-left like the transport.
-    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.18f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.0f, 1.0f, 1.0f, 0.28f));
-    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.0f, 1.0f, 1.0f, 0.92f));
-    if (ImGui::Button("+ Track for each layer", ImVec2(-FLT_MIN, 0))) {
-        for (int i = 0; i < m_layerStack.count(); i++) {
-            auto l = m_layerStack[i];
-            if (!l || l->id == 0) continue;
-            if (!m_timeline.findTrack(l->id)) m_timeline.ensureTrack(l->id, l->name);
-        }
-    }
-    ImGui::PopStyleColor(4);
-    ImGui::Dummy(ImVec2(0, 4));
+  if (!s_tlCollapsed) {
 
-    // --- Ruler + tracks area ---
+    // --- Ruler + tracks area — AE-style with fixed left gutter for layer names ---
+    // The gutter mirrors the Layer panel's row treatment: visibility dot, kind
+    // swatch, and the layer name. Each track row's gutter cell stays pinned
+    // while the clip area scrolls/zooms.
+    const float gutterW = 160.0f;
     float availW = ImGui::GetContentRegionAvail().x;
-    float trackAreaW = availW - labelW - 4.0f;
-    if (trackAreaW < 50.0f) trackAreaW = 50.0f;
+    float trackAreaW = availW - gutterW;
+    if (trackAreaW < 120.0f) trackAreaW = 120.0f;
 
     double duration = m_timeline.duration();
     double playhead = m_timeline.playhead();
+
+    // Zoom / scroll: zoom is now driven by the transport-row slider (hoisted
+    // to the top of this function). Zoom=1 shows the whole show; zoom=64 shows
+    // 1/64 of it. Horizontal wheel pans; zoom is slider-only.
+    double visibleDur = duration / s_tlZoom;
+    if (s_tlScroll < 0.0) s_tlScroll = 0.0;
+    if (s_tlScroll + visibleDur > duration) s_tlScroll = duration - visibleDur;
+    if (s_tlScroll < 0.0) s_tlScroll = 0.0;
+
+    // timeToX returns an offset from rulerOrigin.x (which lives past the gutter).
     auto timeToX = [&](double t) {
-        return (float)(t / duration) * trackAreaW;
+        return (float)((t - s_tlScroll) / visibleDur) * trackAreaW;
     };
     auto xToTime = [&](float x) {
-        return (double)(x / trackAreaW) * duration;
+        return s_tlScroll + (double)(x / trackAreaW) * visibleDur;
     };
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
-    // Ruler row
-    ImVec2 rulerOrigin = ImGui::GetCursorScreenPos();
-    rulerOrigin.x += labelW + 4.0f;
+    // Ruler row — gutter holds a "Tracks" title; ruler sits in the clip area.
+    ImVec2 fullOrigin = ImGui::GetCursorScreenPos();
     ImGui::Dummy(ImVec2(availW, rulerH));
-    // Background
-    dl->AddRectFilled(rulerOrigin, ImVec2(rulerOrigin.x + trackAreaW, rulerOrigin.y + rulerH),
-                      IM_COL32(30, 34, 42, 255));
-    // Tick marks — adaptive: pick interval so ~10-12 major ticks fit
-    double majorInterval = 10.0;
-    while (duration / majorInterval > 18.0) majorInterval *= 2.0;
-    while (duration / majorInterval < 6.0 && majorInterval > 1.0) majorInterval *= 0.5;
-    for (double t = 0; t <= duration + 0.01; t += majorInterval) {
-        float x = rulerOrigin.x + timeToX(t);
-        dl->AddLine(ImVec2(x, rulerOrigin.y + rulerH - 6),
-                    ImVec2(x, rulerOrigin.y + rulerH),
-                    IM_COL32(180, 190, 210, 200));
-        char lbl[16]; snprintf(lbl, sizeof(lbl), "%d:%02d", (int)t / 60, (int)t % 60);
-        dl->AddText(ImVec2(x + 2, rulerOrigin.y + 2), IM_COL32(170, 180, 200, 220), lbl);
+    ImVec2 rulerOrigin(fullOrigin.x + gutterW, fullOrigin.y);
+    // Gutter header — small caps label so users read the column at a glance.
+    {
+        dl->AddRectFilled(fullOrigin,
+                          ImVec2(fullOrigin.x + gutterW - 4, fullOrigin.y + rulerH),
+                          IM_COL32(255, 255, 255, 4), 6.0f);
+        dl->AddText(ImGui::GetFont(), 10.0f,
+                    ImVec2(fullOrigin.x + 10, fullOrigin.y + 5),
+                    IM_COL32(170, 180, 200, 200), "TRACKS");
     }
-    // Ruler interaction: click/drag to seek.
+    dl->AddRectFilled(rulerOrigin, ImVec2(rulerOrigin.x + trackAreaW, rulerOrigin.y + rulerH),
+                      IM_COL32(255, 255, 255, 6), 6.0f);
+    // Adaptive tick interval: scales with the VISIBLE duration, so zooming in
+    // reveals finer subdivisions (down to 1s, 0.5s, 0.1s).
+    double majorInterval = 10.0;
+    while (visibleDur / majorInterval > 18.0) majorInterval *= 2.0;
+    while (visibleDur / majorInterval < 6.0 && majorInterval > 0.1) majorInterval *= 0.5;
+    double firstTick = std::floor(s_tlScroll / majorInterval) * majorInterval;
+    for (double t = firstTick; t <= s_tlScroll + visibleDur + 0.01; t += majorInterval) {
+        if (t < 0) continue;
+        float x = rulerOrigin.x + timeToX(t);
+        if (x < rulerOrigin.x - 1 || x > rulerOrigin.x + trackAreaW + 1) continue;
+        dl->AddLine(ImVec2(x, rulerOrigin.y + rulerH - 5),
+                    ImVec2(x, rulerOrigin.y + rulerH),
+                    IM_COL32(255, 255, 255, 110));
+        char lbl[16];
+        if (majorInterval < 1.0) snprintf(lbl, sizeof(lbl), "%d:%05.2f", (int)t / 60, std::fmod(t, 60.0));
+        else                      snprintf(lbl, sizeof(lbl), "%d:%02d", (int)t / 60, ((int)t) % 60);
+        dl->AddText(ImGui::GetFont(), 10.0f,
+                    ImVec2(x + 4, rulerOrigin.y + 4),
+                    IM_COL32(255, 255, 255, 150), lbl);
+    }
+    // ── Work Area band — visible subset that Export will render. ─────────
+    // Draw the band BEHIND the ruler invisible button so drags on the band
+    // itself are handled below (they would otherwise hit the ruler-seek path).
+    double waStart = m_timeline.workAreaStart();
+    double waEnd   = m_timeline.workAreaEnd();
+    float  waX0    = rulerOrigin.x + timeToX(waStart);
+    float  waX1    = rulerOrigin.x + timeToX(waEnd);
+    if (waX1 - waX0 >= 2.0f) {
+        // Translucent indigo band spanning the ruler + some pixels below.
+        ImU32 waFill = IM_COL32(92, 104, 210, 40);
+        ImU32 waEdge = IM_COL32(128, 140, 240, 220);
+        dl->AddRectFilled(ImVec2(waX0, rulerOrigin.y),
+                          ImVec2(waX1, rulerOrigin.y + rulerH),
+                          waFill, 4.0f);
+        // Bracket marks at each end.
+        dl->AddRectFilled(ImVec2(waX0, rulerOrigin.y),
+                          ImVec2(waX0 + 2, rulerOrigin.y + rulerH), waEdge);
+        dl->AddRectFilled(ImVec2(waX1 - 2, rulerOrigin.y),
+                          ImVec2(waX1, rulerOrigin.y + rulerH), waEdge);
+    }
+
     ImGui::SetCursorScreenPos(rulerOrigin);
     ImGui::InvisibleButton("##TL_Ruler", ImVec2(trackAreaW, rulerH));
-    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(0, 0.0f)) {
-        float mx = ImGui::GetIO().MousePos.x - rulerOrigin.x;
-        m_timeline.seek(xToTime(mx));
-    } else if (ImGui::IsItemClicked()) {
-        float mx = ImGui::GetIO().MousePos.x - rulerOrigin.x;
-        m_timeline.seek(xToTime(mx));
+    bool rulerHover = ImGui::IsItemHovered();
+
+    // Work Area drag: click within 6px of either edge to drag that edge.
+    // Keeps the ruler-seek behavior outside the edge hot-zones.
+    static int waDrag = 0; // 0 none, 1 drag start, 2 drag end
+    float mxRel = ImGui::GetIO().MousePos.x - rulerOrigin.x;
+    bool overWAStart = std::abs(mxRel - timeToX(waStart)) < 6.0f;
+    bool overWAEnd   = std::abs(mxRel - timeToX(waEnd))   < 6.0f;
+    if (rulerHover && (overWAStart || overWAEnd)) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
     }
+    if (ImGui::IsItemClicked() && (overWAStart || overWAEnd)) {
+        waDrag = overWAStart ? 1 : 2;
+    }
+    if (waDrag != 0 && ImGui::IsMouseDown(0)) {
+        double t = xToTime(mxRel);
+        if (t < 0.0) t = 0.0;
+        if (t > m_timeline.duration()) t = m_timeline.duration();
+        if (waDrag == 1) m_timeline.setWorkArea(t, m_timeline.workAreaEnd());
+        else             m_timeline.setWorkArea(m_timeline.workAreaStart(), t);
+    } else if (waDrag != 0 && !ImGui::IsMouseDown(0)) {
+        waDrag = 0;
+    }
+
+    // Ruler-seek: only when NOT dragging a work-area edge.
+    if (waDrag == 0) {
+        if (ImGui::IsItemActive() && ImGui::IsMouseDragging(0, 0.0f)) {
+            m_timeline.seek(xToTime(mxRel));
+        } else if (ImGui::IsItemClicked()) {
+            m_timeline.seek(xToTime(mxRel));
+        }
+    }
+    // Double-click ruler to reset zoom
+    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+        s_tlZoom = 1.0f;
+        s_tlScroll = 0.0;
+    }
+
+    // Mouse wheel over the timeline = horizontal pan. Zoom is slider-only now.
+    {
+        float wheel = ImGui::GetIO().MouseWheel;
+        bool hoverTL = rulerHover || ImGui::IsWindowHovered(
+                            ImGuiHoveredFlags_RootAndChildWindows |
+                            ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+        if (wheel != 0.0f && hoverTL) {
+            s_tlScroll -= wheel * visibleDur * 0.08;
+            if (s_tlScroll < 0.0) s_tlScroll = 0.0;
+            if (s_tlScroll + visibleDur > duration) s_tlScroll = duration - visibleDur;
+        }
+    }
+
+    // Vertical grid lines spanning the track area (AE-style rhythm).
+    // Drawn after tracks so they overlay clip fills faintly — handled in track loop via the same xs.
+    ImGui::Dummy(ImVec2(0, 4));
 
     // Clip drag state — track → clip id + drag mode (0 move, 1 left trim, 2 right trim)
     static uint32_t dragLayerId = 0, dragClipId = 0;
@@ -3585,81 +4178,685 @@ void Application::renderTimelinePanel() {
     static double dragStartTime = 0, dragStartDur = 0;
     static ImVec2 dragAnchor(0, 0);
 
-    // --- Track rows ---
+    // Clip context menu state — set on right-click, consumed when popup renders.
+    // `s_ctxClipId` doubles as "current clip selection" (set on left-click too).
+    // `s_trPickerId` is the transition whose effect-picker popup should open
+    // on the next frame (set when the user double-clicks a transition bar).
+    static uint32_t s_ctxLayerId = 0, s_ctxClipId = 0;
+    static uint32_t s_trPickerId = 0;
+    static ImVec2   s_trPickerPos(0, 0);
+
+    // --- Track rows (pill-shaped, flush-left, AE-style) ---
+    const float trackSpacing = 6.0f;
+    const float trimZone     = 8.0f; // edge hot-zone width in pixels
+
+    // Build a layerId → groupId map so the loop below knows when to emit a
+    // group header row. Also collects the group bar's time-range (union of
+    // all member clips) so the header renders as a real draggable summary.
+    struct GroupHeaderInfo {
+        uint32_t groupId = 0;
+        double start = 0.0, end = 0.0;
+        std::string name;
+    };
+    auto layerGroupId = [&](uint32_t layerId) -> uint32_t {
+        for (int i = 0; i < m_layerStack.count(); i++) {
+            auto l = m_layerStack[i];
+            if (l && l->id == layerId) return l->groupId;
+        }
+        return 0;
+    };
+
+    uint32_t lastGroupId = 0;
     for (auto& track : m_timeline.tracks()) {
+        // Emit a group header row when we cross into a new non-zero group.
+        uint32_t gid = layerGroupId(track.layerId);
+        if (gid != 0 && gid != lastGroupId) {
+            // Compute time-range of all tracks in this group.
+            double gStart = 1e18, gEnd = 0.0;
+            std::string gName = "Group";
+            if (auto* grp = m_layerStack.groups().count(gid)
+                          ? &m_layerStack.groups().at(gid) : nullptr) {
+                gName = grp->name;
+            }
+            for (auto& gt : m_timeline.tracks()) {
+                if (layerGroupId(gt.layerId) != gid) continue;
+                for (const auto& c : gt.clips) {
+                    if (c.startTime < gStart) gStart = c.startTime;
+                    if (c.endTime() > gEnd)   gEnd   = c.endTime();
+                }
+            }
+            if (gEnd > gStart) {
+                const float ghH = 20.0f;
+                ImVec2 ghOrigin = ImGui::GetCursorScreenPos();
+                ImVec2 ghTrackOrigin(ghOrigin.x + gutterW, ghOrigin.y);
+                ImGui::Dummy(ImVec2(gutterW + trackAreaW, ghH));
+
+                // Header background — slightly brighter than tracks.
+                dl->AddRectFilled(ghOrigin, ImVec2(ghOrigin.x + gutterW - 4,
+                                                   ghOrigin.y + ghH),
+                                  IM_COL32(255, 255, 255, 14), 6.0f);
+                dl->AddRectFilled(ghTrackOrigin,
+                                  ImVec2(ghTrackOrigin.x + trackAreaW,
+                                         ghOrigin.y + ghH),
+                                  IM_COL32(255, 255, 255, 10), 6.0f);
+
+                // Chevron + group name in the gutter.
+                dl->AddTriangleFilled(ImVec2(ghOrigin.x + 12, ghOrigin.y + 6),
+                                      ImVec2(ghOrigin.x + 20, ghOrigin.y + 6),
+                                      ImVec2(ghOrigin.x + 16, ghOrigin.y + ghH - 6),
+                                      IM_COL32(200, 210, 230, 220));
+                dl->AddText(ImVec2(ghOrigin.x + 28, ghOrigin.y + (ghH - 14.0f) * 0.5f),
+                            IM_COL32(230, 235, 245, 240),
+                            gName.empty() ? "Group" : gName.c_str());
+
+                // Union bar in the clip area — thin pill that spans the group.
+                float gx0 = ghTrackOrigin.x + timeToX(gStart);
+                float gx1 = ghTrackOrigin.x + timeToX(gEnd);
+                if (gx1 - gx0 < 2.0f) gx1 = gx0 + 2.0f;
+                dl->AddRectFilled(ImVec2(gx0, ghOrigin.y + 4),
+                                  ImVec2(gx1, ghOrigin.y + ghH - 4),
+                                  IM_COL32(255, 255, 255, 28), 4.0f);
+                dl->AddRect(ImVec2(gx0, ghOrigin.y + 4),
+                            ImVec2(gx1, ghOrigin.y + ghH - 4),
+                            IM_COL32(255, 255, 255, 90), 4.0f, 0, 1.0f);
+
+                ImGui::Dummy(ImVec2(0, 2));
+            }
+        }
+        lastGroupId = gid;
+
         ImGui::PushID((int)track.layerId);
-        ImVec2 rowOrigin = ImGui::GetCursorScreenPos();
+        ImVec2 rowOrigin  = ImGui::GetCursorScreenPos();   // full-width left edge (gutter start)
+        ImVec2 trackOrigin(rowOrigin.x + gutterW, rowOrigin.y); // clip area start
         float rowY = rowOrigin.y;
 
-        // Label column (left)
-        dl->AddRectFilled(rowOrigin, ImVec2(rowOrigin.x + labelW, rowY + trackH),
-                          IM_COL32(24, 28, 36, 255));
-        dl->AddText(ImVec2(rowOrigin.x + 6, rowY + 4),
-                    track.muted ? IM_COL32(110, 110, 120, 200) : IM_COL32(220, 225, 235, 255),
-                    track.name.empty() ? "Layer" : track.name.c_str());
+        // Full-width invisible hit area — covers both gutter + track area so
+        // we can right-click anywhere in the row and get reasonable cursor state.
+        ImGui::InvisibleButton("##track", ImVec2(gutterW + trackAreaW, trackH));
 
-        // Mute / Solo mini buttons (below name)
-        ImGui::SetCursorScreenPos(ImVec2(rowOrigin.x + 4, rowY + trackH - 18));
-        if (ImGui::SmallButton(track.muted ? "M*" : "M")) track.muted = !track.muted;
-        ImGui::SameLine();
-        if (ImGui::SmallButton(track.solo ? "S*" : "S")) track.solo = !track.solo;
-        ImGui::SameLine();
-        if (ImGui::SmallButton("+Clip")) {
-            m_timeline.addClip(track.layerId, m_timeline.playhead(), 5.0, track.name);
+        // Track pill — only over the clip area; the gutter gets its own treatment.
+        dl->AddRectFilled(trackOrigin,
+                          ImVec2(trackOrigin.x + trackAreaW, rowY + trackH),
+                          IM_COL32(255, 255, 255, 10), 8.0f);
+
+        // Faint vertical grid synced to ruler majors (rhythm guides)
+        for (double t = majorInterval; t < duration; t += majorInterval) {
+            float gx = trackOrigin.x + timeToX(t);
+            dl->AddLine(ImVec2(gx, rowY + 4),
+                        ImVec2(gx, rowY + trackH - 4),
+                        IM_COL32(255, 255, 255, 14));
         }
 
-        // Track area (right)
-        ImVec2 taOrigin = ImVec2(rowOrigin.x + labelW + 4.0f, rowY);
-        ImGui::SetCursorScreenPos(taOrigin);
-        ImGui::InvisibleButton("##track", ImVec2(trackAreaW, trackH));
-        dl->AddRectFilled(taOrigin, ImVec2(taOrigin.x + trackAreaW, rowY + trackH),
-                          IM_COL32(18, 20, 26, 255));
+        // Empty-track hint — only shown for the rare case where every clip on
+        // a track has been deleted. Layers always auto-create a default bar.
+        if (track.clips.empty()) {
+            dl->AddText(ImGui::GetFont(), 11.0f,
+                        ImVec2(trackOrigin.x + 12,
+                               rowY + (trackH - 11.0f) * 0.5f),
+                        IM_COL32(255, 255, 255, 70), "click-and-drag to add a clip");
+        }
 
-        // Clips
+        // Clips — pills with rounded corners; hover shows trim handles.
+        // Color coding: video=indigo, shader=purple, color=gray — derived from
+        // clip.kind, or auto-sniffed from sourcePath extension when kind=Auto.
+        auto resolveKind = [](const TimelineClip& c) -> ClipKind {
+            if (c.kind != ClipKind::Auto) return c.kind;
+            if (c.sourcePath.empty()) return ClipKind::Shader; // a bare placeholder acts like a shader slot
+            auto dot = c.sourcePath.find_last_of('.');
+            std::string ext = (dot == std::string::npos) ? "" : c.sourcePath.substr(dot);
+            for (auto& ch : ext) ch = (char)tolower((unsigned char)ch);
+            if (ext == ".fs" || ext == ".frag" || ext == ".isf") return ClipKind::Shader;
+            return ClipKind::Video;
+        };
+        auto kindFill = [](ClipKind k, bool selected, bool hover) -> ImU32 {
+            int boost = selected ? 90 : hover ? 60 : 38;
+            switch (k) {
+                case ClipKind::Video:  return IM_COL32( 92, 116, 220, boost + 40);
+                case ClipKind::Shader: return IM_COL32(150,  96, 210, boost + 40);
+                case ClipKind::Color:  return IM_COL32(130, 140, 150, boost + 30);
+                default:               return IM_COL32(200, 200, 210, boost + 30);
+            }
+        };
+        auto kindEdge = [](ClipKind k, bool selected) -> ImU32 {
+            int a = selected ? 230 : 140;
+            switch (k) {
+                case ClipKind::Video:  return IM_COL32(130, 156, 255, a);
+                case ClipKind::Shader: return IM_COL32(190, 130, 250, a);
+                case ClipKind::Color:  return IM_COL32(180, 188, 198, a);
+                default:               return IM_COL32(255, 255, 255, a);
+            }
+        };
+        auto basename = [](const std::string& p) -> std::string {
+            if (p.empty()) return {};
+            auto slash = p.find_last_of("/\\");
+            return (slash == std::string::npos) ? p : p.substr(slash + 1);
+        };
+
+        float mx = ImGui::GetIO().MousePos.x;
+        float my = ImGui::GetIO().MousePos.y;
         for (auto& clip : track.clips) {
-            float x0 = taOrigin.x + timeToX(clip.startTime);
-            float x1 = taOrigin.x + timeToX(clip.endTime());
+            float x0 = trackOrigin.x + timeToX(clip.startTime);
+            float x1 = trackOrigin.x + timeToX(clip.endTime());
             if (x1 - x0 < 2.0f) x1 = x0 + 2.0f;
             ImVec2 a(x0, rowY + 4), b(x1, rowY + trackH - 4);
             bool selected = (dragLayerId == track.layerId && dragClipId == clip.id);
-            ImU32 fill = selected ? IM_COL32(90, 170, 220, 220) : IM_COL32(60, 120, 170, 200);
-            dl->AddRectFilled(a, b, fill, 3.0f);
-            dl->AddRect(a, b, IM_COL32(200, 220, 240, 255), 3.0f, 0, 1.5f);
-            {
-                char dlbl[64];
-                if (clip.name.empty()) snprintf(dlbl, sizeof(dlbl), "%.1fs", clip.duration);
-                else snprintf(dlbl, sizeof(dlbl), "%s (%.1fs)", clip.name.c_str(), clip.duration);
-                dl->AddText(ImVec2(x0 + 4, rowY + 7), IM_COL32(255, 255, 255, 240), dlbl);
+            bool hover    = (mx >= x0 && mx <= x1 && my >= a.y && my <= b.y && ImGui::IsItemHovered());
+            ClipKind k    = resolveKind(clip);
+            ImU32 fill    = (clip.tint != 0) ? (ImU32)clip.tint : kindFill(k, selected, hover);
+            ImU32 border  = kindEdge(k, selected);
+            dl->AddRectFilled(a, b, fill, 6.0f);
+            dl->AddRect(a, b, border, 6.0f, 0, 1.0f);
+
+            // Label: prefer filename (the "what will this clip play?" question),
+            // fall back to clip.name, then to duration. Width-aware clipping so
+            // tiny clips still show something.
+            std::string src = basename(clip.sourcePath);
+            const char* primary = !src.empty() ? src.c_str()
+                                               : (!clip.name.empty() ? clip.name.c_str() : "clip");
+            float clipPxW = x1 - x0;
+            char dlbl[96];
+            if (clipPxW < 40.0f)        snprintf(dlbl, sizeof(dlbl), "%.0fs", clip.duration);
+            else if (clipPxW < 110.0f)  snprintf(dlbl, sizeof(dlbl), "%s", primary);
+            else                         snprintf(dlbl, sizeof(dlbl), "%s · %.1fs", primary, clip.duration);
+            dl->PushClipRect(a, b, true);
+            dl->AddText(ImGui::GetFont(), 11.0f,
+                        ImVec2(x0 + 8, rowY + 10),
+                        IM_COL32(255, 255, 255, 245), dlbl);
+            dl->PopClipRect();
+
+            // Visible trim handles on hover (discoverability for resize)
+            if (hover && dragClipId == 0) {
+                bool onLeft  = (mx < x0 + trimZone);
+                bool onRight = (mx > x1 - trimZone);
+                if (onLeft) {
+                    dl->AddRectFilled(ImVec2(x0, a.y), ImVec2(x0 + 3, b.y),
+                                      IM_COL32(255, 220, 80, 220), 2.0f);
+                    ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+                } else if (onRight) {
+                    dl->AddRectFilled(ImVec2(x1 - 3, a.y), ImVec2(x1, b.y),
+                                      IM_COL32(255, 220, 80, 220), 2.0f);
+                    ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+                }
             }
 
-            // Hit-test for drag start on the invisible-button above
-            if (ImGui::IsMouseHoveringRect(a, b) && ImGui::IsItemHovered()
-                && ImGui::IsMouseClicked(0) && dragClipId == 0) {
-                float mx = ImGui::GetIO().MousePos.x;
+            // Begin drag on click within this clip rect — also select the clip
+            // so the inline inspector strip appears below the tracks.
+            if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(0) && dragClipId == 0
+                && mx >= x0 && mx <= x1 && my >= a.y && my <= b.y)
+            {
                 int mode = 0;
-                if (mx < x0 + 6.0f) mode = 1;        // left trim
-                else if (mx > x1 - 6.0f) mode = 2;   // right trim
-                else mode = 0;                        // move
+                if (mx < x0 + trimZone) mode = 1;
+                else if (mx > x1 - trimZone) mode = 2;
                 dragLayerId = track.layerId;
                 dragClipId = clip.id;
                 dragMode = mode;
                 dragStartTime = clip.startTime;
                 dragStartDur = clip.duration;
                 dragAnchor = ImGui::GetIO().MousePos;
+                s_ctxLayerId = track.layerId;
+                s_ctxClipId  = clip.id;
+            }
+
+        }
+
+        // Left-click-drag on empty track area (not over any existing clip) →
+        // create a new clip spanning the drag. This is the "click and drag the
+        // desired layer time" gesture — the sole creation path now that right-
+        // click interactions are disabled.
+        if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(0) && dragClipId == 0
+            && mx >= trackOrigin.x && my >= rowY && my <= rowY + trackH)
+        {
+            float relX = mx - trackOrigin.x;
+            double t = xToTime(relX);
+            bool onExistingClip = false;
+            for (const auto& c : track.clips) {
+                if (t >= c.startTime && t < c.endTime()) { onExistingClip = true; break; }
+            }
+            if (!onExistingClip) {
+                auto* nc = m_timeline.addClip(track.layerId, t, 0.1, track.name);
+                if (nc) {
+                    // Enter right-trim drag immediately so the user's drag sizes the new clip.
+                    dragLayerId   = track.layerId;
+                    dragClipId    = nc->id;
+                    dragMode      = 2;                          // right trim
+                    dragStartTime = nc->startTime;
+                    dragStartDur  = nc->duration;
+                    dragAnchor    = ImGui::GetIO().MousePos;
+                }
             }
         }
 
-        // Right-click on empty track area → add clip at mouse
-        if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(1)) {
-            float mx = ImGui::GetIO().MousePos.x - taOrigin.x;
-            double t = xToTime(mx);
-            m_timeline.addClip(track.layerId, t, 5.0, track.name);
+        // Gutter cell — layer hierarchy row: [visibility dot] [kind swatch] name
+        // Mirrors the Layer panel's row treatment so users read the column as
+        // "these are my layers, in stacking order."
+        {
+            // Kind swatch colour — derive from any clip on this track, else fall
+            // back to the live layer source type. Gives users a consistent
+            // "this track is a video track" / "this is a shader track" signal.
+            ClipKind swatchKind = ClipKind::Shader;
+            if (!track.clips.empty()) swatchKind = resolveKind(track.clips.front());
+            // Find the live layer to mirror its visibility.
+            Layer* layerForRow = nullptr;
+            for (int i = 0; i < m_layerStack.count(); i++) {
+                auto l = m_layerStack[i];
+                if (l && l->id == track.layerId) { layerForRow = l.get(); break; }
+            }
+            bool visible = layerForRow ? layerForRow->visible : true;
+
+            // Subtle gutter-cell bg — no border, just a hairline right divider
+            // against the track clip area.
+            dl->AddRectFilled(ImVec2(rowOrigin.x, rowY + 2),
+                              ImVec2(rowOrigin.x + gutterW - 4, rowY + trackH - 2),
+                              IM_COL32(255, 255, 255, 4), 6.0f);
+            dl->AddLine(ImVec2(rowOrigin.x + gutterW - 2, rowY + 4),
+                        ImVec2(rowOrigin.x + gutterW - 2, rowY + trackH - 4),
+                        IM_COL32(255, 255, 255, 18), 1.0f);
+
+            // Visibility dot — clickable, toggles layer->visible.
+            float dotCx = rowOrigin.x + 14;
+            float dotCy = rowY + trackH * 0.5f;
+            ImU32 dotCol = visible ? IM_COL32(230, 235, 245, 240)
+                                   : IM_COL32(120, 130, 140, 140);
+            dl->AddCircleFilled(ImVec2(dotCx, dotCy), 4.5f, dotCol);
+            ImGui::SetCursorScreenPos(ImVec2(dotCx - 8, dotCy - 8));
+            if (ImGui::InvisibleButton("##vis", ImVec2(16, 16))) {
+                if (layerForRow) layerForRow->visible = !layerForRow->visible;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                visible ? "Layer visible — click to hide"
+                        : "Layer hidden — click to show\n"
+                          "(same control as the Layer panel dot)");
+
+            // Kind swatch — small rounded square tinted by ClipKind.
+            ImU32 swatch = (swatchKind == ClipKind::Video)  ? IM_COL32(130, 156, 255, 220)
+                         : (swatchKind == ClipKind::Shader) ? IM_COL32(190, 130, 250, 220)
+                                                             : IM_COL32(180, 188, 198, 220);
+            dl->AddRectFilled(ImVec2(rowOrigin.x + 28, rowY + trackH * 0.5f - 5),
+                              ImVec2(rowOrigin.x + 38, rowY + trackH * 0.5f + 5),
+                              swatch, 2.5f);
+
+            // Layer name — truncated to fit the gutter.
+            dl->PushClipRect(ImVec2(rowOrigin.x + 44, rowY),
+                             ImVec2(rowOrigin.x + gutterW - 8, rowY + trackH),
+                             true);
+            dl->AddText(ImVec2(rowOrigin.x + 44, rowY + (trackH - 14.0f) * 0.5f),
+                        visible ? IM_COL32(230, 235, 245, 255)
+                                : IM_COL32(150, 158, 170, 200),
+                        track.name.empty() ? "Layer" : track.name.c_str());
+            dl->PopClipRect();
+        }
+
+        // (Right-click-to-add-clip removed — layers auto-create their bar when
+        // they appear in the stack. Per-clip context menu on existing bars
+        // still opens on right-click via the clip-hover block above.)
+
+        ImGui::PopID();
+        ImGui::Dummy(ImVec2(0, trackSpacing));
+
+        // ── Transition lane (between this row and the next) ───────────────
+        // Thin row that holds any TimelineTransition connecting this layer
+        // with the next layer below it. If the two layers' bars overlap in
+        // time and no transition exists there yet, a subtle "+" affordance
+        // appears inside the overlap region — click to create a crossfade.
+        auto& allTracks = m_timeline.tracks();
+        int thisIdx = -1;
+        for (int k = 0; k < (int)allTracks.size(); k++) {
+            if (allTracks[k].layerId == track.layerId) { thisIdx = k; break; }
+        }
+        bool hasNext = (thisIdx >= 0 && thisIdx + 1 < (int)allTracks.size());
+        if (hasNext) {
+            auto& nextTrack = allTracks[thisIdx + 1];
+            uint32_t aId = track.layerId;      // upper row
+            uint32_t bId = nextTrack.layerId;  // lower row
+
+            const float laneH = 16.0f;
+            ImVec2 laneOrigin = ImGui::GetCursorScreenPos();
+            ImVec2 laneTrackOrigin(laneOrigin.x + gutterW, laneOrigin.y);
+            ImGui::Dummy(ImVec2(gutterW + trackAreaW, laneH));
+
+            // Lane background (very faint).
+            dl->AddRectFilled(laneTrackOrigin,
+                              ImVec2(laneTrackOrigin.x + trackAreaW,
+                                     laneOrigin.y + laneH),
+                              IM_COL32(255, 255, 255, 4), 4.0f);
+
+            // Gutter label — tiny "⇄" icon + blank space to mirror the row rhythm.
+            dl->AddTriangleFilled(ImVec2(laneOrigin.x + 18, laneOrigin.y + 4),
+                                  ImVec2(laneOrigin.x + 18, laneOrigin.y + laneH - 4),
+                                  ImVec2(laneOrigin.x + 26, laneOrigin.y + laneH * 0.5f),
+                                  IM_COL32(180, 150, 240, 180));
+            dl->AddTriangleFilled(ImVec2(laneOrigin.x + 36, laneOrigin.y + 4),
+                                  ImVec2(laneOrigin.x + 36, laneOrigin.y + laneH - 4),
+                                  ImVec2(laneOrigin.x + 28, laneOrigin.y + laneH * 0.5f),
+                                  IM_COL32(180, 150, 240, 180));
+
+            // Draw each transition connecting this pair.
+            for (auto& tr : m_timeline.transitions()) {
+                bool connectsPair =
+                    (tr.fromLayerId == aId && tr.toLayerId == bId) ||
+                    (tr.fromLayerId == bId && tr.toLayerId == aId);
+                if (!connectsPair) continue;
+
+                float tx0 = laneTrackOrigin.x + timeToX(tr.startTime);
+                float tx1 = laneTrackOrigin.x + timeToX(tr.endTime());
+                if (tx1 - tx0 < 2.0f) tx1 = tx0 + 2.0f;
+                ImVec2 ta(tx0, laneOrigin.y + 2), tb(tx1, laneOrigin.y + laneH - 2);
+
+                bool selected = (dragLayerId == 0xFFFFFFFF && dragClipId == tr.id);
+                ImU32 fill = IM_COL32(170, 120, 230, selected ? 210 : 150);
+                ImU32 edge = IM_COL32(210, 170, 255, selected ? 240 : 180);
+                dl->AddRectFilled(ta, tb, fill, 4.0f);
+                dl->AddRect(ta, tb, edge, 4.0f, 0, 1.0f);
+
+                // Label (short name) if width allows.
+                if (tx1 - tx0 > 40.0f) {
+                    dl->PushClipRect(ta, tb, true);
+                    dl->AddText(ImGui::GetFont(), 10.0f,
+                                ImVec2(tx0 + 6, laneOrigin.y + 2),
+                                IM_COL32(255, 255, 255, 235),
+                                tr.name.empty() ? "crossfade" : tr.name.c_str());
+                    dl->PopClipRect();
+                }
+
+                // Drag / resize: reuse the clip drag state machine by encoding
+                // the transition id in dragClipId and 0xFFFFFFFF in dragLayerId.
+                bool hoverT = (mx >= tx0 && mx <= tx1 && my >= ta.y && my <= tb.y
+                               && ImGui::IsItemHovered());
+                if (hoverT && dragClipId == 0) {
+                    bool onLeft  = (mx < tx0 + trimZone);
+                    bool onRight = (mx > tx1 - trimZone);
+                    if (onLeft || onRight) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+                }
+                // Single-click starts drag (body = move, edges = trim).
+                if (hoverT && ImGui::IsMouseClicked(0) && dragClipId == 0) {
+                    int mode = 0;
+                    if (mx < tx0 + trimZone)      mode = 1;
+                    else if (mx > tx1 - trimZone) mode = 2;
+                    dragLayerId = 0xFFFFFFFF;   // sentinel: "this is a transition drag"
+                    dragClipId  = tr.id;
+                    dragMode    = mode;
+                    dragStartTime = tr.startTime;
+                    dragStartDur  = tr.duration;
+                    dragAnchor    = ImGui::GetIO().MousePos;
+                }
+                // Double-click opens the effect picker inline at the bar.
+                if (hoverT && ImGui::IsMouseDoubleClicked(0)) {
+                    s_trPickerId  = tr.id;
+                    s_trPickerPos = ImVec2(tx0, tb.y + 2);
+                    ImGui::OpenPopup("##TrPicker");
+                    // Cancel any drag that the first click of the double started.
+                    dragLayerId = dragClipId = 0;
+                    dragMode = 0;
+                }
+            }
+
+            // Auto-"+" affordance in the overlap region of the two layers'
+            // first clips — keep it simple: single overlap detection.
+            auto* aTrack = m_timeline.findTrack(aId);
+            auto* bTrack = m_timeline.findTrack(bId);
+            if (aTrack && bTrack && !aTrack->clips.empty() && !bTrack->clips.empty()) {
+                double as = aTrack->clips.front().startTime;
+                double ae = aTrack->clips.back().endTime();
+                double bs = bTrack->clips.front().startTime;
+                double be = bTrack->clips.back().endTime();
+                double ovStart = std::max(as, bs);
+                double ovEnd   = std::min(ae, be);
+                if (ovEnd - ovStart > 0.2) {
+                    // Check if there's already a transition in this overlap.
+                    bool haveTr = false;
+                    for (const auto& tr : m_timeline.transitions()) {
+                        bool connects = (tr.fromLayerId == aId && tr.toLayerId == bId) ||
+                                        (tr.fromLayerId == bId && tr.toLayerId == aId);
+                        if (connects && tr.endTime() > ovStart && tr.startTime < ovEnd) {
+                            haveTr = true; break;
+                        }
+                    }
+                    if (!haveTr) {
+                        double ovMid = (ovStart + ovEnd) * 0.5;
+                        float px = laneTrackOrigin.x + timeToX(ovMid);
+                        float py = laneOrigin.y + laneH * 0.5f;
+                        float r  = 6.0f;
+                        // Small "+" circle
+                        ImVec2 hit(px - r, py - r);
+                        ImGui::SetCursorScreenPos(hit);
+                        bool clicked = ImGui::InvisibleButton("##addtr", ImVec2(r * 2, r * 2));
+                        bool hov = ImGui::IsItemHovered();
+                        ImU32 col = hov ? IM_COL32(210, 170, 255, 240)
+                                        : IM_COL32(170, 140, 210, 170);
+                        dl->AddCircleFilled(ImVec2(px, py), r, col);
+                        dl->AddLine(ImVec2(px - 3, py), ImVec2(px + 3, py),
+                                    IM_COL32(255, 255, 255, 230), 1.5f);
+                        dl->AddLine(ImVec2(px, py - 3), ImVec2(px, py + 3),
+                                    IM_COL32(255, 255, 255, 230), 1.5f);
+                        if (clicked) {
+                            double d = std::min(1.0, (ovEnd - ovStart) * 0.6);
+                            m_timeline.addTransition(aId, bId,
+                                                     ovMid - d * 0.5, d,
+                                                     "crossfade");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Selected clip / transition inline inspector (compact pill row) ────
+    // Only appears when something is selected. Styled to match the header
+    // pills so it feels like the same app, not a legacy panel.
+    if (auto* selClip = m_timeline.findClip(s_ctxLayerId, s_ctxClipId)) {
+        ImGui::Dummy(ImVec2(0, 4));
+        ImGui::PushID((int)s_ctxClipId);
+        ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(150, 158, 172, 230));
+        ImGui::AlignTextToFramePadding();
+        ImGui::Text("Clip");
+        ImGui::PopStyleColor();
+        ImGui::SameLine(0, 14);
+
+        // Transition picker
+        auto names = GLTransitionLibrary::instance().names();
+        std::string preview = selClip->transitionInName.empty()
+                              ? std::string("No transition")
+                              : std::string("→ ") + selClip->transitionInName;
+        ImGui::SetNextItemWidth(180);
+        if (ImGui::BeginCombo("##clipXition", preview.c_str())) {
+            if (ImGui::Selectable("No transition", selClip->transitionInName.empty())) {
+                selClip->transitionInName.clear();
+            }
+            for (const auto& n : names) {
+                bool sel = (selClip->transitionInName == n);
+                if (ImGui::Selectable(n.c_str(), sel)) selClip->transitionInName = n;
+            }
+            ImGui::EndCombo();
+        }
+
+        // Transition duration — only meaningful when a transition is set.
+        if (!selClip->transitionInName.empty()) {
+            ImGui::SameLine(0, 10);
+            ImGui::SetNextItemWidth(110);
+            float xd = (float)selClip->transitionInDuration;
+            if (ImGui::SliderFloat("##clipXitionDur", &xd, 0.05f, 4.0f, "%.2fs")) {
+                selClip->transitionInDuration = (double)xd;
+            }
+        }
+
+        // Delete as a ghost pill (matches header family — no red fill).
+        ImGui::SameLine(0, 14);
+        {
+            float h = ImGui::GetFrameHeight();
+            const char* dl_ = "Delete";
+            float w = ImGui::CalcTextSize(dl_).x + 22.0f;
+            ImVec2 bp = ImGui::GetCursorScreenPos();
+            bool clk = ImGui::InvisibleButton("##ClipDel", ImVec2(w, h));
+            bool hov = ImGui::IsItemHovered();
+            ImDrawList* d = ImGui::GetWindowDrawList();
+            ImU32 bg = hov ? IM_COL32(255, 255, 255, 30) : IM_COL32(255, 255, 255, 15);
+            ImU32 bd = hov ? IM_COL32(255, 70, 70, 220)  : IM_COL32(255, 255, 255, 80);
+            ImU32 tx = hov ? IM_COL32(255, 100, 100, 255) : IM_COL32(235, 240, 250, 245);
+            d->AddRectFilled(bp, ImVec2(bp.x + w, bp.y + h), bg, 5.0f);
+            d->AddRect(bp, ImVec2(bp.x + w, bp.y + h), bd, 5.0f, 0, 1.0f);
+            ImVec2 ts = ImGui::CalcTextSize(dl_);
+            d->AddText(ImVec2(bp.x + (w - ts.x) * 0.5f, bp.y + (h - ts.y) * 0.5f),
+                       tx, dl_);
+            if (clk) {
+                m_timeline.removeClip(s_ctxLayerId, s_ctxClipId);
+                s_ctxClipId = 0;
+            }
         }
         ImGui::PopID();
     }
 
-    // Apply drag state
-    if (dragClipId != 0) {
+    // ── In-timeline transition effect picker — opens on double-click of a
+    // transition bar, anchored to the bar itself so it feels like editing in
+    // place rather than a separate inspector.
+    if (s_trPickerId != 0) {
+        ImGui::SetNextWindowPos(s_trPickerPos);
+        if (ImGui::BeginPopup("##TrPicker")) {
+            if (auto* tr = m_timeline.findTransition(s_trPickerId)) {
+                ImGui::TextDisabled("Effect");
+                ImGui::Separator();
+                auto names = GLTransitionLibrary::instance().names();
+                ImGui::PushItemWidth(180);
+                for (const auto& n : names) {
+                    bool sel = (tr->name == n);
+                    if (ImGui::Selectable(n.c_str(), sel)) {
+                        tr->name = n;
+                    }
+                }
+                ImGui::PopItemWidth();
+                ImGui::Separator();
+                float xd = (float)tr->duration;
+                ImGui::SetNextItemWidth(180);
+                if (ImGui::SliderFloat("Duration", &xd, 0.1f, 6.0f, "%.2fs")) {
+                    tr->duration = (double)xd;
+                }
+                ImGui::Separator();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
+                if (ImGui::Selectable("Delete transition")) {
+                    m_timeline.removeTransition(s_trPickerId);
+                    s_trPickerId = 0;
+                }
+                ImGui::PopStyleColor();
+            } else {
+                s_trPickerId = 0;
+            }
+            ImGui::EndPopup();
+        } else {
+            // Popup was dismissed — stop tracking which transition it targeted.
+            s_trPickerId = 0;
+        }
+    }
+
+    // ── Audio lane (beneath all tracks) ────────────────────────────────────
+    // Signals "audio is part of the timeline and will be captured on export."
+    // Visual: scrolling strip of the current AudioAnalyzer RMS — honest about
+    // what we know (live levels), doesn't fake future waveforms.
+    {
+        const float audioH = 24.0f;
+        ImVec2 audioOrigin = ImGui::GetCursorScreenPos();
+        ImVec2 audioTrackOrigin(audioOrigin.x + gutterW, audioOrigin.y);
+        ImGui::Dummy(ImVec2(gutterW + trackAreaW, audioH));
+
+        // Clip-area strip background.
+        dl->AddRectFilled(audioTrackOrigin,
+                          ImVec2(audioTrackOrigin.x + trackAreaW, audioOrigin.y + audioH),
+                          IM_COL32(255, 255, 255, 6), 8.0f);
+
+        // Gutter cell — matches the track rows' column treatment.
+        {
+            dl->AddRectFilled(ImVec2(audioOrigin.x, audioOrigin.y + 2),
+                              ImVec2(audioOrigin.x + gutterW - 4, audioOrigin.y + audioH - 2),
+                              IM_COL32(255, 255, 255, 4), 6.0f);
+            dl->AddLine(ImVec2(audioOrigin.x + gutterW - 2, audioOrigin.y + 4),
+                        ImVec2(audioOrigin.x + gutterW - 2, audioOrigin.y + audioH - 4),
+                        IM_COL32(255, 255, 255, 18), 1.0f);
+            // Unified green palette — the swatch, label, envelope, and wave
+            // all derive from the same base hue so the audio lane reads as a
+            // single family instead of three near-matching greens.
+            dl->AddRectFilled(ImVec2(audioOrigin.x + 28, audioOrigin.y + audioH * 0.5f - 5),
+                              ImVec2(audioOrigin.x + 38, audioOrigin.y + audioH * 0.5f + 5),
+                              IM_COL32(130, 220, 165, 220), 2.5f);
+            dl->AddText(ImVec2(audioOrigin.x + 44, audioOrigin.y + (audioH - 14.0f) * 0.5f),
+                        IM_COL32(180, 220, 195, 235), "Audio");
+        }
+
+        // Scrolling RMS history — right edge = now, scrolls left over ~4 seconds.
+        static std::vector<float> s_rmsHistory(240, 0.0f);
+        static double s_lastSample = 0.0;
+        double now = glfwGetTime();
+        if (now - s_lastSample > 0.016) {
+            s_lastSample = now;
+            s_rmsHistory.erase(s_rmsHistory.begin());
+            s_rmsHistory.push_back(m_audioRMS);
+        }
+        float histX0 = audioTrackOrigin.x + 10.0f;
+        float histX1 = audioTrackOrigin.x + trackAreaW - 10.0f;
+        float histW  = histX1 - histX0;
+        float cy     = audioOrigin.y + audioH * 0.5f;
+        if (histW > 40.0f) {
+            int n = (int)s_rmsHistory.size();
+            float maxAmp = (audioH - 6.0f) * 0.5f;
+            // Same green base as the swatch — alpha variation carries the hierarchy.
+            const ImU32 envCol  = IM_COL32(130, 220, 165, 170);
+            const ImU32 waveCol = IM_COL32(130, 220, 165, 255);
+
+            // Symmetric envelope rails + traveling center wave. Amplitude
+            // follows live RMS history; phase scrolls with time so the line
+            // visibly moves like a soundwave as the song plays.
+            std::vector<ImVec2> topPts, botPts, wavePts;
+            topPts.reserve(n);
+            botPts.reserve(n);
+            wavePts.reserve(n);
+            for (int i = 0; i < n; i++) {
+                float rms = s_rmsHistory[i];
+                if (rms > 1.0f) rms = 1.0f;
+                float u   = (float)i / (float)(n - 1);
+                float x   = histX0 + u * histW;
+                float amp = rms * maxAmp;
+                float phase = u * 42.0f - (float)now * 6.0f;
+                float y = cy + sinf(phase) * (amp + 0.6f);
+                topPts.emplace_back(x, cy - amp);
+                botPts.emplace_back(x, cy + amp);
+                wavePts.emplace_back(x, y);
+            }
+            dl->AddPolyline(topPts.data(),  (int)topPts.size(),
+                            envCol,  ImDrawFlags_None, 1.0f);
+            dl->AddPolyline(botPts.data(),  (int)botPts.size(),
+                            envCol,  ImDrawFlags_None, 1.0f);
+            dl->AddPolyline(wavePts.data(), (int)wavePts.size(),
+                            waveCol, ImDrawFlags_None, 1.25f);
+        }
+    }
+
+    // Apply drag state — handles both clip drags (dragLayerId = real layer id)
+    // and transition drags (dragLayerId = 0xFFFFFFFF sentinel).
+    if (dragClipId != 0 && dragLayerId == 0xFFFFFFFF) {
+        // Transition drag
+        if (!m_timeline.findTransition(dragClipId) || ImGui::IsMouseReleased(0)) {
+            dragLayerId = dragClipId = 0;
+            dragMode = 0;
+        } else {
+            float dx = ImGui::GetIO().MousePos.x - dragAnchor.x;
+            double dt = xToTime(dx) - xToTime(0.0f);
+            auto* tr = m_timeline.findTransition(dragClipId);
+            if (tr) {
+                if (dragMode == 0) {
+                    tr->startTime = dragStartTime + dt;
+                    if (tr->startTime < 0) tr->startTime = 0;
+                } else if (dragMode == 1) {
+                    double newStart = dragStartTime + dt;
+                    double newDur   = dragStartDur - dt;
+                    if (newDur < 0.1) { newDur = 0.1; newStart = dragStartTime + dragStartDur - 0.1; }
+                    if (newStart < 0) { newDur -= (0.0 - newStart); newStart = 0; }
+                    tr->startTime = newStart;
+                    tr->duration  = newDur;
+                } else if (dragMode == 2) {
+                    double newDur = dragStartDur + dt;
+                    if (newDur < 0.1) newDur = 0.1;
+                    tr->duration = newDur;
+                }
+            }
+        }
+    } else if (dragClipId != 0) {
         // If the drag target was removed mid-drag (e.g. user deleted the layer
         // or the clip), bail out so the UI doesn't stay wedged in drag mode.
         if (!m_timeline.findClip(dragLayerId, dragClipId)) {
@@ -3719,6 +4916,8 @@ void Application::renderTimelinePanel() {
         // Timecode readout is already shown in the transport row above — no
         // second label here. (Drawing it over the ruler collided with tick labels.)
     }
+
+  } // end of if (!s_tlCollapsed)
 
     ImGui::End();
 }
@@ -3851,7 +5050,11 @@ void Application::updateAudioMeter() {
 
 // Old cleanupMosaicMeter/updateMosaicMeter removed — replaced by AudioAnalyzer
 
+// merged into renderTimelinePanel() — kept as a no-op so other callers
+// (if any) don't break. The original body below is #if 0'd out.
 void Application::renderTransportBar() {
+    return;
+#if 0
     ImGuiViewport* vp = ImGui::GetMainViewport();
     float barH = 56.0f;
     ImVec2 barPos(vp->WorkPos.x, vp->WorkPos.y + vp->WorkSize.y - barH);
@@ -3934,16 +5137,26 @@ void Application::renderTransportBar() {
         }
         // Idle: the button's red text is enough; no extra dot (it overlapped the label).
     } else {
-        // Recording active: show timer + stop
+        // Recording active: STOP replaces REC in place (same x), with the
+        // pulse dot + elapsed timer rendered to the right so they don't
+        // collide with the neighbouring System Audio dropdown.
+        const float stopW = 64.0f;
+        if (transportBtn("##StopRec", "STOP", curX, stopW, kRedDim, kRed)) {
+            m_recorder.stop();
+        }
         float pulse = 0.5f + 0.5f * sinf(time * 4.0f);
-        draw->AddCircleFilled(ImVec2(curX + 8, cy + btnH * 0.5f), 5.0f, IM_COL32(255, 70, 70, (int)(pulse * 255)));
+        float dotX = curX + stopW + 10.0f;
+        draw->AddCircleFilled(ImVec2(dotX, cy + btnH * 0.5f), 5.0f, IM_COL32(255, 70, 70, (int)(pulse * 255)));
         int secs = (int)m_recorder.uptimeSeconds();
         char timeBuf[16];
         snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d:%02d", secs / 3600, (secs / 60) % 60, secs % 60);
-        draw->AddText(ImVec2(curX + 18, cy + (btnH - ImGui::GetTextLineHeight()) * 0.5f), kText, timeBuf);
-        if (transportBtn("##StopRec", "STOP", curX + 90, 50, kRedDim, kRed)) {
-            m_recorder.stop();
-        }
+        draw->AddText(ImVec2(dotX + 10, cy + (btnH - ImGui::GetTextLineHeight()) * 0.5f), kText, timeBuf);
+        // Advance curX past the stop button + timer block so downstream
+        // widgets (System Audio dropdown) don't overlap STOP/timer.
+        curX += stopW + 80.0f;
+        // The common path below adds curX += 80; undo that so the total
+        // advance matches our explicit advance here.
+        curX -= 80.0f;
     }
     curX += 80;
 
@@ -4054,6 +5267,7 @@ void Application::renderTransportBar() {
     ImGui::End();
     ImGui::PopStyleColor();
     ImGui::PopStyleVar(4);
+#endif // #if 0 (original body, merged into renderTimelinePanel)
 }
 #endif
 
@@ -4317,6 +5531,24 @@ void Application::addScreenCapture(int monitorIndex) {
     registerLayerWithZones(layer->id);
 }
 #endif
+
+void Application::addParticles() {
+    m_undoStack.pushState(m_layerStack, m_selectedLayer);
+    auto src = std::make_shared<ParticleSource>();
+    if (!src->init()) {
+        std::cerr << "Failed to init ParticleSource" << std::endl;
+        return;
+    }
+
+    auto layer = std::make_shared<Layer>();
+    layer->id = m_nextLayerId++;
+    layer->source = src;
+    layer->name = "Particles 1M";
+
+    m_layerStack.addLayer(layer);
+    m_selectedLayer = m_layerStack.count() - 1;
+    registerLayerWithZones(layer->id);
+}
 
 #ifdef _WIN32
 void Application::addWindowCapture(HWND hwnd, const std::string& title) {

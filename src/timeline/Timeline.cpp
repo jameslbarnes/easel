@@ -43,7 +43,7 @@ TimelineTrack& Timeline::ensureTrack(uint32_t layerId, const std::string& name) 
         return dummy;
     }
     if (auto* t = findTrack(layerId)) return *t;
-    m_tracks.push_back({layerId, name, {}, false, false});
+    m_tracks.push_back({layerId, name, {}});
     return m_tracks.back();
 }
 
@@ -101,10 +101,38 @@ Timeline::TrackRuntime& Timeline::runtimeFor(uint32_t layerId) {
 
 void Timeline::clear() {
     m_tracks.clear();
+    m_transitions.clear();
     m_runtime.clear();
     m_playhead = 0.0;
     m_playing = false;
     m_nextClipId = 1;
+    m_nextTransitionId = 1;
+}
+
+TimelineTransition* Timeline::addTransition(uint32_t fromLayerId, uint32_t toLayerId,
+                                            double start, double dur,
+                                            const std::string& name) {
+    if (fromLayerId == 0 || toLayerId == 0) return nullptr;
+    TimelineTransition tr;
+    tr.id = m_nextTransitionId++;
+    tr.fromLayerId = fromLayerId;
+    tr.toLayerId   = toLayerId;
+    tr.startTime   = start < 0.0 ? 0.0 : start;
+    tr.duration    = dur  < 0.1 ? 0.1 : dur;
+    tr.name        = name.empty() ? "crossfade" : name;
+    m_transitions.push_back(tr);
+    return &m_transitions.back();
+}
+
+void Timeline::removeTransition(uint32_t transitionId) {
+    m_transitions.erase(std::remove_if(m_transitions.begin(), m_transitions.end(),
+                        [transitionId](const TimelineTransition& t){ return t.id == transitionId; }),
+                        m_transitions.end());
+}
+
+TimelineTransition* Timeline::findTransition(uint32_t transitionId) {
+    for (auto& t : m_transitions) if (t.id == transitionId) return &t;
+    return nullptr;
 }
 
 nlohmann::json Timeline::toJson() const {
@@ -113,52 +141,81 @@ nlohmann::json Timeline::toJson() const {
     j["playhead"] = m_playhead;
     j["loop"] = m_loop;
     j["nextClipId"] = m_nextClipId;
+    j["workAreaStart"] = m_workAreaStart;
+    j["workAreaEnd"]   = m_workAreaEnd;
     nlohmann::json tracks = nlohmann::json::array();
     for (const auto& tr : m_tracks) {
         nlohmann::json tj;
         tj["layerId"] = tr.layerId;
         tj["name"] = tr.name;
-        tj["muted"] = tr.muted;
-        tj["solo"] = tr.solo;
         nlohmann::json clips = nlohmann::json::array();
         for (const auto& c : tr.clips) {
             nlohmann::json cj;
             cj["id"] = c.id;
             cj["startTime"] = c.startTime;
             cj["duration"] = c.duration;
+            if (c.sourceIn  != 0.0)  cj["sourceIn"]  = c.sourceIn;
+            if (c.sourceOut >= 0.0)  cj["sourceOut"] = c.sourceOut;
+            if (c.kind != ClipKind::Auto) cj["kind"] = (int)c.kind;
+            if (c.tint != 0)         cj["tint"]     = c.tint;
             if (!c.name.empty()) cj["name"] = c.name;
             if (!c.sourcePath.empty()) cj["sourcePath"] = c.sourcePath;
+            if (!c.transitionInName.empty()) {
+                cj["transitionInName"]     = c.transitionInName;
+                cj["transitionInDuration"] = c.transitionInDuration;
+            }
             clips.push_back(cj);
         }
         tj["clips"] = clips;
         tracks.push_back(tj);
     }
     j["tracks"] = tracks;
+
+    nlohmann::json trs = nlohmann::json::array();
+    for (const auto& tr : m_transitions) {
+        nlohmann::json rj;
+        rj["id"]          = tr.id;
+        rj["fromLayerId"] = tr.fromLayerId;
+        rj["toLayerId"]   = tr.toLayerId;
+        rj["startTime"]   = tr.startTime;
+        rj["duration"]    = tr.duration;
+        rj["name"]        = tr.name;
+        trs.push_back(rj);
+    }
+    j["transitions"]      = trs;
+    j["nextTransitionId"] = m_nextTransitionId;
     return j;
 }
 
 void Timeline::fromJson(const nlohmann::json& j) {
     clear();
     if (j.is_null() || !j.is_object()) return;
-    m_duration = j.value("duration", 300.0);
+    m_duration = j.value("duration", 60.0);
     m_playhead = j.value("playhead", 0.0);
     m_loop = j.value("loop", false);
     m_nextClipId = j.value("nextClipId", (uint32_t)1);
+    m_workAreaStart = j.value("workAreaStart", 0.0);
+    m_workAreaEnd   = j.value("workAreaEnd",  -1.0);
     if (j.contains("tracks") && j["tracks"].is_array()) {
         for (const auto& tj : j["tracks"]) {
             TimelineTrack tr;
             tr.layerId = tj.value("layerId", (uint32_t)0);
             tr.name = tj.value("name", std::string{});
-            tr.muted = tj.value("muted", false);
-            tr.solo = tj.value("solo", false);
+            // NOTE: old files may carry "muted"/"solo" — they're ignored now.
             if (tj.contains("clips") && tj["clips"].is_array()) {
                 for (const auto& cj : tj["clips"]) {
                     TimelineClip c;
                     c.id = cj.value("id", m_nextClipId++);
                     c.startTime = cj.value("startTime", 0.0);
                     c.duration = cj.value("duration", 5.0);
+                    c.sourceIn  = cj.value("sourceIn",  0.0);
+                    c.sourceOut = cj.value("sourceOut", -1.0);
+                    c.kind = (ClipKind)cj.value("kind", (int)ClipKind::Auto);
+                    c.tint = cj.value("tint", (uint32_t)0);
                     c.name = cj.value("name", std::string{});
                     c.sourcePath = cj.value("sourcePath", std::string{});
+                    c.transitionInName     = cj.value("transitionInName",     std::string{});
+                    c.transitionInDuration = cj.value("transitionInDuration", 0.5);
                     if (c.id >= m_nextClipId) m_nextClipId = c.id + 1;
                     tr.clips.push_back(c);
                 }
@@ -166,6 +223,21 @@ void Timeline::fromJson(const nlohmann::json& j) {
             if (tr.layerId != 0) m_tracks.push_back(std::move(tr));
         }
     }
+
+    if (j.contains("transitions") && j["transitions"].is_array()) {
+        for (const auto& rj : j["transitions"]) {
+            TimelineTransition tr;
+            tr.id          = rj.value("id",          m_nextTransitionId++);
+            tr.fromLayerId = rj.value("fromLayerId", (uint32_t)0);
+            tr.toLayerId   = rj.value("toLayerId",   (uint32_t)0);
+            tr.startTime   = rj.value("startTime",   0.0);
+            tr.duration    = rj.value("duration",    1.0);
+            tr.name        = rj.value("name",        std::string{"crossfade"});
+            if (tr.id >= m_nextTransitionId) m_nextTransitionId = tr.id + 1;
+            if (tr.fromLayerId && tr.toLayerId) m_transitions.push_back(tr);
+        }
+    }
+    m_nextTransitionId = j.value("nextTransitionId", m_nextTransitionId);
 }
 
 // Build a content source from a file path. Heuristic: .fs / .frag / .isf → ShaderSource,
@@ -194,10 +266,6 @@ static std::shared_ptr<ContentSource> loadSourceForPath(const std::string& path)
 void Timeline::applyToLayers(LayerStack& layers) {
     double t = m_playhead;
 
-    // Build a solo set (if any track is soloed, only soloed tracks play).
-    bool anySolo = false;
-    for (auto& tr : m_tracks) if (tr.solo) { anySolo = true; break; }
-
     for (auto& track : m_tracks) {
         // Find current-frame active clip (first clip whose [start, end) contains t).
         const TimelineClip* active = nullptr;
@@ -213,15 +281,11 @@ void Timeline::applyToLayers(LayerStack& layers) {
         }
         if (!layer) continue;
 
-        // Mute / solo gating — silent tracks still advance their runtime so
-        // un-muting mid-show doesn't replay every edge.
-        bool gated = track.muted || (anySolo && !track.solo);
-
         auto& rt = runtimeFor(track.layerId);
         uint32_t prevActiveId = rt.activeClipId;
         uint32_t curActiveId  = active ? active->id : 0;
 
-        if (!gated) {
+        {
             // Edge: entering a new clip (or starting fresh).
             if (curActiveId != prevActiveId && curActiveId != 0) {
                 // Show the layer.
@@ -233,7 +297,20 @@ void Timeline::applyToLayers(LayerStack& layers) {
                 if (!active->sourcePath.empty()) {
                     auto src = loadSourceForPath(active->sourcePath);
                     if (src) {
-                        if (layer->source && layer->transitionType == TransitionType::Shader
+                        // Respect sourceIn — video clips play from the clip's in-point.
+#ifdef HAS_FFMPEG
+                        if (active->sourceIn > 0.0) {
+                            if (auto* vs = dynamic_cast<VideoSource*>(src.get())) {
+                                vs->seek(active->sourceIn);
+                            }
+                        }
+#endif
+                        // Priority: per-clip gl-transition > legacy ISF shader transition > instant.
+                        // Only transitions from an existing previous clip; first-clip entry is still instant.
+                        if (layer->source && !active->transitionInName.empty() && prevActiveId != 0) {
+                            layer->startGLTransition(src, active->transitionInName,
+                                                     (float)active->transitionInDuration);
+                        } else if (layer->source && layer->transitionType == TransitionType::Shader
                             && !layer->transitionShaderPath.empty() && prevActiveId != 0)
                         {
                             layer->startShaderTransition(src);
@@ -270,5 +347,27 @@ void Timeline::applyToLayers(LayerStack& layers) {
         }
 
         rt.activeClipId = curActiveId;
+    }
+
+    // Cross-layer transitions: during [start,end], ramp the "from" layer's
+    // transitionProgress from 1→0 while leaving the "to" layer at 1. The
+    // compositor already multiplies effectiveOpacity by transitionProgress,
+    // so this gives a clean visual crossfade without stomping the base
+    // opacity slider.
+    for (const auto& tr : m_transitions) {
+        if (t < tr.startTime || t >= tr.endTime()) continue;
+        double p = (t - tr.startTime) / std::max(tr.duration, 1e-3);
+        if (p < 0.0) p = 0.0;
+        if (p > 1.0) p = 1.0;
+        for (int i = 0; i < layers.count(); i++) {
+            auto l = layers[i];
+            if (!l) continue;
+            if (l->id == tr.fromLayerId) {
+                l->transitionProgress = std::min(l->transitionProgress,
+                                                 (float)(1.0 - p));
+            } else if (l->id == tr.toLayerId) {
+                l->transitionProgress = std::min(l->transitionProgress, 1.0f);
+            }
+        }
     }
 }

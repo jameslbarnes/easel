@@ -81,6 +81,11 @@ public:
     std::shared_ptr<class ShaderSource> transitionShaderInst; // lazy-loaded shader instance
     bool shaderTransitionActive = false; // distinct from transitionActive (opacity fade)
 
+    // gl-transitions.com transition (parallel to shaderTransitionActive). Uses
+    // GLTransitionLibrary — name is the bundled .glsl filename stem.
+    std::string glTransitionName;       // e.g. "doorway", "LinearBlur", "fade"
+    bool        glTransitionActive = false;
+
     // Edge feather (0.0 = hard edge, 0.5 = max soft blend)
     float feather = 0.0f;
 
@@ -140,6 +145,20 @@ public:
         nextSource = std::move(nextSrc);
         transitionProgress = 0.0f;
         shaderTransitionActive = true;
+    }
+
+    // Kick off a gl-transitions.com A→B transition. Runs over `duration`
+    // seconds; compositor routes the layer's render through the named
+    // transition in GLTransitionLibrary. If the transition isn't found, the
+    // compositor silently falls back to instant swap.
+    void startGLTransition(std::shared_ptr<ContentSource> nextSrc,
+                           const std::string& name, float duration = 0.5f) {
+        if (!nextSrc || name.empty()) return;
+        nextSource = std::move(nextSrc);
+        glTransitionName = name;
+        transitionDuration = duration > 0.01f ? duration : 0.01f;
+        transitionProgress = 0.0f;
+        glTransitionActive = true;
     }
 
     // Toggle visibility with transition
