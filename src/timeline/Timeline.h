@@ -12,6 +12,27 @@ class LayerStack;
 // (e.g. "treat this as Color") survive a reload.
 enum class ClipKind : uint8_t { Auto = 0, Video = 1, Shader = 2, Color = 3 };
 
+// Per-clip playback semantics — how the clip's source behaves as the
+// playhead moves through it.
+enum class ClipPlaybackMode : uint8_t {
+    Forward = 0,   // standard
+    Loop,          // restart source when reaching clip end (wired)
+    Hold,          // play once, hold last frame (wired: pause source at clip end)
+    Reverse,       // play in reverse (requires FFmpeg reverse-seek — UI-only for now)
+    PingPong       // forward then reverse then forward (UI-only for now)
+};
+
+inline const char* clipPlaybackModeName(ClipPlaybackMode m) {
+    switch (m) {
+        case ClipPlaybackMode::Forward:  return "Forward";
+        case ClipPlaybackMode::Loop:     return "Loop";
+        case ClipPlaybackMode::Hold:     return "Hold";
+        case ClipPlaybackMode::Reverse:  return "Reverse";
+        case ClipPlaybackMode::PingPong: return "Ping-Pong";
+        default: return "Forward";
+    }
+}
+
 // A clip = "this layer is active from startTime to startTime+duration".
 // Overlapping clips on the same track trigger a shader transition (if the
 // layer has TransitionType::Shader + transitionShaderPath set).
@@ -35,6 +56,14 @@ struct TimelineClip {
     std::string transitionInName;
     double      transitionInDuration = 0.5; // seconds
 
+    // Optional ISF shader path. When non-empty it takes precedence over
+    // transitionInName and drives the A→B blend on clip-enter through
+    // Layer::startShaderTransition + the per-layer transitionShaderPath.
+    std::string transitionInShaderPath;
+
+    // How the clip's source plays as the playhead moves through it.
+    ClipPlaybackMode playbackMode = ClipPlaybackMode::Forward;
+
     double endTime() const { return startTime + duration; }
     bool contains(double t) const { return t >= startTime && t < endTime(); }
 };
@@ -50,6 +79,63 @@ struct TimelineTrack {
     std::vector<TimelineClip> clips;
 };
 
+// Named cue point on the timeline — one dot in the Markers lane at a time.
+// During playback, the first marker whose window contains the playhead
+// fires its associated sceneName via SceneManager::recall*. Useful for
+// scripted shows: pre-author "drop" at 2:14, single key press during the
+// show (or playhead arrival) recalls the full layer-stack snapshot.
+struct TimelineMarker {
+    uint32_t    id   = 0;
+    double      time = 0.0;
+    std::string name;
+    std::string sceneName;  // blank = informational only, no scene recall
+};
+
+// Contiguous section of the timeline — renders as a colored band on the
+// ruler. Used for "verse / chorus / drop" labels so performers can jump
+// between acts without scrubbing.
+struct TimelineSection {
+    uint32_t    id        = 0;
+    double      startTime = 0.0;
+    double      endTime   = 1.0;
+    std::string name;
+    uint32_t    tint = 0;  // 0 = auto-pick from a palette by id
+    double duration() const { return endTime - startTime; }
+};
+
+// Additional per-layer sublanes below the main clip row. Data-model stubs —
+// these hold keyframes/events but no runtime yet. UI lets the user add lanes,
+// shows placeholder tracks, and serialises round-trip.
+enum class TimelineLaneKind : uint8_t {
+    Automation = 0,   // float keyframes driving a named layer parameter
+    MIDI,             // MIDI note/CC events (id + value, quantised)
+    AudioReactive,    // audio-signal binding (bass/mid/high/beat → param)
+    COUNT
+};
+inline const char* timelineLaneKindName(TimelineLaneKind k) {
+    switch (k) {
+        case TimelineLaneKind::Automation:    return "Automation";
+        case TimelineLaneKind::MIDI:          return "MIDI";
+        case TimelineLaneKind::AudioReactive: return "Audio-Reactive";
+        default: return "Lane";
+    }
+}
+struct TimelineLanePoint {
+    double time  = 0.0;
+    float  value = 0.0f;      // 0..1 for automation / audio-reactive depth
+    int    noteOrCC = 0;       // MIDI note number (or CC #)
+};
+struct TimelineLane {
+    uint32_t id      = 0;
+    uint32_t layerId = 0;
+    TimelineLaneKind kind = TimelineLaneKind::Automation;
+    std::string paramName;                 // e.g. "opacity", "position.x", "CC1"
+    int         midiChannel  = 0;
+    int         audioSignal  = 0;          // 0=bass 1=mid 2=high 3=beat
+    float       audioStrength = 0.5f;
+    std::vector<TimelineLanePoint> points; // keyframes / events
+};
+
 // A transition = "blend between layer A (below) and layer B (above) while
 // both are active, over [startTime, startTime+duration]." Lives in its own
 // thin lane drawn between the two layer rows in the timeline UI. Dragging
@@ -61,6 +147,11 @@ struct TimelineTransition {
     double   startTime    = 0.0;
     double   duration     = 1.0;
     std::string name;             // gl-transitions name, e.g. "crossfade"
+    // Optional — path to an ISF fragment shader with `from`, `to`, `progress`
+    // inputs. When set, takes precedence over `name` and lets the user drive
+    // the blend with any custom ISF shader (e.g. one of their Soph-Orb style
+    // creations) rather than a gl-transitions.com preset.
+    std::string shaderPath;
 
     double endTime() const { return startTime + duration; }
 };
@@ -132,6 +223,29 @@ public:
     std::vector<TimelineTransition>& transitions() { return m_transitions; }
     const std::vector<TimelineTransition>& transitions() const { return m_transitions; }
 
+    // Markers — named cue points. addMarker returns the new id.
+    uint32_t addMarker(double time, const std::string& name = "Cue",
+                       const std::string& sceneName = "");
+    void     removeMarker(uint32_t id);
+    TimelineMarker* findMarker(uint32_t id);
+    std::vector<TimelineMarker>& markers()             { return m_markers; }
+    const std::vector<TimelineMarker>& markers() const { return m_markers; }
+
+    // Sections — ruler bands spanning a time range.
+    uint32_t addSection(double start, double end, const std::string& name = "Section");
+    void     removeSection(uint32_t id);
+    TimelineSection* findSection(uint32_t id);
+    std::vector<TimelineSection>& sections()             { return m_sections; }
+    const std::vector<TimelineSection>& sections() const { return m_sections; }
+
+    // Lanes — per-layer automation / MIDI / audio-reactive sublanes.
+    uint32_t addLane(uint32_t layerId, TimelineLaneKind kind,
+                     const std::string& paramName = "opacity");
+    void     removeLane(uint32_t id);
+    TimelineLane* findLane(uint32_t id);
+    std::vector<TimelineLane>& lanes()             { return m_lanes; }
+    const std::vector<TimelineLane>& lanes() const { return m_lanes; }
+
     // JSON serialization (keys used by .easel project file).
     nlohmann::json toJson() const;
     void fromJson(const nlohmann::json& j);
@@ -149,6 +263,12 @@ private:
     bool   m_loop     = false;
     uint32_t m_nextClipId = 1;
     uint32_t m_nextTransitionId = 1;
+    uint32_t m_nextMarkerId = 1;
+    uint32_t m_nextSectionId = 1;
+    uint32_t m_nextLaneId = 1;
+    std::vector<TimelineMarker>  m_markers;
+    std::vector<TimelineSection> m_sections;
+    std::vector<TimelineLane>    m_lanes;
 
     // Tracks previous-frame active-clip per track so we only fire transitions
     // on EDGES (clip-enter / clip-exit), not every frame.

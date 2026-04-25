@@ -354,6 +354,12 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
     if (dt <= 0 || dt > 0.5f) dt = 1.0f / 60.0f; // clamp to sane range
     m_lastTime = m_audio.time;
 
+    // Solo-aware visibility: if any layer is solo'd, only solo'd layers render.
+    bool anySoloed = false;
+    for (const auto& l : layers) {
+        if (l && l->soloed) { anySoloed = true; break; }
+    }
+
     bool firstLayer = true;
     for (int i = 0; i < (int)layers.size(); i++) {
         const auto& layer = layers[i];
@@ -409,6 +415,9 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
 
         // Skip fully transparent or invisible (but allow transitioning-out layers to render)
         if (effectiveOpacity <= 0.0f || !layer->textureId()) continue;
+        if (layer->userHidden) continue;
+        if (layer->muted) continue;
+        if (anySoloed && !layer->soloed) continue;
         if (!layer->visible && !layer->transitionActive) continue;
 
         // Apply audio bindings to layer properties (temporary modulation)
@@ -792,6 +801,188 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         m_quad.draw();
         glDisable(GL_BLEND);
+
+        // ── Between-row shader blend ────────────────────────────────────
+        // If a TimelineTransition has annotated this "to" layer, replace
+        // m_fbo[next]'s contents with transition(from, to, progress), where
+        // from = m_fbo[m_current] (stack through the previous layer) and
+        // to = what we just wrote to m_fbo[next] (accumulated + this layer).
+        //
+        // ── ISF shader transition (user-picked from ShaderClaw etc.) ────
+        // If the transition references an ISF `.fs` shader path, drive the
+        // A→B blend through that shader. Contract:
+        //   - shader has `from`/`to`/`progress` inputs  → full transition
+        //     (the shader owns the blend, we just wire the textures)
+        //   - shader is missing any of those → interstitial fallback:
+        //     crossfade A → shader → B across the transition window.
+        if (layer->betweenRowActive && !layer->betweenRowShaderPath.empty()) {
+            auto& slot = m_isfTransitions[layer->betweenRowShaderPath];
+            if (!slot) {
+                auto s = std::make_shared<ShaderSource>();
+                if (s->loadFromFile(layer->betweenRowShaderPath)) {
+                    s->setResolution(m_width, m_height);
+                    slot = s;
+                } else {
+                    std::cerr << "[CompositeEngine] ISF transition failed to load: "
+                              << layer->betweenRowShaderPath << "\n";
+                    // leave slot null so we skip render this frame
+                }
+            } else if (slot->width() != m_width || slot->height() != m_height) {
+                slot->setResolution(m_width, m_height);
+            }
+
+            if (slot) {
+                bool hasFrom = false, hasTo = false, hasProgress = false;
+                for (const auto& inp : slot->inputs()) {
+                    if (inp.name == "from"     && inp.type == "image") hasFrom = true;
+                    else if (inp.name == "to"       && inp.type == "image") hasTo = true;
+                    else if (inp.name == "progress" && inp.type == "float") hasProgress = true;
+                }
+
+                // Scratch "to" — copy m_fbo[next] (which holds A+B stacked) so
+                // we can read it while writing back into m_fbo[next].
+                if (m_betweenRowFBO.width() != m_width
+                    || m_betweenRowFBO.height() != m_height) {
+                    if (m_betweenRowFBO.width() == 0)
+                        m_betweenRowFBO.create(m_width, m_height);
+                    else
+                        m_betweenRowFBO.resize(m_width, m_height);
+                }
+                GLuint toSrc   = m_fbo[next].textureId();
+                GLuint fromSrc = m_fbo[m_current].textureId();
+
+                auto drawPassthrough = [&](GLuint texId, float opacity) {
+                    m_passthroughShader.use();
+                    m_passthroughShader.setInt("uTexture", 0);
+                    m_passthroughShader.setFloat("uOpacity", opacity);
+                    m_passthroughShader.setMat3("uTransform", glm::mat3(1.0f));
+                    m_passthroughShader.setBool("uHasMask", false);
+                    m_passthroughShader.setBool("uFlipV", false);
+                    m_passthroughShader.setFloat("uTileX", 1.0f);
+                    m_passthroughShader.setFloat("uTileY", 1.0f);
+                    m_passthroughShader.setInt("uMosaicMode", 0);
+                    m_passthroughShader.setFloat("uFeather", 0.0f);
+                    glActiveTexture(GL_TEXTURE0);
+                    glBindTexture(GL_TEXTURE_2D, texId);
+                    m_quad.draw();
+                };
+
+                // Copy A+B stacked result into scratch (our "to" texture).
+                m_betweenRowFBO.bind();
+                glViewport(0, 0, m_width, m_height);
+                glClearColor(0, 0, 0, 0);
+                glClear(GL_COLOR_BUFFER_BIT);
+                drawPassthrough(toSrc, 1.0f);
+                Framebuffer::unbind();
+
+                float p = layer->betweenRowProgress;
+
+                // Audio bindings so user transition shaders can react too.
+                slot->setAudioState(m_audio.rms, m_audio.bass,
+                                    (m_audio.lowMid + m_audio.highMid) * 0.5f,
+                                    m_audio.treble, m_audio.fftTexture);
+
+                if (hasFrom && hasTo && hasProgress) {
+                    // (d) Full contract: shader is the transition.
+                    slot->bindImageInput("from", fromSrc,
+                                         m_width, m_height, 0, false);
+                    slot->bindImageInput("to", m_betweenRowFBO.textureId(),
+                                         m_width, m_height, 0, false);
+                    slot->setFloat("progress", p);
+                    slot->update();
+
+                    m_fbo[next].bind();
+                    glViewport(0, 0, m_width, m_height);
+                    glClearColor(0, 0, 0, 0);
+                    glClear(GL_COLOR_BUFFER_BIT);
+                    drawPassthrough(slot->textureId(), 1.0f);
+                    Framebuffer::unbind();
+                } else {
+                    // (a) Interstitial fallback: A → shader → B across the
+                    // window. Each phase is a plain alpha crossfade, so a
+                    // generative shader with no transition contract still
+                    // slots in cleanly between the two clips.
+                    if (hasProgress) slot->setFloat("progress", p);
+                    slot->update();
+                    GLuint shaderTex = slot->textureId();
+
+                    float fromW, shaderW, toW;
+                    if (p < 0.5f) {
+                        float t = p * 2.0f;          // 0..1 in the first half
+                        fromW   = 1.0f - t;
+                        shaderW = t;
+                        toW     = 0.0f;
+                    } else {
+                        float t = (p - 0.5f) * 2.0f; // 0..1 in the second half
+                        fromW   = 0.0f;
+                        shaderW = 1.0f - t;
+                        toW     = t;
+                    }
+
+                    m_fbo[next].bind();
+                    glViewport(0, 0, m_width, m_height);
+                    glClearColor(0, 0, 0, 0);
+                    glClear(GL_COLOR_BUFFER_BIT);
+                    glEnable(GL_BLEND);
+                    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                    if (fromW   > 0.001f) drawPassthrough(fromSrc,   fromW);
+                    if (shaderW > 0.001f) drawPassthrough(shaderTex, shaderW);
+                    if (toW     > 0.001f) drawPassthrough(m_betweenRowFBO.textureId(), toW);
+                    glDisable(GL_BLEND);
+                    Framebuffer::unbind();
+                }
+            }
+        } else if (layer->betweenRowActive && !layer->betweenRowGLName.empty()
+            && layer->betweenRowShaderPath.empty()) {
+            auto* xition = GLTransitionLibrary::instance().get(layer->betweenRowGLName);
+            if (xition && xition->isValid()) {
+                // Ensure scratch FBO matches the canvas.
+                if (m_betweenRowFBO.width() != m_width
+                    || m_betweenRowFBO.height() != m_height) {
+                    if (m_betweenRowFBO.width() == 0)
+                        m_betweenRowFBO.create(m_width, m_height);
+                    else
+                        m_betweenRowFBO.resize(m_width, m_height);
+                }
+                // "to" = the just-rendered m_fbo[next]. Copy it into the
+                // scratch so we can read-from-scratch while writing-to-next.
+                GLuint toSrc   = m_fbo[next].textureId();
+                GLuint fromSrc = m_fbo[m_current].textureId();
+
+                m_betweenRowFBO.bind();
+                glViewport(0, 0, m_width, m_height);
+                glClearColor(0, 0, 0, 0);
+                glClear(GL_COLOR_BUFFER_BIT);
+                m_passthroughShader.use();
+                m_passthroughShader.setInt("uTexture", 0);
+                m_passthroughShader.setFloat("uOpacity", 1.0f);
+                m_passthroughShader.setMat3("uTransform", glm::mat3(1.0f));
+                m_passthroughShader.setBool("uHasMask", false);
+                m_passthroughShader.setBool("uFlipV", false);
+                m_passthroughShader.setFloat("uTileX", 1.0f);
+                m_passthroughShader.setFloat("uTileY", 1.0f);
+                m_passthroughShader.setInt("uMosaicMode", 0);
+                m_passthroughShader.setFloat("uFeather", 0.0f);
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, toSrc);
+                m_quad.draw();
+                Framebuffer::unbind();
+
+                // Run transition shader with from=stack-through-prev-layer,
+                // to=scratch, writing directly into m_fbo[next].
+                m_fbo[next].bind();
+                glViewport(0, 0, m_width, m_height);
+                glClearColor(0, 0, 0, 0);
+                glClear(GL_COLOR_BUFFER_BIT);
+                xition->render(fromSrc, m_betweenRowFBO.textureId(),
+                               layer->betweenRowProgress,
+                               m_width, m_height,
+                               m_audio.rms, m_audio.bass,
+                               (m_audio.lowMid + m_audio.highMid) * 0.5f,
+                               m_audio.treble, m_audio.beatDecay);
+                Framebuffer::unbind();
+            }
+        }
 
         m_current = next;
         firstLayer = false;

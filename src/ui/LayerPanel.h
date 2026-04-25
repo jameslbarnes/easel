@@ -32,4 +32,12 @@ private:
     bool m_renaming = false;
     int m_renameIndex = -1;
     char m_renameBuf[256] = {};
+    bool m_renameJustStarted = false; // auto-focus the input on first frame
+
+    // Inline opacity drag — drag the "100%" readout left/right to scrub the
+    // layer's opacity. Active while the mouse is down inside the readout's
+    // hit rect.
+    int   m_opacityDragIdx   = -1;
+    float m_opacityDragStart = 1.0f;
+    float m_opacityDragAnchorX = 0.0f;
 };

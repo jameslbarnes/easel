@@ -98,8 +98,21 @@ void ShaderClawBridge::refreshManifest() {
                 }
             }
 
+            // Skip Three.js scene entries — they're JavaScript (.scene.js),
+            // and Easel's ISF pipeline only understands GLSL fragment shaders.
+            // Listing them would surface broken tiles (e.g. "Cube Explosion").
+            if (se.type == "scene") continue;
+
             if (!se.file.empty()) {
-                se.fullPath = m_shadersDir + "/" + se.file;
+                // Manifest sometimes groups scenes under a "scenes" subfolder;
+                // for regular shaders the file path is relative to shadersDir.
+                std::string folder;
+                if (item.contains("folder") && item["folder"].is_string()) {
+                    folder = item["folder"].get<std::string>();
+                }
+                se.fullPath = folder.empty()
+                    ? (m_shadersDir + "/" + se.file)
+                    : (m_shadersDir + "/" + folder + "/" + se.file);
                 m_shaders.push_back(std::move(se));
             }
         }

@@ -47,83 +47,253 @@ static const char* getBadgeLabel(const std::string& type) {
     return "?";
 }
 
-// Draw a single layer row at a given screen Y position
+// ─── iPad-style layer cards ────────────────────────────────────────────
+//
+//   Design brief: "feel like an iPad app" — Procreate / LumaFusion /
+//   Pixelmator territory. The ingredients are well-known:
+//
+//   - Each row is its OWN CARD with a subtle rounded bg, margin between
+//     cards, and a soft selected-state that uses an accent-tinted fill
+//     (not a hairline border).
+//   - Generous padding everywhere. Touch targets ≥ 32pt.
+//   - Rounded thumbnail (12pt radius) — instantly "iOS native".
+//   - Typography: primary name ~15pt, secondary ALL-CAPS type label
+//     ~10pt with letter-spacing (faked via tracked padding) for a
+//     quiet subtitle rhythm.
+//   - Controls are CIRCULAR icon buttons (~28pt) with a soft fill
+//     backdrop, appearing only on row hover or when active. When
+//     active the buttons pick up a coloured fill. No pills, no text
+//     glyphs.
+//   - Opacity shown as a soft fill strip just below the card's bottom,
+//     never a sharp blue bar.
+//   - No Unicode rendered anywhere — all icons drawn with primitives.
+//
+namespace LP {
+    static constexpr float kCardMarginX = 8.0f;   // outer margin — gives cards space
+    static constexpr float kCardMarginY = 4.0f;
+    static constexpr float kCardRadius  = 12.0f;  // iOS-native rounding
+    static constexpr float kCardPadX    = 10.0f;  // inner horizontal padding — matches the "+ Add Layer" button's visual inset above
+    static constexpr float kThumbW      = 48.0f;  // 48×48 thumbnail — iOS-sized
+    static constexpr float kThumbToText = 14.0f;
+    static constexpr float kBtnR        = 14.0f;  // circular button radius
+    static constexpr float kBtnGap      = 6.0f;
+    static constexpr float kTextToPct   = 12.0f;
+    static constexpr float kPctToBtns   = 10.0f;
+}
+
+// Type colour — used for the tiny type-dot next to the name and the
+// thumbnail's faint tint.
+static ImU32 typeColor(const std::shared_ptr<Layer>& layer) {
+    if (!layer->source) return IM_COL32(120, 128, 145, 200);
+    return getBadgeColor(layer->source->typeName());
+}
+
+// ─── Primitive icon drawers ─────────────────────────────────────────
+// Each icon fits in an LP::kIconW × LP::kIconW box centred on (cx, cy).
+// `alpha` lets callers fade the whole icon without rebuilding colours.
+
+static void drawEyeIcon(ImDrawList* dl, float cx, float cy, bool open,
+                         ImU32 col) {
+    if (open) {
+        // Almond outline + pupil.
+        const int segs = 14;
+        const float rX = 6.0f, rY = 3.2f;
+        ImVec2 pts[segs * 2];
+        for (int i = 0; i < segs; i++) {
+            float t = (float)i / (segs - 1);
+            float a = -1.5707963f + t * 3.1415927f; // top arc
+            pts[i] = ImVec2(cx + std::cos(a) * rX, cy - std::abs(std::sin(a)) * rY);
+        }
+        for (int i = 0; i < segs; i++) {
+            float t = (float)i / (segs - 1);
+            float a = -1.5707963f + t * 3.1415927f;
+            pts[segs + i] = ImVec2(cx - std::cos(a) * rX, cy + std::abs(std::sin(a)) * rY);
+        }
+        dl->AddPolyline(pts, segs * 2, col, ImDrawFlags_Closed, 1.2f);
+        dl->AddCircleFilled(ImVec2(cx, cy), 1.6f, col);
+    } else {
+        // Eye closed — single horizontal arc (cupped downward).
+        const int segs = 10;
+        ImVec2 pts[segs];
+        for (int i = 0; i < segs; i++) {
+            float t = (float)i / (segs - 1);
+            float x = cx + (t - 0.5f) * 12.0f;
+            float y = cy + std::sin(t * 3.1415927f) * 2.2f;
+            pts[i] = ImVec2(x, y);
+        }
+        dl->AddPolyline(pts, segs, col, ImDrawFlags_None, 1.3f);
+    }
+}
+
+static void drawMuteIcon(ImDrawList* dl, float cx, float cy, bool on, ImU32 col) {
+    // Speaker: trapezoid + triangular cone. When "on" (muted), draw an X
+    // through it to indicate the layer is silenced from the composite.
+    float x0 = cx - 6.0f, y0 = cy;
+    dl->AddRectFilled(ImVec2(x0, y0 - 2.0f),
+                       ImVec2(x0 + 3.0f, y0 + 2.0f), col, 0.5f);
+    dl->AddTriangleFilled(ImVec2(x0 + 3.0f, y0 - 4.0f),
+                           ImVec2(x0 + 8.0f, y0 - 4.5f),
+                           ImVec2(x0 + 8.0f, y0 + 4.5f), col);
+    dl->AddTriangleFilled(ImVec2(x0 + 3.0f, y0 + 4.0f),
+                           ImVec2(x0 + 8.0f, y0 + 4.5f),
+                           ImVec2(x0 + 8.0f, y0 - 4.5f), col);
+    if (on) {
+        dl->AddLine(ImVec2(cx + 1.0f, cy - 5.5f),
+                     ImVec2(cx + 7.0f, cy + 5.5f), col, 1.5f);
+        dl->AddLine(ImVec2(cx + 7.0f, cy - 5.5f),
+                     ImVec2(cx + 1.0f, cy + 5.5f), col, 1.5f);
+    }
+}
+
+static void drawSoloIcon(ImDrawList* dl, float cx, float cy, bool on, ImU32 col) {
+    // Headphone silhouette: top arc + two earcups. Simple 2D symbol that
+    // reads as "solo / monitor" without any text.
+    const int segs = 10;
+    ImVec2 arcPts[segs];
+    for (int i = 0; i < segs; i++) {
+        float t = (float)i / (segs - 1);
+        float a = 3.1415927f + t * 3.1415927f;
+        arcPts[i] = ImVec2(cx + std::cos(a) * 6.0f, cy - 2.0f + std::sin(a) * 5.0f);
+    }
+    dl->AddPolyline(arcPts, segs, col, ImDrawFlags_None, 1.3f);
+    if (on) {
+        dl->AddRectFilled(ImVec2(cx - 6.5f, cy - 2.0f),
+                           ImVec2(cx - 3.5f, cy + 4.0f), col, 1.5f);
+        dl->AddRectFilled(ImVec2(cx + 3.5f, cy - 2.0f),
+                           ImVec2(cx + 6.5f, cy + 4.0f), col, 1.5f);
+    } else {
+        dl->AddRect(ImVec2(cx - 6.5f, cy - 2.0f),
+                     ImVec2(cx - 3.5f, cy + 4.0f), col, 1.5f, 0, 1.0f);
+        dl->AddRect(ImVec2(cx + 3.5f, cy - 2.0f),
+                     ImVec2(cx + 6.5f, cy + 4.0f), col, 1.5f, 0, 1.0f);
+    }
+}
+
+// Draw a single layer row. The row IS the container — rounded corners,
+// subtle surface fill, no nested card inside. Hover/select lift the fill.
+// The row's bottom edge has no tray line. Opacity % sits on the right and
+// is draggable (the mouse handler in render() detects the drag zone).
+//
+// Zone dots (when multiple zones exist) live in the right cluster above
+// the opacity %, right-aligned to the same inner edge so the pair reads
+// as one object.
 static void drawLayerRow(ImDrawList* draw, const std::shared_ptr<Layer>& layer,
                          float x, float y, float width, float rowHeight,
-                         bool selected, bool hovered, bool dimmed, float thumbSize) {
-    ImVec2 rowMin(x, y);
-    ImVec2 rowMax(x + width, y + rowHeight);
+                         bool selected, bool hovered, bool dimmed,
+                         float /*thumbSize*/,
+                         // Right-side cluster width reserved for zone dots —
+                         // the caller knows how many zones exist and passes
+                         // the computed width so the name column can avoid
+                         // overlapping them.
+                         float zoneClusterW = 0.0f) {
+    // Inset the row slightly so rounded corners stay clear of the panel
+    // edges without creating a visible "card inside panel" look.
+    // Row container spans the full panel width so its left/right edges
+    // align with the "+ Add Layer" button above. Only vertical margin
+    // remains — just enough spacing between stacked rows.
+    const float kInsetX = 0.0f;
+    const float kInsetY = 3.0f;
+    ImVec2 rowMin(x + kInsetX, y + kInsetY);
+    ImVec2 rowMax(x + width - kInsetX, y + rowHeight - kInsetY);
 
-    // Background
+    const float cy  = (rowMin.y + rowMax.y) * 0.5f;
+    const float cx0 = rowMin.x;
+    const float cx1 = rowMax.x;
+    const float kRowR = 12.0f;
+    bool effectivelyVisible = layer->visible && !layer->userHidden;
+    ImU32 tCol = typeColor(layer);
+
+    // ── Always-on container fill (rounded) — the row is a surface, not a
+    //    blank strip. Hover/select layer ON TOP of the base fill so it
+    //    still feels like one object, not two stacked shapes.
     if (!dimmed) {
+        draw->AddRectFilled(rowMin, rowMax, IM_COL32(30, 35, 46, 255), kRowR);
         if (selected) {
-            draw->AddRectFilled(rowMin, rowMax, kRowSelected, 3.0f);
-            draw->AddRectFilled(rowMin, ImVec2(x + 3, y + rowHeight), kAccent, 2.0f);
-        }
-        if (hovered && !selected) {
-            draw->AddRectFilled(rowMin, rowMax, kRowHover, 3.0f);
+            draw->AddRectFilled(rowMin, rowMax, IM_COL32(255, 255, 255, 16), kRowR);
+        } else if (hovered) {
+            draw->AddRectFilled(rowMin, rowMax, IM_COL32(255, 255, 255, 8), kRowR);
         }
     }
 
-    // Eye
-    float eyeX = x + 14, eyeY = y + rowHeight * 0.5f;
-    if (layer->visible) {
-        draw->AddCircleFilled(ImVec2(eyeX, eyeY), 4.0f, kEyeOn);
-        draw->AddCircle(ImVec2(eyeX, eyeY), 7.0f, kEyeOn, 0, 1.5f);
-    } else {
-        draw->AddCircle(ImVec2(eyeX, eyeY), 4.0f, kEyeOff, 0, 1.5f);
-        draw->AddLine(ImVec2(eyeX - 5, eyeY + 4), ImVec2(eyeX + 5, eyeY - 4), kEyeOff, 1.5f);
-    }
+    // ── Thumbnail
+    float thumbX = cx0 + LP::kCardPadX;
+    float thumbH = LP::kThumbW;
+    float thumbY = cy - thumbH * 0.5f;
+    ImVec2 tMin(thumbX, thumbY), tMax(thumbX + thumbH, thumbY + thumbH);
 
-    // Thumbnail
-    float thumbX = x + 28;
-    float thumbY = y + (rowHeight - thumbSize) * 0.5f;
-    ImVec2 tMin(thumbX, thumbY), tMax(thumbX + thumbSize, thumbY + thumbSize);
-    draw->AddRectFilled(tMin, tMax, kThumbBg, 3.0f);
+    // Thumbnail rounding — subtle curve, roughly 6pt so the corners soften
+    // without reading as a pill. Image clipped via AddImageRounded so the
+    // content curves with the frame.
+    const float kThumbR = 6.0f;
+    ImU32 thumbTint = IM_COL32(
+        (tCol >>  0) & 0xFF,
+        (tCol >>  8) & 0xFF,
+        (tCol >> 16) & 0xFF,
+        40);
+    draw->AddRectFilled(tMin, tMax, kThumbBg,  kThumbR);
+    draw->AddRectFilled(tMin, tMax, thumbTint, kThumbR);
+
     GLuint texId = layer->source ? layer->source->textureId() : 0;
     if (texId != 0) {
-        draw->PushClipRect(ImVec2(tMin.x + 1, tMin.y + 1), ImVec2(tMax.x - 1, tMax.y - 1), true);
-        draw->AddImage((ImTextureID)(intptr_t)texId, tMin, tMax,
-                       ImVec2(0, 1), ImVec2(1, 0),
-                       IM_COL32(255, 255, 255, layer->visible ? 255 : 80));
-        draw->PopClipRect();
+        draw->AddImageRounded((ImTextureID)(intptr_t)texId, tMin, tMax,
+                               ImVec2(0, 1), ImVec2(1, 0),
+                               IM_COL32(255, 255, 255, effectivelyVisible ? 255 : 90),
+                               kThumbR);
     }
-    draw->AddRect(tMin, tMax, kThumbBorder, 3.0f);
+    draw->AddRect(tMin, tMax, IM_COL32(255, 255, 255, 16), kThumbR, 0, 1.0f);
 
-    // Name + subtitle. Type word lives inline in the subtitle ("Shader · 1920×1080").
-    // The colored type-dot is positioned at the top-right, above the opacity %.
-    float nameX = thumbX + thumbSize + 10;
-    float nameY = y + 5;
-    ImU32 nameCol = layer->visible ? kTextPrimary : kTextDim;
-    if (dimmed) nameCol = IM_COL32(180, 190, 210, 140);
-    draw->AddText(ImVec2(nameX, nameY), nameCol, layer->name.c_str());
+    if (!effectivelyVisible) {
+        draw->AddLine(ImVec2(tMin.x + 6, tMax.y - 6),
+                       ImVec2(tMax.x - 6, tMin.y + 6),
+                       IM_COL32(255, 255, 255, 170), 2.0f);
+    }
+
+    // ── Name + TYPE caption
+    float nameX = tMax.x + LP::kThumbToText;
+
+    const float nameSize = 15.0f;
+    const float typeSize = 10.0f;   // SHADER caption size — the % matches this
+    const float gapY     = 4.0f;
+    const float pairH    = nameSize + gapY + typeSize;
+    const float nameY    = cy - pairH * 0.5f;
+    const float typeY    = nameY + nameSize + gapY;
+
+    char opBuf[8];
+    snprintf(opBuf, sizeof(opBuf), "%d%%",
+             (int)(layer->opacity * 100.0f + 0.5f));
+    // Compute % text metrics at the SMALLER SHADER-caption size so both
+    // read as a matched pair rhythmically.
+    ImVec2 opSz = ImGui::GetFont()->CalcTextSizeA(typeSize, FLT_MAX, 0.0f, opBuf);
+    float rightInnerEdge = cx1 - LP::kCardPadX;
+    float rightClusterW  = std::max(opSz.x, zoneClusterW);
+    float pctX           = rightInnerEdge - opSz.x;
+    float nameWMax       = std::max(40.0f,
+                                     rightInnerEdge - rightClusterW
+                                     - LP::kTextToPct - nameX);
+
+    ImU32 nameCol = effectivelyVisible ? kTextPrimary : kTextDim;
+    if (dimmed) nameCol = IM_COL32(180, 190, 210, 150);
+
+    draw->PushClipRect(ImVec2(nameX, rowMin.y),
+                        ImVec2(nameX + nameWMax, rowMax.y), true);
+    draw->AddText(ImGui::GetFont(), nameSize,
+                   ImVec2(nameX, nameY), nameCol, layer->name.c_str());
     if (layer->source) {
-        char sub[96];
-        snprintf(sub, sizeof(sub), "%s · %dx%d",
-                 layer->source->typeName().c_str(),
-                 layer->source->width(), layer->source->height());
-        draw->AddText(ImVec2(nameX, nameY + 16), kTextMuted, sub);
+        std::string type = layer->source->typeName();
+        for (auto& ch : type) ch = (char)toupper((unsigned char)ch);
+        if (layer->soloed)     type += "  SOLO";
+        else if (layer->muted) type += "  MUTED";
+        draw->AddText(ImGui::GetFont(), typeSize,
+                       ImVec2(nameX, typeY), kTextMuted, type.c_str());
     }
+    draw->PopClipRect();
 
-    // Opacity bar (right side) + colored type dot above the percentage.
-    if (width > 140) {
-        float barW = 46.0f, barH = 3.0f;
-        float barX = rowMax.x - barW - 8;
-        float barY = y + rowHeight * 0.5f + 6;
-        draw->AddRectFilled(ImVec2(barX, barY), ImVec2(barX + barW, barY + barH), kOpacityBg, 2.0f);
-        draw->AddRectFilled(ImVec2(barX, barY), ImVec2(barX + barW * layer->opacity, barY + barH), kOpacityFill, 2.0f);
-        char opBuf[16];
-        snprintf(opBuf, sizeof(opBuf), "%d%%", (int)(layer->opacity * 100.0f + 0.5f));
-        ImVec2 opSz = ImGui::CalcTextSize(opBuf);
-        float pctX = barX + barW - opSz.x;
-        float pctY = barY - 13;
-        draw->AddText(ImVec2(pctX, pctY), kTextDim, opBuf);
-        // Type dot — above the percentage, right-aligned with the bar's right edge.
-        if (layer->source) {
-            ImU32 dotCol = getBadgeColor(layer->source->typeName());
-            draw->AddCircleFilled(ImVec2(barX + barW - 3, pctY - 4), 3.5f, dotCol);
-        }
-    }
+    // ── Opacity % — small (matches SHADER caption size), right-aligned,
+    //    sits on the TYPE baseline so name/% share a visual line below
+    //    and name/(zone dots) share one above. Draggable via the handler
+    //    in render().
+    draw->AddText(ImGui::GetFont(), typeSize,
+                   ImVec2(pctX, typeY), kTextDim, opBuf);
 }
 
 // Zone / layer-row accent colors — vibrant so layers assigned to different
@@ -177,8 +347,10 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
         ImGui::Dummy(ImVec2(0, 2));
     }
 
-    float thumbSize = 30.0f;
-    float rowHeight = 42.0f;
+    // Row rhythm — 72px cards (64 content + 8 outer margin) so each card
+    // reads as an iOS-sized list cell with room to breathe.
+    float thumbSize = LP::kThumbW;
+    float rowHeight = 72.0f;
     int layerCount = stack.count();
 
     // Empty state
@@ -204,16 +376,30 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
 
     // --- MOUSE INTERACTION ---
 
-    // Detect mouse-down on a row to start potential drag
-    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && windowHovered && !m_renaming) {
+    // Detect mouse-down on a row to start potential drag.
+    // NOTE: the opacity-scrub drag is NOT handled here — it's driven by the
+    // ImGui::InvisibleButton over each row's % text region, which claims
+    // the mouse press itself so the window-drag gesture never triggers.
+    // We only run this block if no opacity drag is in progress.
+    if (m_opacityDragIdx < 0
+        && ImGui::IsMouseClicked(ImGuiMouseButton_Left)
+        && windowHovered && !m_renaming)
+    {
         float relY = mousePos.y - listStart.y;
         int displayIdx = (int)(relY / rowHeight);
         if (displayIdx >= 0 && displayIdx < layerCount && relY >= 0) {
             int stackIdx = layerCount - 1 - displayIdx;
 
-            // Eye toggle zone
-            if (mousePos.x < listStart.x + 26) {
-                stack[stackIdx]->visible = !stack[stackIdx]->visible;
+            // Hit zones: thumbnail toggles visibility, everything else =
+            // select + potential reorder. Opacity scrub is handled by the
+            // InvisibleButton below, not here.
+            float relX = mousePos.x - listStart.x;
+            float thumbLo = LP::kCardPadX - 4;
+            float thumbHi = LP::kCardPadX + LP::kThumbW + 4;
+            if (relX >= thumbLo && relX < thumbHi) {
+                auto& L = stack[stackIdx];
+                L->userHidden = !L->userHidden;
+                L->visible = !L->userHidden;
             } else {
                 selectedLayer = stackIdx;
                 m_dragIndex = stackIdx;
@@ -233,6 +419,10 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
             m_dragActive = true;
         }
     }
+
+    // (Opacity scrub is driven by IsItemActivated / IsItemActive on the
+    // per-row InvisibleButton below, not here. ImGui claims the mouse
+    // press so the window never starts a drag.)
 
     // Track insertion position during drag
     if (m_dragActive) {
@@ -282,6 +472,7 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
         if (displayIdx >= 0 && displayIdx < layerCount && mousePos.x >= listStart.x + 26) {
             int stackIdx = layerCount - 1 - displayIdx;
             m_renaming = true;
+            m_renameJustStarted = true;
             m_renameIndex = stackIdx;
             strncpy(m_renameBuf, stack[stackIdx]->name.c_str(), sizeof(m_renameBuf) - 1);
             m_renameBuf[sizeof(m_renameBuf) - 1] = '\0';
@@ -319,70 +510,106 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
             continue;
         }
 
-        // Alternate row bg
         ImVec2 rMin(listStart.x, rowY);
         ImVec2 rMax(listStart.x + panelWidth, rowY + rowHeight);
-        draw->AddRectFilled(rMin, rMax, (displayIdx % 2 == 0) ? kRowBg : kRowBgAlt, 3.0f);
 
         // Hover (only when not dragging)
         bool rowHovered = !m_dragActive &&
                           mousePos.x >= rMin.x && mousePos.x < rMax.x &&
                           mousePos.y >= rMin.y && mousePos.y < rMax.y && windowHovered;
 
+        // Zone-dot geometry: dots stack above the opacity %, right-aligned
+        // to the card's inner right edge. Compute the cluster width up
+        // front so drawLayerRow can reserve horizontal room.
+        int zoneCount = (zones && zones->size() > 1) ? (int)zones->size() : 0;
+        const float kZoneDotR   = 3.5f;
+        const float kZoneGap    = 14.0f;  // centre-to-centre — 7px of clear space between dots
+        float zoneClusterW = zoneCount > 0
+            ? (kZoneDotR * 2.0f + (zoneCount - 1) * kZoneGap)
+            : 0.0f;
+
         drawLayerRow(draw, layer, listStart.x, rowY, panelWidth, rowHeight,
-                     selected, rowHovered, false, thumbSize);
+                     selected, rowHovered, false, thumbSize, zoneClusterW);
 
-        // Zone visibility dots (only when multiple zones exist)
-        if (zones && zones->size() > 1) {
-            float dotX = listStart.x + panelWidth - 8;
-            float dotY = rowY + 6;
-            float dotR = 4.0f;
-            float dotSpacing = 12.0f;
+        // Opacity scrub — per-row InvisibleButton over the % text. Because
+        // ImGui's item system owns the press, ImGui NEVER treats this
+        // click as a "window drag" gesture on the Layers panel. We drive
+        // the scrub off IsItemActivated / IsItemActive + GetMouseDragDelta.
+        {
+            const float kInsetX  = 0.0f;
+            float pctRight       = listStart.x + panelWidth - kInsetX - LP::kCardPadX;
+            char obuf[8];
+            snprintf(obuf, sizeof(obuf), "%d%%",
+                     (int)(layer->opacity * 100.0f + 0.5f));
+            ImVec2 psz = ImGui::GetFont()->CalcTextSizeA(10.0f, FLT_MAX, 0.0f, obuf);
+            float pctLeft = pctRight - psz.x - 6.0f;
+            float hitH    = 18.0f;
+            float hitY    = rowY + rowHeight * 0.5f - hitH * 0.5f;
+            float hitW    = pctRight - pctLeft + 12.0f;
+            ImGui::SetCursorScreenPos(ImVec2(pctLeft - 4.0f, hitY));
+            ImGui::PushID((int)(layer->id + 0xA0000000));
+            ImGui::InvisibleButton("##opDrag", ImVec2(hitW, hitH));
+            if (ImGui::IsItemActivated()) {
+                m_opacityDragIdx    = stackIdx;
+                m_opacityDragStart  = layer->opacity;
+            }
+            if (ImGui::IsItemActive()) {
+                ImVec2 d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left, 0.0f);
+                float newOp = m_opacityDragStart + d.x * 0.005f;
+                if (newOp < 0.0f) newOp = 0.0f;
+                if (newOp > 1.0f) newOp = 1.0f;
+                layer->opacity = newOp;
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+                selectedLayer = stackIdx;
+            } else if (ImGui::IsItemDeactivated()) {
+                m_opacityDragIdx = -1;
+            } else if (ImGui::IsItemHovered()) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+            }
+            ImGui::PopID();
+        }
 
+        // Zone visibility dots — right-aligned stack sitting ABOVE the
+        // opacity % so both land in the same right cluster.
+        if (zoneCount > 0) {
+            float rowCenterY = rowY + rowHeight * 0.5f;
+            // Upper row of the right cluster — mirrors the name baseline,
+            // a few pixels above the TYPE caption / opacity % line.
+            float dotCy = rowCenterY - 7.0f;
+            // Right-aligned: start from rightInnerEdge and walk LEFTWARD.
+            const float kInsetX      = 0.0f;
+            float rightInnerEdge = listStart.x + panelWidth - kInsetX - LP::kCardPadX;
+            float dotX = rightInnerEdge - kZoneDotR;
             for (int zi = (int)zones->size() - 1; zi >= 0; zi--) {
                 auto& z = *(*zones)[zi];
                 bool inZone = z.showAllLayers || z.visibleLayerIds.count(layer->id);
 
-                ImVec2 center(dotX, dotY + dotR);
+                ImVec2 center(dotX, dotCy);
                 ImU32 col = zoneColor(zi);
                 ImU32 dimCol = IM_COL32((col & 0xFF) / 3, ((col >> 8) & 0xFF) / 3,
-                                        ((col >> 16) & 0xFF) / 3, 100);
+                                        ((col >> 16) & 0xFF) / 3, 110);
 
-                if (inZone) {
-                    draw->AddCircleFilled(center, dotR, col);
-                } else {
-                    draw->AddCircle(center, dotR, dimCol, 0, 1.2f);
-                }
+                if (inZone) draw->AddCircleFilled(center, kZoneDotR, col);
+                else        draw->AddCircle     (center, kZoneDotR, dimCol, 0, 1.2f);
 
-                // Click to toggle zone membership
                 if (!m_dragActive && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && windowHovered) {
                     float dx = mousePos.x - center.x, dy = mousePos.y - center.y;
-                    if (dx*dx + dy*dy < (dotR + 4) * (dotR + 4)) {
+                    if (dx*dx + dy*dy < (kZoneDotR + 4) * (kZoneDotR + 4)) {
                         if (z.showAllLayers) {
-                            // Transition to explicit visibility: add all current layers, then toggle this one
                             z.showAllLayers = false;
                             for (int li = 0; li < stack.count(); li++) {
                                 z.visibleLayerIds.insert(stack[li]->id);
                             }
                             z.visibleLayerIds.erase(layer->id);
                         } else {
-                            if (inZone) {
-                                z.visibleLayerIds.erase(layer->id);
-                            } else {
-                                z.visibleLayerIds.insert(layer->id);
-                            }
+                            if (inZone) z.visibleLayerIds.erase(layer->id);
+                            else        z.visibleLayerIds.insert(layer->id);
                         }
                     }
                 }
 
-                dotX -= dotSpacing;
+                dotX -= kZoneGap;
             }
-        }
-
-        // Separator
-        if (displayIdx < layerCount - 1) {
-            draw->AddLine(ImVec2(rMin.x + 28, rMax.y), ImVec2(rMax.x - 8, rMax.y),
-                          IM_COL32(255, 255, 255, 8));
         }
     }
 
@@ -423,22 +650,36 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
     if (m_renaming && m_renameIndex >= 0 && m_renameIndex < layerCount) {
         int rDisplay = layerCount - 1 - m_renameIndex;
         float rY = listStart.y + rDisplay * rowHeight + 4;
-        float nameX = listStart.x + 28 + thumbSize + 8;
+        // Align the rename InputText with the name column from drawLayerRow
+        // (card inset + card padding + thumbnail + gap).
+        float nameX = listStart.x + LP::kCardMarginX + LP::kCardPadX
+                     + thumbSize + LP::kThumbToText;
         float inputW = panelWidth - (nameX - listStart.x) - 10;
         if (inputW < 40.0f) inputW = 40.0f;
 
         ImGui::SetCursorScreenPos(ImVec2(nameX, rY));
         ImGui::SetNextItemWidth(inputW);
+        // On the first frame of rename, auto-focus the input so typing works
+        // immediately without clicking it first.
+        if (m_renameJustStarted) {
+            ImGui::SetKeyboardFocusHere();
+            m_renameJustStarted = false;
+        }
         ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.12f, 0.14f, 0.20f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.15f, 0.18f, 0.25f, 1.0f));
-        if (ImGui::InputText("##rename", m_renameBuf, sizeof(m_renameBuf),
-                             ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll)) {
+        bool committed = ImGui::InputText("##rename", m_renameBuf, sizeof(m_renameBuf),
+                             ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+        // Commit on click-away: IsItemDeactivatedAfterEdit fires when the
+        // input loses focus after the user typed something. Also close (without
+        // changes) on plain deactivation so the field doesn't stick around.
+        bool deactivatedAfterEdit = ImGui::IsItemDeactivatedAfterEdit();
+        bool deactivated          = ImGui::IsItemDeactivated();
+        ImGui::PopStyleColor(2);
+        if (committed || deactivatedAfterEdit) {
             stack[m_renameIndex]->name = m_renameBuf;
             m_renaming = false;
             m_renameIndex = -1;
-        }
-        ImGui::PopStyleColor(2);
-        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        } else if (deactivated || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
             m_renaming = false;
             m_renameIndex = -1;
         }
@@ -527,6 +768,7 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
             }
             if (ImGui::MenuItem("Rename")) {
                 m_renaming = true;
+                m_renameJustStarted = true;
                 m_renameIndex = ci;
                 strncpy(m_renameBuf, stack[ci]->name.c_str(), sizeof(m_renameBuf) - 1);
             }
@@ -547,6 +789,12 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
             ImGui::Separator();
             if (ImGui::MenuItem(stack[ci]->visible ? "Hide" : "Show")) {
                 stack[ci]->visible = !stack[ci]->visible;
+            }
+            if (ImGui::MenuItem(stack[ci]->muted ? "Unmute" : "Mute")) {
+                stack[ci]->muted = !stack[ci]->muted;
+            }
+            if (ImGui::MenuItem(stack[ci]->soloed ? "Unsolo" : "Solo")) {
+                stack[ci]->soloed = !stack[ci]->soloed;
             }
             ImGui::Separator();
             // Group operations

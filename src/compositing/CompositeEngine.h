@@ -5,8 +5,12 @@
 #include "compositing/Layer.h"
 #include <vector>
 #include <memory>
+#include <map>
+#include <string>
 #include <unordered_map>
 #include <glad/glad.h>
+
+class ShaderSource;
 
 struct AudioState {
     float rms = 0;
@@ -70,6 +74,17 @@ private:
     // because one layer's transition is resolved into the composite before
     // the next layer's transition begins rendering.
     Framebuffer m_glTransitionFBO;
+
+    // Between-row transition scratch — holds the "to" layer rendered alone so
+    // it can be fed as the second input to the blend shader. Separate from
+    // m_glTransitionFBO to avoid conflicts when both layer-level and
+    // between-row transitions run in the same frame.
+    Framebuffer m_betweenRowFBO;
+
+    // Lazy-loaded ISF transition shaders, keyed by their file path. Kept alive
+    // across frames so the shader isn't recompiled every time a transition
+    // window is active. Populated on first render that references the path.
+    std::map<std::string, std::shared_ptr<ShaderSource>> m_isfTransitions;
 
     float m_lastTime = 0;
 

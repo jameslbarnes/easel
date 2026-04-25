@@ -33,6 +33,16 @@ public:
     void setDevice(int deviceIdx);
     void setDeviceId(const std::string& id, bool isCapture);
 
+    // Opt-in gate for macOS ScreenCaptureKit system-audio capture. macOS
+    // triggers a "Screen Recording" TCC prompt the first time SCShareableContent
+    // is called; for self-signed dev builds the grant is keyed to the binary's
+    // cdhash and evaporates on every rebuild, so the prompt fires repeatedly.
+    // Gating the call behind an explicit opt-in means the prompt only appears
+    // when the user actually picks System Audio / starts recording, not on
+    // every app launch.
+    void setWantsSystemAudio(bool v) { m_wantsSystemAudio = v; }
+    bool wantsSystemAudio() const    { return m_wantsSystemAudio; }
+
     // Smoothed frequency bands (0-1)
     float bass() const { return m_smoothBass; }
     float lowMid() const { return m_smoothLowMid; }
@@ -94,6 +104,7 @@ private:
     bool m_initialized = false;
     bool m_externalFeed = false;
     bool m_captureFailed = false;  // true after permission denied — don't retry
+    bool m_wantsSystemAudio = false; // opt-in gate for ScreenCaptureKit (see header)
 
     void initCapture();
     void cleanupCapture();

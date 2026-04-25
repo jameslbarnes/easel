@@ -43,6 +43,15 @@ bool StageView::init() {
     if (m_displays.empty()) {
         addDisplay("Default Screen", StageDisplay::Type::Monitor);
     }
+
+    // Default camera: orbit slightly right + above the display so the user can
+    // tell they're looking at a plane in 3D space (not a flat preview). A pure
+    // head-on camera reads like a Canvas tab clone and hides the spatial
+    // context Stage is meant to communicate.
+    m_camera.azimuth   = 0.35f;
+    m_camera.elevation = 0.22f;
+    m_camera.distance  = 3.2f;
+    m_camera.target    = {0.0f, 1.0f, 0.0f}; // display center (y=1 per StageDisplay default)
     return true;
 }
 
@@ -449,6 +458,58 @@ void StageView::render(const std::vector<GLuint>& zoneTextures,
     ImGui::End();
 }
 
+void StageView::renderToolbar() {
+    // Pinned toolbar — matched styling with the rest of the app's pill buttons.
+    // Left cluster: stage-edit actions. Right cluster: Mapping / Masks focus
+    // buttons that bring those docked panels forward in their tab group.
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.20f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 0.9f));
+
+    ImGui::Checkbox("Floor/Wall", &m_envVisible);
+    ImGui::SameLine();
+    if (ImGui::SmallButton("+ Display")) {
+        char name[32];
+        snprintf(name, sizeof(name), "Display %d", (int)m_displays.size() + 1);
+        addDisplay(name, StageDisplay::Type::LED);
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("+ Projector")) {
+        char name[32];
+        snprintf(name, sizeof(name), "Proj %d", (int)m_projectors.size() + 1);
+        addProjector(name);
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("+ Surface") && !m_materials.empty()) {
+        char name[32];
+        snprintf(name, sizeof(name), "Screen %d", (int)m_surfaces.size() + 1);
+        addSurface(name, 0, m_projectors.empty() ? -1 : 0);
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Import...")) {
+        m_wantsImport = true;
+    }
+
+    // Right-side cluster: Mapping / Masks focus buttons. Clicking focuses the
+    // corresponding docked panel so users can jump to the related workflow
+    // without leaving the Stage tab.
+    ImGui::SameLine();
+    float rightBtnsW = ImGui::CalcTextSize("Mapping").x
+                     + ImGui::CalcTextSize("Masks").x
+                     + ImGui::GetStyle().FramePadding.x * 4.0f
+                     + ImGui::GetStyle().ItemSpacing.x
+                     + 16.0f;
+    float avail = ImGui::GetContentRegionAvail().x;
+    if (avail > rightBtnsW) {
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail - rightBtnsW);
+    }
+    if (ImGui::SmallButton("Mapping")) ImGui::SetWindowFocus("\xE2\x96\xA2###Mapping");
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Masks"))   ImGui::SetWindowFocus("Masks");
+
+    ImGui::PopStyleColor(3);
+}
+
 void StageView::renderUI(const std::vector<GLuint>& zoneTextures) {
     ImDrawList* draw = ImGui::GetWindowDrawList();
     float panelW = ImGui::GetContentRegionAvail().x;
@@ -477,41 +538,12 @@ void StageView::renderUI(const std::vector<GLuint>& zoneTextures) {
         return;
     }
 
-    // Toolbar row
-    {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.20f));
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 0.9f));
+    // Toolbar moved out of renderUI and into renderToolbar() — host pins it
+    // above the scrollable viewport child so it stays visible while Setup /
+    // Scenes are open below.
 
-        ImGui::Checkbox("Floor/Wall", &m_envVisible);
-        ImGui::SameLine();
-        if (ImGui::SmallButton("+ Display")) {
-            char name[32];
-            snprintf(name, sizeof(name), "Display %d", (int)m_displays.size() + 1);
-            addDisplay(name, StageDisplay::Type::LED);
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("+ Projector")) {
-            char name[32];
-            snprintf(name, sizeof(name), "Proj %d", (int)m_projectors.size() + 1);
-            addProjector(name);
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("+ Surface") && !m_materials.empty()) {
-            char name[32];
-            snprintf(name, sizeof(name), "Screen %d", (int)m_surfaces.size() + 1);
-            addSurface(name, 0, m_projectors.empty() ? -1 : 0);
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Import...")) {
-            m_wantsImport = true;
-        }
-        ImGui::PopStyleColor(3);
-    }
-
-    // 3D viewport area — displays/projectors/surfaces lists moved out to the
-    // Scene panel, so the viewport takes the full remaining height.
-    float viewH = panelH - 40;
+    // 3D viewport area fills the full child now that the toolbar is external.
+    float viewH = panelH;
     if (viewH < 100) viewH = 100;
 
     ImVec2 viewStart = ImGui::GetCursorScreenPos();

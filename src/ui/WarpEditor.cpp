@@ -42,7 +42,7 @@ void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
                         int activeMappingIndex) {
     m_wantsLoadOBJ = false;
 
-    ImGui::Begin("Mapping");
+    ImGui::Begin("        ###Mapping");
 
     // --- Mapping profile header ---
     if (allMappings && !allMappings->empty()) {
@@ -70,14 +70,16 @@ void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
             }
         }
 
-        sectionSep();
+        ImGui::Dummy(ImVec2(0, 6));
     }
 
     auto& cornerPin = mapping.cornerPin;
     auto& meshWarp = mapping.meshWarp;
     auto& objMeshWarp = mapping.objMeshWarp;
 
-    // Mode selector — 3 buttons
+    // Mode selector — 3 buttons. No hairline dividers above/below; just
+    // balanced vertical spacing so the row reads as a coherent segmented
+    // control rather than two sections separated by lines.
     int modeInt = (int)mapping.warpMode;
     float thirdW = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 2) / 3.0f;
 
@@ -89,17 +91,22 @@ void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
 
     mapping.warpMode = (ViewportPanel::WarpMode)modeInt;
 
-    sectionSep();
+    ImGui::Dummy(ImVec2(0, 10));
 
     if (mapping.warpMode == ViewportPanel::WarpMode::CornerPin) {
         auto& corners = cornerPin.corners();
         const char* labels[] = {"BL", "BR", "TR", "TL"};
+        // Labels sit in a fixed-width column so the numeric fields line
+        // up vertically and there's a clear gap between each label and
+        // its value (previously 28px, now 56px).
+        const float kLabelColW = 56.0f;
         for (int i = 0; i < 4; i++) {
             ImGui::PushID(i);
+            ImGui::AlignTextToFramePadding();
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 0.7f));
             ImGui::Text("%s", labels[i]);
             ImGui::PopStyleColor();
-            ImGui::SameLine(28);
+            ImGui::SameLine(kLabelColW);
             ImGui::SetNextItemWidth(-1);
             ImGui::DragFloat2("##corner", &corners[i][0], 0.01f, -1.5f, 1.5f, "%.2f");
             ImGui::PopID();

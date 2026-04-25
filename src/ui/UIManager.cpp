@@ -8,6 +8,9 @@
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 #include <GLFW/glfw3.h>
+#include "stb_image.h"
+
+bool UIManager::sShowStage = false;
 
 bool UIManager::init(GLFWwindow* window) {
     m_window = window;
@@ -140,7 +143,118 @@ bool UIManager::init(GLFWwindow* window) {
     ImGui_ImplOpenGL3_Init("#version 430");
 #endif
 
+    // Load inspector tab icons. qlmanage rasterises SVGs onto an opaque
+    // white background, so the raw PNG is "black icon on white sheet".
+    // We convert it into a proper alpha mask: RGB becomes white, alpha
+    // becomes (255 - luminance). That way the ImGui tint parameter in
+    // drawInspectorTabIcons() cleanly recolours the silhouette to any
+    // hue we pass in.
+    {
+        const char* paths[4] = {
+            "assets/icons/tab_properties.png",
+            "assets/icons/tab_mapping.png",
+            "assets/icons/tab_audio.png",
+            "assets/icons/tab_midi.png",
+        };
+        for (int i = 0; i < 4; i++) {
+            int ch = 0;
+            stbi_set_flip_vertically_on_load(false);
+            unsigned char* data = stbi_load(paths[i], &m_tabIconW[i], &m_tabIconH[i], &ch, 4);
+            if (!data) continue;
+            int N = m_tabIconW[i] * m_tabIconH[i];
+            for (int p = 0; p < N; p++) {
+                unsigned char* px = &data[p * 4];
+                // Luma from raw RGB (before we overwrite it). ITU-R BT.601.
+                int luma = (px[0] * 299 + px[1] * 587 + px[2] * 114) / 1000;
+                // Premultiplied by original alpha so transparent bg stays
+                // transparent instead of suddenly going white-opaque.
+                int alpha = ((255 - luma) * px[3]) / 255;
+                px[0] = 255; px[1] = 255; px[2] = 255;
+                px[3] = (unsigned char)alpha;
+            }
+            GLuint tex = 0;
+            glGenTextures(1, &tex);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
+                         m_tabIconW[i], m_tabIconH[i], 0,
+                         GL_RGBA, GL_UNSIGNED_BYTE, data);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            stbi_image_free(data);
+            m_tabIconTex[i] = tex;
+        }
+    }
+
     return true;
+}
+
+unsigned int UIManager::tabIconTex(TabIcon w) const {
+    int i = (int)w;
+    if (i < 0 || i >= 4) return 0;
+    return m_tabIconTex[i];
+}
+
+void UIManager::drawInspectorTabIcons() {
+    if (m_rightFloatId == 0) return;
+    ImGuiDockNode* node = ImGui::DockBuilderGetNode(m_rightFloatId);
+    if (!node || !node->TabBar) return;
+    ImGuiTabBar* tabBar = node->TabBar;
+
+    // Window name → icon index. Matches the ###ID suffixes on the Begin()
+    // calls in each panel. Order of appearance doesn't matter — we look
+    // each up by window name.
+    struct Entry { const char* suffix; int iconIdx; };
+    const Entry table[] = {
+        { "###Properties", 0 },
+        { "###Mapping",    1 },
+        { "###Audio",      2 },
+        { "###MIDI",       3 },
+    };
+
+    ImDrawList* fg = ImGui::GetForegroundDrawList();
+
+    for (int t = 0; t < tabBar->Tabs.Size; t++) {
+        ImGuiTabItem& tab = tabBar->Tabs[t];
+        const char* tabName = ImGui::TabBarGetTabName(tabBar, &tab);
+        if (!tabName) continue;
+        int iconIdx = -1;
+        for (const auto& e : table) {
+            if (std::strstr(tabName, e.suffix)) { iconIdx = e.iconIdx; break; }
+        }
+        if (iconIdx < 0 || m_tabIconTex[iconIdx] == 0) continue;
+
+        float tabX0 = tabBar->BarRect.Min.x + tab.Offset;
+        float tabX1 = tabX0 + tab.Width;
+        float tabY0 = tabBar->BarRect.Min.y;
+        float tabY1 = tabBar->BarRect.Max.y;
+
+        // Fill over the text with the matching tab background colour so
+        // the space-padded label vanishes visually; the icon renders on top.
+        ImGuiCol bgCol = (tabBar->SelectedTabId == tab.ID)
+                          ? ImGuiCol_TabActive : ImGuiCol_Tab;
+        ImU32 fillCol = ImGui::GetColorU32(bgCol);
+        fg->AddRectFilled(ImVec2(tabX0 + 1, tabY0 + 1),
+                           ImVec2(tabX1 - 1, tabY1),
+                           fillCol, 4.0f);
+
+        // Icon — centred, scaled to fit the tab with a small inset.
+        float availH = (tabY1 - tabY0) - 8.0f;
+        if (availH < 10.0f) availH = 10.0f;
+        if (availH > 20.0f) availH = 20.0f;
+        float availW = (tabX1 - tabX0) - 8.0f;
+        float iconSize = availH < availW ? availH : availW;
+        float cx = (tabX0 + tabX1) * 0.5f;
+        float cy = (tabY0 + tabY1) * 0.5f;
+        ImVec2 imin(cx - iconSize * 0.5f, cy - iconSize * 0.5f);
+        ImVec2 imax(cx + iconSize * 0.5f, cy + iconSize * 0.5f);
+        ImU32 tint = (tabBar->SelectedTabId == tab.ID)
+                     ? IM_COL32(235, 240, 250, 245)
+                     : IM_COL32(170, 180, 200, 200);
+        fg->AddImage((ImTextureID)(intptr_t)m_tabIconTex[iconIdx],
+                      imin, imax, ImVec2(0, 0), ImVec2(1, 1), tint);
+    }
 }
 
 void UIManager::applyTheme(float dpiScale) {
@@ -191,7 +305,7 @@ void UIManager::applyTheme(float dpiScale) {
     // Background: near-black canvas with micro luminance steps, no blue tint
     ImVec4 bgVoid       = ImVec4(0.004f, 0.004f, 0.008f, 1.00f); // #010102 deepest
     ImVec4 bgDeep       = ImVec4(0.031f, 0.035f, 0.039f, 1.00f); // #08090a marketing black
-    ImVec4 bgPanel      = ImVec4(0.059f, 0.063f, 0.067f, 0.92f); // #0f1011 — slight translucency for faux-glass
+    ImVec4 bgPanel      = ImVec4(0.059f, 0.063f, 0.067f, 1.00f); // #0f1011 — fully opaque so docked panels fully occlude the canvas behind
     ImVec4 bgWidget     = ImVec4(0.098f, 0.102f, 0.106f, 1.00f); // #191a1b elevated surface
     ImVec4 bgWidgetHov  = ImVec4(0.125f, 0.129f, 0.137f, 1.00f); // #202124 hover
     ImVec4 bgWidgetAct  = ImVec4(0.157f, 0.157f, 0.173f, 1.00f); // #28282c active/lightest dark
@@ -380,7 +494,30 @@ void UIManager::setupDockspace(float bottomBarHeight) {
     ImGui::PopStyleVar(3);
 
     ImGuiID dockspaceId = ImGui::GetID("EaselDockSpace");
+    // Push a taller frame padding for the DockSpace only — ImGui derives
+    // dock tab height from style.FramePadding.y, so bumping the Y here
+    // gives the inspector tabs more vertical breathing room while
+    // leaving regular buttons/sliders elsewhere untouched.
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 12.0f));
     ImGui::DockSpace(dockspaceId, ImVec2(0, 0), ImGuiDockNodeFlags_PassthruCentralNode);
+    ImGui::PopStyleVar();
+
+    // Only one of Canvas/Stage submits Begin() per frame (guarded by
+    // sShowStage), so the main dock has a single-window tab bar. Still
+    // hide it: NoTabBar keeps the strip out and the pill is the sole
+    // switcher.
+    if (ImGuiWindow* cw = ImGui::FindWindowByName("Canvas")) {
+        if (cw->DockNode) {
+            cw->DockNode->LocalFlags |= ImGuiDockNodeFlags_NoTabBar
+                                       | ImGuiDockNodeFlags_NoWindowMenuButton;
+        }
+    }
+    if (ImGuiWindow* sw = ImGui::FindWindowByName("Stage")) {
+        if (sw->DockNode) {
+            sw->DockNode->LocalFlags |= ImGuiDockNodeFlags_NoTabBar
+                                       | ImGuiDockNodeFlags_NoWindowMenuButton;
+        }
+    }
 
     // Rebuild layout on first frame or when window size changes significantly
     bool sizeChanged = false;
@@ -404,61 +541,117 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         ImGui::DockBuilderAddNode(dockspaceId, ImGuiDockNodeFlags_DockSpace);
         ImGui::DockBuilderSetNodeSize(dockspaceId, dockSize);
 
-        // Responsive split based on window width
-        float splitRatio = (dockSize.x > 1600) ? 0.65f : (dockSize.x > 1200) ? 0.60f : 0.55f;
-
-        // Layout — Timeline docked to the bottom (full width), main area above it:
-        //   timelineId    = bottom strip — Timeline panel
-        //   mainId        = everything else (split below)
-        //   canvasId      = left of main — Canvas, always visible
-        //   toolsId       = top of right — viewport tools (Stage, Mapping, Masks, Scanner)
-        //   rightTopId    = middle of right — scanner etc.
-        //   rightBottomId = bottom of right — inspectors + I/O (Properties, Audio, MIDI, NDI, ...)
+        // Floating workspace layout:
+        //   - Main dockspace holds only Canvas/Stage/Mapping tabs (full width)
+        //     and the Timeline strip at the bottom.
+        //   - Layers + Sources live in a FLOATING dock group pinned to the
+        //     left edge of the viewport.
+        //   - Properties + Audio + MIDI live in a FLOATING dock group pinned
+        //     to the right edge.
+        // The canvas shows through behind both floating groups, matching the
+        // "floating overlay" concept.
+        // Timeline defaults to minimised (transport row only — see
+        // m_timelineMinimized = true in Application), so the initial dock
+        // split targets that collapsed height directly. This keeps the floating
+        // panels from reserving space for a tall timeline that never appears.
         ImGuiID mainId, timelineDockId;
-        ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Down, 0.24f, &timelineDockId, &mainId);
-        ImGuiID canvasId, rightId;
-        ImGui::DockBuilderSplitNode(mainId, ImGuiDir_Left, splitRatio, &canvasId, &rightId);
+        // Target ~60px — matches the minimised transport-only height in
+        // Application::renderTimelinePanel so there's no first-frame flash.
+        float timelineSplit = (dockSize.y > 0) ? (60.0f / dockSize.y) : 0.05f;
+        if (timelineSplit < 0.03f) timelineSplit = 0.03f;
+        if (timelineSplit > 0.20f) timelineSplit = 0.20f;
+        ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Down, timelineSplit, &timelineDockId, &mainId);
 
-        // Split right column top-to-bottom: tools → sources → inspectors.
-        // 0.34 gives "Masks"/"Mapping" tabs room to render without truncation.
-        ImGuiID toolsId, rightRemainder;
-        ImGui::DockBuilderSplitNode(rightId, ImGuiDir_Up, 0.34f, &toolsId, &rightRemainder);
-        ImGuiID rightTopId, rightBottomId;
-        ImGui::DockBuilderSplitNode(rightRemainder, ImGuiDir_Up, 0.45f, &rightTopId, &rightBottomId);
-
-        // Each workspace docks ONLY its whitelisted panels (see isPanelVisible).
-        // Hidden panels aren't rendered AND aren't docked — no stray tabs.
-        // Dock order matters: the first DockBuilderDockWindow call for a
-        // region wins initial focus.
         auto dockIfVisible = [this](const char* name, ImGuiID node) {
             if (isPanelVisible(name)) ImGui::DockBuilderDockWindow(name, node);
         };
 
-        // Left: Canvas + Stage + Scenes as peer tabs. Canvas is the default focused tab.
-        dockIfVisible("Canvas",        canvasId);
-        dockIfVisible("Stage",         canvasId);
-        dockIfVisible("Scenes",        canvasId);
+        // Center: Canvas + Stage as peer tabs, full width. Mapping moved to
+        // the right floating group (paired with Properties on top). The
+        // dock tab bar itself is hidden — Canvas/Stage switcher buttons
+        // get rendered inline at the left of each panel's toolbar row,
+        // collapsing the two-row nav into one.
+        dockIfVisible("Canvas", mainId);
+        dockIfVisible("Stage",  mainId);
+        // Hide the native dock tab bar — the Canvas/Stage switcher pill
+        // in the menu bar is the primary (and only) way to flip between
+        // the two workspaces. HiddenTabBar (not NoTabBar) keeps ImGui's
+        // tab bookkeeping alive so NextSelectedTabId from the pill can
+        // actually swap the visible window.
+        if (ImGuiDockNode* mn = ImGui::DockBuilderGetNode(mainId)) {
+            mn->LocalFlags |= ImGuiDockNodeFlags_HiddenTabBar
+                            | ImGuiDockNodeFlags_NoWindowMenuButton;
+        }
 
-        // Top-right: primary tabs in the requested order — Layers focused.
-        dockIfVisible("Layers",        toolsId);
-        dockIfVisible("Mapping",       toolsId);
-        dockIfVisible("Masks",         toolsId);
-        dockIfVisible("Sources",       toolsId);
+        // Bottom strip: the Timeline, spanning full width. NoTabBar hides
+        // the "Timeline" tab label + minimise/expand chevron entirely —
+        // the timeline's own transport row is the visual anchor.
+        dockIfVisible("Timeline", timelineDockId);
+        if (ImGuiDockNode* tln = ImGui::DockBuilderGetNode(timelineDockId)) {
+            tln->LocalFlags |= ImGuiDockNodeFlags_NoWindowMenuButton
+                             | ImGuiDockNodeFlags_NoTabBar;
+        }
 
-        // Middle-right: Scanner only (Scene merged into Scenes; Mixer merged into Audio).
-        dockIfVisible("Scene Scanner", rightTopId);
+        // ── Floating overlays — stretch to fill the mid-band between the
+        // Canvas panel's zone tab row (top) and the timeline (bottom), with
+        // small margins to keep the "floating" feel. headerReserve covers
+        // exactly one frame height (the Canvas/Stage/Main/Zone2 tab row plus
+        // window padding) — anything taller leaves a dead gap below the
+        // zone tabs before the panels start.
+        float leftW  = std::min(360.0f, dockSize.x * 0.22f);
+        float rightW = std::min(340.0f, dockSize.x * 0.22f);
+        float headerReserve  = ImGui::GetFrameHeight() + 22.0f;
+        float timelineH      = dockSize.y * timelineSplit;
+        const float kFloatMarginTop    = 6.0f;
+        const float kFloatMarginBottom = 10.0f;
+        ImVec2 vpPos         = viewport->WorkPos;
+        float  leftY         = vpPos.y + headerReserve + kFloatMarginTop;
+        float  rightY        = leftY;
+        float  leftFloatH    = std::max(120.0f,
+            dockSize.y - headerReserve - timelineH - kFloatMarginTop - kFloatMarginBottom);
+        float  rightFloatH   = leftFloatH;
 
-        // Properties + I/O bottom-right. NDI/Spout/Capture/ShaderClaw/Etherea
-        // are no longer separate docks — they live as tabs inside Sources.
-        dockIfVisible("Properties",    rightBottomId);
-        dockIfVisible("Audio",         rightBottomId);
-        dockIfVisible("MIDI",          rightBottomId);
-        dockIfVisible("Stream",        rightBottomId);
+        // Left-side floating group: Layers + Sources tabs.
+        ImGuiID leftFloatId = ImGui::DockBuilderAddNode(0, ImGuiDockNodeFlags_None);
+        ImGui::DockBuilderSetNodePos (leftFloatId, ImVec2(vpPos.x + 12.0f, leftY));
+        ImGui::DockBuilderSetNodeSize(leftFloatId, ImVec2(leftW, leftFloatH));
+        dockIfVisible("Layers",  leftFloatId);
+        dockIfVisible("Sources", leftFloatId);
 
-        // Bottom strip: the Timeline lives here, spanning the full width.
-        dockIfVisible("Timeline",      timelineDockId);
+        // Right-side floating group: all inspectors as peer tabs in one
+        // unified node — Properties first, then Audio, MIDI, Mapping.
+        // Keeps the panel tall and single-column instead of splitting
+        // vertically into two stacked halves.
+        ImGuiID rightFloatId = ImGui::DockBuilderAddNode(0, ImGuiDockNodeFlags_None);
+        ImGui::DockBuilderSetNodePos (rightFloatId,
+            ImVec2(vpPos.x + dockSize.x - rightW - 12.0f, rightY));
+        ImGui::DockBuilderSetNodeSize(rightFloatId, ImVec2(rightW, rightFloatH));
+        // Tab order: Properties, Mapping, Audio, MIDI. The "display###ID"
+        // syntax keeps the internal window names stable for focus/dock
+        // lookups while giving each tab a short text label that renders
+        // reliably in the system font (Helvetica has no geometric-shape
+        // glyphs, which rendered as "?" before).
+        dockIfVisible("Properties###Properties", rightFloatId);
+        dockIfVisible("Mapping###Mapping",       rightFloatId);
+        dockIfVisible("Audio###Audio",           rightFloatId);
+        dockIfVisible("MIDI###MIDI",             rightFloatId);
+
+        // Scene Scanner — dock with the inspector group so it doesn't spawn
+        // floating in the middle of the canvas on first run.
+        if (isPanelVisible("Scene Scanner")) {
+            ImGui::DockBuilderDockWindow("Scene Scanner", rightFloatId);
+        }
 
         ImGui::DockBuilderFinish(dockspaceId);
+
+        // Cache ids + widths so the per-frame reflow below can reposition
+        // the floating groups when the user drags the timeline splitter.
+        m_timelineDockId = timelineDockId;
+        m_leftFloatId    = leftFloatId;
+        m_rightFloatId   = rightFloatId;
+        m_leftFloatW     = leftW;
+        m_rightFloatW    = rightW;
+        m_lastTimelineH  = timelineH;
 
         // Two deferred focus passes: Canvas in the big left slot, Layers as
         // the active tab in the top-right. SetWindowFocus is called every
@@ -471,13 +664,57 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         m_lastDockH = dockSize.y;
     }
 
+    // ── Per-frame reflow ──
+    // When the user drags the native dock splitter to resize the timeline,
+    // the timeline node's actual height changes but the floating left/right
+    // groups stay pinned to their original geometry and end up overlapping
+    // the timeline. Each frame we read the timeline dock node's current
+    // size and, if it differs from last frame, recompute the float groups'
+    // position + height to occupy only the remaining mid-band.
+    if (m_timelineDockId != 0 && m_leftFloatId != 0 && m_rightFloatId != 0) {
+        if (ImGuiDockNode* tln = ImGui::DockBuilderGetNode(m_timelineDockId)) {
+            float actualTimelineH = tln->Size.y;
+            if (actualTimelineH > 0.0f &&
+                fabsf(actualTimelineH - m_lastTimelineH) > 0.5f) {
+                m_lastTimelineH = actualTimelineH;
+
+                float headerReserve = ImGui::GetFrameHeight() + 22.0f;
+                const float kFloatMarginTop    = 6.0f;
+                const float kFloatMarginBottom = 10.0f;
+                float floatH = std::max(120.0f,
+                    dockSize.y - headerReserve - actualTimelineH - kFloatMarginTop - kFloatMarginBottom);
+                ImVec2 vpPos = viewport->WorkPos;
+                float floatY = vpPos.y + headerReserve + kFloatMarginTop;
+
+                ImGui::DockBuilderSetNodePos(
+                    m_leftFloatId, ImVec2(vpPos.x + 12.0f, floatY));
+                ImGui::DockBuilderSetNodeSize(
+                    m_leftFloatId, ImVec2(m_leftFloatW, floatH));
+                ImGui::DockBuilderSetNodePos(
+                    m_rightFloatId,
+                    ImVec2(vpPos.x + dockSize.x - m_rightFloatW - 12.0f,
+                           floatY));
+                ImGui::DockBuilderSetNodeSize(
+                    m_rightFloatId, ImVec2(m_rightFloatW, floatH));
+            }
+        }
+    }
+
     ImGui::End();
 
     // Apply deferred focus. SetWindowFocus only works if the named window
     // has been Begin()-ed at least once in a previous frame, so we may need
     // to retry across a couple frames after a dock rebuild.
+    // We now focus BOTH Layers (left group) and Properties (right group) —
+    // without the second call, Mapping's early Begin (from the warp editor's
+    // preamble render) steals focus in the right tab group.
     if (m_pendingFocus) {
         ImGui::SetWindowFocus(m_pendingFocus);
+        // Also raise Properties so it leads the right floating group's tabs.
+        // Calling it AFTER the primary focus means Properties is the
+        // most-recently-focused window in ITS dock; its dock updates its
+        // selected tab independently of the left group's selection.
+        ImGui::SetWindowFocus("        ###Properties");
         m_pendingFocusFramesLeft--;
         if (m_pendingFocusFramesLeft <= 0) m_pendingFocus = nullptr;
     }

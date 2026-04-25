@@ -57,12 +57,25 @@ private:
 // transition is lazy-compiled on first use (compile is ~1ms, but no need to
 // pay it for transitions the user never picks). Call instance() from the
 // render thread only — GL objects live on one context.
+//
+// Supports scanning multiple directories (bundled + user shaders) and cheap
+// hot-reload via file-mtime checks.
 class GLTransitionLibrary {
 public:
     static GLTransitionLibrary& instance();
 
     // One-time scan of a directory. Clears any previously scanned entries.
     void scan(const std::string& dir);
+
+    // Adds another directory to the scan set without clearing. Same-named
+    // entries in the new dir override those from earlier scans (so a user's
+    // `dissolve.glsl` can shadow the bundled one).
+    void scanAdditional(const std::string& dir);
+
+    // Per-frame low-cost maintenance: re-stat files in every scanned dir,
+    // invalidate cached runners whose source file changed, and pick up newly
+    // added files. Caller should throttle (e.g., once per second).
+    void checkAndReload();
 
     // Sorted list of names (for UI dropdowns).
     std::vector<std::string> names() const;
@@ -77,6 +90,8 @@ private:
         std::string path;
         std::unique_ptr<GLTransition> runner; // nullptr until first use
         bool triedCompile = false;
+        int64_t mtimeRaw = 0; // raw rep of fs::last_write_time for hot-reload
     };
     std::unordered_map<std::string, Entry> m_entries;
+    std::vector<std::string> m_scannedDirs;   // remembered for checkAndReload
 };

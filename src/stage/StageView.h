@@ -195,7 +195,16 @@ private:
     void renderDisplays(const std::vector<GLuint>& zoneTextures, const glm::mat4& viewProj);
     void renderFrustum(const VirtualProjector& proj, const glm::mat4& viewProj, bool selected);
     void renderEnvironment(const glm::mat4& viewProj);   // floor + back wall
+public:
+    // Renders the 3D viewport + toolbar directly into the current window,
+    // without opening its own window. Callers that already have a window open
+    // (e.g. the Stage panel in Application.cpp) use this instead of render().
     void renderUI(const std::vector<GLuint>& zoneTextures);
+    // Pinned top-of-panel toolbar: Floor/Wall + Display/Projector/Surface/
+    // Import plus tab-focus buttons for Mapping and Masks. Rendered by the
+    // host (Application) ABOVE the scrollable viewport child so it stays put.
+    void renderToolbar();
+private:
 
     // Stage environment — light floor + back wall so the 3D space has ground.
 public:
