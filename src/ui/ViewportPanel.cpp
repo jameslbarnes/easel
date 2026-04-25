@@ -1,4 +1,5 @@
 #include "ui/ViewportPanel.h"
+#include "ui/UIManager.h"
 #include "app/OutputZone.h"
 #include "app/MappingProfile.h"
 #include "app/ProjectorOutput.h"
@@ -106,6 +107,10 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
     CornerPinWarp* cornerPinPtr = mapping ? &mapping->cornerPin : nullptr;
     MeshWarp* meshWarpPtr = mapping ? &mapping->meshWarp : nullptr;
     ObjMeshWarp* objMeshWarp = mapping ? &mapping->objMeshWarp : nullptr;
+    // Skip the whole Canvas render when the workspace is flipped to
+    // Stage. Only one of the two windows submits per frame, so the
+    // dock never shows a tab bar.
+    if (UIManager::sShowStage) { return; }
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::Begin("Canvas");
     ImGui::PopStyleVar();
@@ -123,16 +128,119 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
     m_panelMin = {wPos.x + wMin.x, wPos.y + wMin.y};
     m_panelMax = {wPos.x + wMax.x, wPos.y + wMax.y};
 
-    // Zone tab bar + output routing — always visible
+    // Zone tab bar + output routing — always visible. Delegated to the
+    // shared renderNavBar so the Stage panel can render an identical row
+    // and switching workspaces doesn't shift element positions.
+    if (zones && activeZone) {
+        renderNavBar(false, zones, activeZone, monitors, ndiAvailable, editorMonitor);
+        ImDrawList* tabDraw = ImGui::GetWindowDrawList();
+        // Subtle separator line before preview (kept here because the
+        // viewport texture draws immediately below).
+        ImGui::Dummy(ImVec2(0, 2));
+        {
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            float w = ImGui::GetContentRegionAvail().x;
+            tabDraw->AddLine(ImVec2(p.x, p.y), ImVec2(p.x + w, p.y),
+                             IM_COL32(255, 255, 255, 25));
+        }
+        ImGui::Dummy(ImVec2(0, 2));
+        if (inlineSetupSection) {
+            ImGui::Indent(6);
+            inlineSetupSection();
+            ImGui::Unindent(6);
+        }
+    }
+
+    // --- legacy inline nav (kept disabled) ---
+#if 0
     if (zones && activeZone) {
         ImGui::Dummy(ImVec2(0, 2));
         ImGui::Indent(6);
 
         ImDrawList* tabDraw = ImGui::GetWindowDrawList();
 
+        // --- Canvas / Stage pill — reads/writes UIManager::sShowStage
+        //     to swap between workspaces. Only one of Canvas/Stage has
+        //     its Begin() submitted per frame (guarded in Application),
+        //     so the dock never shows a tab bar and the button is
+        //     guaranteed to work.
+        {
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(16, 7));
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,  ImVec2(0, 0));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
+            auto pill = [&](const char* label, bool active) {
+                if (active) {
+                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.96f, 0.97f, 1.00f, 1.00f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.92f, 0.94f, 0.98f, 1.00f));
+                    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.05f, 0.07f, 0.10f, 1.00f));
+                    ImGui::PushStyleColor(ImGuiCol_Border,        ImVec4(0.96f, 0.97f, 1.00f, 1.00f));
+                } else {
+                    // Inactive = grey outline, no fill.
+                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0, 0, 0, 0));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.06f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1, 1, 1, 0.10f));
+                    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.80f, 0.82f, 0.88f, 1.00f));
+                    ImGui::PushStyleColor(ImGuiCol_Border,        ImVec4(0.45f, 0.48f, 0.54f, 0.85f));
+                }
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+                bool clicked = ImGui::Button(label);
+                ImGui::PopStyleVar();
+                ImGui::PopStyleColor(5);
+                return clicked;
+            };
+            // We're inside Canvas::render, so Canvas is the active pill.
+            // Clicking Stage flips the workspace flag for next frame.
+            pill("CANVAS", true);
+            ImGui::SameLine(0, 6);
+            if (pill("STAGE", false)) UIManager::sShowStage = true;
+            ImGui::PopStyleVar(3);
+        }
+
+        // --- Right-align the rest of the nav row (zones → + → OUTPUT → combo
+        //     → composition chip). Compute the cluster's total width and jump
+        //     the cursor over the gap so only CANVAS/STAGE stay on the left.
+        {
+            const float kPadX        = 14.0f * 2.0f;  // matches FramePadding
+            const float kZoneSpacing = 4.0f;
+            const float kSectionGap  = 14.0f;
+            const float kInnerGap    = 8.0f;
+            const float kComboW      = 150.0f;
+            const float kDotW        = 12.0f;
+            float rightW = 0.0f;
+            if (zones) {
+                for (auto& zp : *zones)
+                    rightW += ImGui::CalcTextSize(zp->name.c_str()).x + kPadX + kZoneSpacing;
+            }
+            rightW += ImGui::CalcTextSize("+").x + kPadX;
+            rightW += kSectionGap + kDotW + kInnerGap;
+            rightW += ImGui::CalcTextSize("OUTPUT").x + kInnerGap;
+            rightW += kComboW + kInnerGap;
+            int aiLookup = *activeZone;
+            if (aiLookup >= 0 && aiLookup < (int)zones->size()) {
+                char compLabel[48];
+                snprintf(compLabel, sizeof(compLabel), "%d x %d",
+                         (*zones)[aiLookup]->width, (*zones)[aiLookup]->height);
+                rightW += ImGui::CalcTextSize(compLabel).x + kPadX;
+            } else {
+                rightW += 120.0f;
+            }
+            rightW += kInnerGap;
+            // Fullscreen button width — worst case is "Fullscreen"
+            rightW += ImGui::CalcTextSize("Fullscreen").x + kPadX;
+            // Right-edge breathing room — mirrors the ~12px CANVAS pill has
+            // on the left, plus slack for scrollbar / sub-pixel / combo arrow.
+            rightW += 90.0f;
+
+            ImGui::SameLine();
+            float targetX = ImGui::GetContentRegionMax().x - rightW;
+            float curX    = ImGui::GetCursorPosX();
+            if (targetX > curX) ImGui::SetCursorPosX(targetX);
+        }
+
         // --- Zone tabs ---
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(3, 0));
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12, 4));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14, 7));
         for (int i = 0; i < (int)zones->size(); i++) {
             ImGui::PushID(9000 + i);
             bool isActive = (i == *activeZone);
@@ -154,7 +262,7 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(zc[0] * 0.25f, zc[1] * 0.25f, zc[2] * 0.25f, 1.0f));
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(zc[0] * 0.6f, zc[1] * 0.6f, zc[2] * 0.6f, 1.0f));
             }
-            if (ImGui::SmallButton(z.name.c_str())) {
+            if (ImGui::Button(z.name.c_str())) {
                 *activeZone = i;
             }
             ImGui::PopStyleColor(3);
@@ -223,7 +331,7 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.25f));
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 0.85f));
-        if (ImGui::SmallButton("+")) {
+        if (ImGui::Button("+")) {
             *activeZone = -(100 + (int)zones->size()); // signal: want add
         }
         if (ImGui::IsItemHovered()) {
@@ -237,10 +345,13 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
         if (ai >= 0 && ai < (int)zones->size()) {
             auto& az = *(*zones)[ai];
 
-            ImGui::SameLine(0, 16); // gap between zone tabs and output section
-
-            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 2));
-            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6, 2));
+            // Match the pill / zone-tab vertical metrics so the whole
+            // nav row baselines cleanly instead of stair-stepping.
+            // Right-alignment of the whole cluster (zones + OUTPUT + chip)
+            // is handled earlier — see the SameLine(pushX) jump above.
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14, 7));
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8, 2));
+            ImGui::SameLine(0, 14);
 
             // Build display label
             static char destBuf[128] = {};
@@ -257,28 +368,32 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
                 destLabel = destBuf;
             }
 
-            // "Output" label with status dot
+            // "Output" label with status dot. Dot Y aligns to the framed
+            // widget centre (not text baseline) so it sits on the same line
+            // as the combo and zone pills.
             bool live = (az.outputDest != OutputDest::None);
             ImVec2 dotPos = ImGui::GetCursorScreenPos();
-            float lineH = ImGui::GetTextLineHeight();
+            float frameH = ImGui::GetFrameHeight();
+            float dotCY = dotPos.y + frameH * 0.5f;
             if (live) {
-                tabDraw->AddCircleFilled(ImVec2(dotPos.x + 4, dotPos.y + lineH * 0.5f),
+                tabDraw->AddCircleFilled(ImVec2(dotPos.x + 4, dotCY),
                                          3.5f, IM_COL32(34, 210, 130, 255));
-                tabDraw->AddCircle(ImVec2(dotPos.x + 4, dotPos.y + lineH * 0.5f),
+                tabDraw->AddCircle(ImVec2(dotPos.x + 4, dotCY),
                                    5.5f, IM_COL32(34, 210, 130, 40));
             } else {
-                tabDraw->AddCircle(ImVec2(dotPos.x + 4, dotPos.y + lineH * 0.5f),
+                tabDraw->AddCircle(ImVec2(dotPos.x + 4, dotCY),
                                    3.0f, IM_COL32(100, 110, 130, 140), 0, 1.2f);
             }
-            ImGui::Dummy(ImVec2(12, 0));
+            ImGui::Dummy(ImVec2(12, frameH));
             ImGui::SameLine();
 
+            ImGui::AlignTextToFramePadding();
             if (live) {
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
             } else {
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
             }
-            ImGui::Text("Output");
+            ImGui::TextUnformatted("OUTPUT");
             ImGui::PopStyleColor();
             ImGui::SameLine();
 
@@ -381,29 +496,13 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
             }
             ImGui::PopStyleColor(); // combo text color
 
-            // --- Mapping profile selector (inline, same row) ---
-            if (allMappings && !allMappings->empty()) {
-                ImGui::SameLine(0, 12);
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-                ImGui::Text("Mapping");
-                ImGui::PopStyleColor();
-                ImGui::SameLine();
+            // MAPPING combo removed — the Mapping inspector tab has its
+            // own profile picker; duplicating it here was noise.
+            // COMPOSITION moved to a popover on the zone tab (see below).
 
-                const char* mapLabel = (az.mappingIndex >= 0 && az.mappingIndex < (int)allMappings->size())
-                    ? (*allMappings)[az.mappingIndex]->name.c_str() : "None";
-                ImGui::SetNextItemWidth(110.0f);
-                if (ImGui::BeginCombo("##ZoneMapping", mapLabel)) {
-                    for (int mi = 0; mi < (int)allMappings->size(); mi++) {
-                        bool sel = (az.mappingIndex == mi);
-                        if (ImGui::Selectable((*allMappings)[mi]->name.c_str(), sel)) {
-                            az.mappingIndex = mi;
-                        }
-                    }
-                    ImGui::EndCombo();
-                }
-            }
-
-            // --- Composition (canvas resolution) — same row, to the right of Mapping ---
+            // --- Composition size as a clickable chip, right-anchored on
+            //     the same row so the size of the active zone is always
+            //     visible. Clicking opens a preset picker.
             {
                 static const char* presetLabels[] = {
                     "1920x1080 (1080p)", "3840x2160 (4K)", "1280x720 (720p)",
@@ -414,16 +513,25 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
                 const int presetCount = 7;
 
                 ImGui::SameLine(0, 12);
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-                ImGui::Text("Composition");
-                ImGui::PopStyleColor();
-                ImGui::SameLine();
-
                 char compLabel[48];
-                snprintf(compLabel, sizeof(compLabel), "%dx%d", az.width, az.height);
+                snprintf(compLabel, sizeof(compLabel), "%d x %d", az.width, az.height);
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 0.06f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.14f));
+                ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.65f, 0.68f, 0.74f, 1.0f));
+                if (ImGui::Button(compLabel)) ImGui::OpenPopup("##CompPreset");
+                ImGui::PopStyleColor(3);
+                // Fullscreen toggle — sits inline with the composition chip
+                // so "display setup" actions (pick output size, go fullscreen)
+                // cluster together instead of living in a separate menu row.
+                ImGui::SameLine();
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 0.06f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.14f));
+                ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.75f, 0.78f, 0.84f, 1.0f));
+                const char* fsLbl = m_editorFullscreenHint ? "Exit FS" : "Fullscreen";
+                if (ImGui::Button(fsLbl)) m_wantsFullscreenToggle = true;
+                ImGui::PopStyleColor(3);
 
-                ImGui::SetNextItemWidth(130.0f);
-                if (ImGui::BeginCombo("##ZoneComp", compLabel)) {
+                if (ImGui::BeginPopup("##CompPreset")) {
                     for (int p = 0; p < presetCount - 1; p++) {
                         bool sel = (az.width == presetW[p] && az.height == presetH[p]);
                         if (ImGui::Selectable(presetLabels[p], sel)) {
@@ -432,10 +540,37 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
                         }
                     }
                     ImGui::Separator();
-                    if (ImGui::Selectable("Custom...", az.compPreset == presetCount - 1)) {
-                        az.compPreset = presetCount - 1;
+                    // Custom... — inline W x H inputs with Apply so arbitrary
+                    // composition sizes are actually reachable (previously
+                    // the popup just set a preset index and closed).
+                    static int s_customCompW = 1920, s_customCompH = 1080;
+                    static int s_customCompZone = -1;
+                    if (s_customCompZone != ai) {
+                        s_customCompW = az.width > 0 ? az.width : 1920;
+                        s_customCompH = az.height > 0 ? az.height : 1080;
+                        s_customCompZone = ai;
                     }
-                    ImGui::EndCombo();
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.60f, 0.68f, 1.0f));
+                    ImGui::TextUnformatted("Custom");
+                    ImGui::PopStyleColor();
+                    ImGui::SetNextItemWidth(80);
+                    ImGui::InputInt("##compCW", &s_customCompW, 0);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("x");
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(80);
+                    ImGui::InputInt("##compCH", &s_customCompH, 0);
+                    ImGui::SameLine();
+                    bool valid = s_customCompW >= 64 && s_customCompH >= 64
+                              && s_customCompW <= 16384 && s_customCompH <= 16384;
+                    if (!valid) ImGui::BeginDisabled();
+                    if (ImGui::SmallButton("Apply")) {
+                        az.resize(s_customCompW, s_customCompH);
+                        az.compPreset = presetCount - 1;
+                        ImGui::CloseCurrentPopup();
+                    }
+                    if (!valid) ImGui::EndDisabled();
+                    ImGui::EndPopup();
                 }
             }
 
@@ -443,24 +578,8 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
         }
 
         ImGui::Unindent(6);
-
-        // Subtle separator line before preview
-        ImGui::Dummy(ImVec2(0, 2));
-        {
-            ImVec2 p = ImGui::GetCursorScreenPos();
-            float w = ImGui::GetContentRegionAvail().x;
-            tabDraw->AddLine(ImVec2(p.x, p.y), ImVec2(p.x + w, p.y), IM_COL32(255, 255, 255, 25));
-        }
-        ImGui::Dummy(ImVec2(0, 2));
-
-        // Caller-supplied inline section (unused in the current wiring but kept
-        // in place for future Canvas-specific setup).
-        if (inlineSetupSection) {
-            ImGui::Indent(6);
-            inlineSetupSection();
-            ImGui::Unindent(6);
-        }
     }
+#endif
 
     ImVec2 avail = ImGui::GetContentRegionAvail();
     m_size = {avail.x, avail.y};
@@ -696,7 +815,10 @@ void ViewportPanel::renderLayerOverlay(LayerStack& stack, int& selectedLayer, in
     }
 
     bool warpBusy = m_warpDragging;
-    ImDrawList* draw = ImGui::GetForegroundDrawList();
+    // BackgroundDrawList so gizmo overlays sit ABOVE the canvas but BELOW
+    // floating panels — previously used ForegroundDrawList which punched
+    // through any panel docked over the viewport.
+    ImDrawList* draw = ImGui::GetBackgroundDrawList();
 
     // Clip overlay drawing to viewport panel bounds
     draw->PushClipRect(ImVec2(m_panelMin.x, m_panelMin.y),
@@ -1026,7 +1148,8 @@ void ViewportPanel::renderMaskOverlay(MaskPath& mask, const glm::mat3& layerTran
         return uvToScreenVec(layerToCanvasUV(luv));
     };
 
-    ImDrawList* draw = ImGui::GetForegroundDrawList();
+
+    ImDrawList* draw = ImGui::GetBackgroundDrawList();
     // Clip mask overlay drawing to viewport panel bounds
     draw->PushClipRect(ImVec2(m_panelMin.x, m_panelMin.y),
                        ImVec2(m_panelMax.x, m_panelMax.y), true);
@@ -1314,4 +1437,349 @@ void ViewportPanel::renderMaskOverlay(MaskPath& mask, const glm::mat3& layerTran
     }
 
     draw->PopClipRect();
+}
+
+// --- Shared secondary nav bar — CANVAS/STAGE pills + zones + OUTPUT + comp
+//     chip + Fullscreen. Called from both Canvas (stageActive=false) and
+//     Stage (stageActive=true) so switching workspaces never shifts the
+//     element geometry.
+void ViewportPanel::renderNavBar(bool stageActive,
+                                 std::vector<std::unique_ptr<OutputZone>>* zones,
+                                 int* activeZone,
+                                 const std::vector<MonitorInfo>* monitors,
+                                 bool ndiAvailable,
+                                 int editorMonitor) {
+    if (!zones || !activeZone) return;
+    ImGui::Dummy(ImVec2(0, 2));
+    // Match timeline/header edge padding (~12px from window edge).
+    ImGui::Indent(12);
+    ImDrawList* tabDraw = ImGui::GetWindowDrawList();
+
+    // CANVAS/STAGE pills
+    {
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(16, 7));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,  ImVec2(0, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
+        auto pill = [&](const char* label, bool active) {
+            if (active) {
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.96f, 0.97f, 1.00f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.92f, 0.94f, 0.98f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.05f, 0.07f, 0.10f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_Border,        ImVec4(0.96f, 0.97f, 1.00f, 1.00f));
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0, 0, 0, 0));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.06f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1, 1, 1, 0.10f));
+                ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.80f, 0.82f, 0.88f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_Border,        ImVec4(0.45f, 0.48f, 0.54f, 0.85f));
+            }
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+            bool clicked = ImGui::Button(label);
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor(5);
+            return clicked;
+        };
+        if (pill("CANVAS", !stageActive)) UIManager::sShowStage = false;
+        ImGui::SameLine(0, 6);
+        if (pill("STAGE", stageActive))  UIManager::sShowStage = true;
+        ImGui::PopStyleVar(3);
+    }
+
+    // Right-align the cluster
+    {
+        const float kPadX        = 14.0f * 2.0f;
+        const float kZoneSpacing = 4.0f;
+        const float kSectionGap  = 14.0f;
+        const float kInnerGap    = 8.0f;
+        const float kComboW      = 150.0f;
+        const float kDotW        = 12.0f;
+        float rightW = 0.0f;
+        for (auto& zp : *zones)
+            rightW += ImGui::CalcTextSize(zp->name.c_str()).x + kPadX + kZoneSpacing;
+        rightW += ImGui::CalcTextSize("+").x + kPadX;
+        rightW += kSectionGap + kDotW + kInnerGap;
+        rightW += ImGui::CalcTextSize("OUTPUT").x + kInnerGap;
+        rightW += kComboW + kInnerGap;
+        int aiLookup = *activeZone;
+        if (aiLookup >= 0 && aiLookup < (int)zones->size()) {
+            char compLabel[48];
+            snprintf(compLabel, sizeof(compLabel), "%d x %d",
+                     (*zones)[aiLookup]->width, (*zones)[aiLookup]->height);
+            rightW += ImGui::CalcTextSize(compLabel).x + kPadX;
+        } else {
+            rightW += 120.0f;
+        }
+        rightW += kInnerGap;
+        rightW += ImGui::CalcTextSize("Fullscreen").x + kPadX;
+        // ~12px right margin to mirror the left inset, plus combo-arrow slack.
+        rightW += 28.0f;
+
+        ImGui::SameLine();
+        float targetX = ImGui::GetContentRegionMax().x - rightW;
+        float curX    = ImGui::GetCursorPosX();
+        if (targetX > curX) ImGui::SetCursorPosX(targetX);
+    }
+
+    // Zone tabs
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14, 7));
+    for (int i = 0; i < (int)zones->size(); i++) {
+        ImGui::PushID(9000 + i);
+        bool isActive = (i == *activeZone);
+        auto& z = *(*zones)[i];
+        static const float zoneColors[][3] = {
+            {0.96f, 0.96f, 0.96f}, {0.86f, 0.86f, 0.86f}, {0.76f, 0.76f, 0.76f}, {0.66f, 0.66f, 0.66f},
+            {0.56f, 0.56f, 0.56f}, {0.80f, 0.80f, 0.80f}, {0.70f, 0.70f, 0.70f}, {0.60f, 0.60f, 0.60f},
+        };
+        const float* zc = zoneColors[i % 8];
+        if (isActive) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(zc[0], zc[1], zc[2], 0.25f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(zc[0], zc[1], zc[2], 0.35f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(zc[0], zc[1], zc[2], 1.0f));
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(zc[0] * 0.15f, zc[1] * 0.15f, zc[2] * 0.15f, 0.9f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(zc[0] * 0.25f, zc[1] * 0.25f, zc[2] * 0.25f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(zc[0] * 0.6f, zc[1] * 0.6f, zc[2] * 0.6f, 1.0f));
+        }
+        if (ImGui::Button(z.name.c_str())) *activeZone = i;
+        ImGui::PopStyleColor(3);
+        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+            m_renaming = true;
+            m_renameIndex = i;
+            strncpy(m_renameBuf, z.name.c_str(), sizeof(m_renameBuf) - 1);
+            m_renameBuf[sizeof(m_renameBuf) - 1] = '\0';
+        }
+        if (ImGui::BeginPopupContextItem("ZoneTabCtx")) {
+            if (ImGui::MenuItem("Rename")) {
+                m_renaming = true;
+                m_renameIndex = i;
+                strncpy(m_renameBuf, z.name.c_str(), sizeof(m_renameBuf) - 1);
+                m_renameBuf[sizeof(m_renameBuf) - 1] = '\0';
+            }
+            if (ImGui::MenuItem("Duplicate")) *activeZone = -(200 + i);
+            if ((int)zones->size() > 1) {
+                if (ImGui::MenuItem("Remove")) *activeZone = -(300 + i);
+            }
+            ImGui::EndPopup();
+        }
+        ImVec2 btnMin = ImGui::GetItemRectMin();
+        if (z.outputDest == OutputDest::Fullscreen || z.outputDest == OutputDest::NDI) {
+            ImU32 dotCol = IM_COL32((int)(zc[0]*255), (int)(zc[1]*255), (int)(zc[2]*255), 255);
+            tabDraw->AddCircleFilled(ImVec2(btnMin.x + 5, btnMin.y + 5), 3.0f, dotCol);
+        }
+        ImGui::SameLine();
+        ImGui::PopID();
+    }
+    if (m_renaming) ImGui::OpenPopup("##RenameZone");
+    if (ImGui::BeginPopup("##RenameZone")) {
+        ImGui::Text("Rename Zone");
+        ImGui::SetNextItemWidth(200);
+        bool enter = ImGui::InputText("##RenameInput", m_renameBuf, sizeof(m_renameBuf),
+                                      ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+        if (m_renaming) { ImGui::SetKeyboardFocusHere(-1); m_renaming = false; }
+        if (enter || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            if (enter && m_renameIndex >= 0 && m_renameIndex < (int)zones->size() && m_renameBuf[0]) {
+                (*zones)[m_renameIndex]->name = m_renameBuf;
+            }
+            m_renameIndex = -1;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.25f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 0.85f));
+    if (ImGui::Button("+")) *activeZone = -(100 + (int)zones->size());
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add output zone");
+    ImGui::PopStyleColor(3);
+    ImGui::PopStyleVar(2);
+
+    // OUTPUT + composition + Fullscreen
+    int ai = *activeZone;
+    if (ai >= 0 && ai < (int)zones->size()) {
+        auto& az = *(*zones)[ai];
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14, 7));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8, 2));
+        ImGui::SameLine(0, 14);
+
+        static char destBuf[128] = {};
+        const char* destLabel = "Preview Only";
+        if (az.outputDest == OutputDest::Fullscreen && monitors) {
+            int mi = az.outputMonitor;
+            if (mi >= 0 && mi < (int)monitors->size()) {
+                snprintf(destBuf, sizeof(destBuf), "Fullscreen: %s", (*monitors)[mi].name.c_str());
+                destLabel = destBuf;
+            }
+        } else if (az.outputDest == OutputDest::NDI) {
+            snprintf(destBuf, sizeof(destBuf), "NDI: \"%s\"",
+                     az.ndiStreamName.empty() ? az.name.c_str() : az.ndiStreamName.c_str());
+            destLabel = destBuf;
+        }
+
+        bool live = (az.outputDest != OutputDest::None);
+        ImVec2 dotPos = ImGui::GetCursorScreenPos();
+        float frameH = ImGui::GetFrameHeight();
+        float dotCY = dotPos.y + frameH * 0.5f;
+        if (live) {
+            tabDraw->AddCircleFilled(ImVec2(dotPos.x + 4, dotCY), 3.5f, IM_COL32(34, 210, 130, 255));
+            tabDraw->AddCircle(ImVec2(dotPos.x + 4, dotCY), 5.5f, IM_COL32(34, 210, 130, 40));
+        } else {
+            tabDraw->AddCircle(ImVec2(dotPos.x + 4, dotCY), 3.0f, IM_COL32(100, 110, 130, 140), 0, 1.2f);
+        }
+        ImGui::Dummy(ImVec2(12, frameH));
+        ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
+        if (live) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
+        else      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+        ImGui::TextUnformatted("OUTPUT");
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+
+        if (live) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
+        else      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.70f, 0.73f, 0.78f, 1.0f));
+        ImGui::SetNextItemWidth(150.0f);
+        if (ImGui::BeginCombo("##ZoneOutput", destLabel, ImGuiComboFlags_HeightLarge)) {
+            if (ImGui::Selectable("Preview Only", az.outputDest == OutputDest::None)) {
+                az.outputDest = OutputDest::None;
+                az.outputMonitor = -1;
+            }
+            if (monitors && !monitors->empty()) {
+                ImGui::Separator();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.7f));
+                ImGui::Text("  Fullscreen");
+                ImGui::PopStyleColor();
+                for (int mi = 0; mi < (int)monitors->size(); mi++) {
+                    ImGui::PushID(mi);
+                    if (mi == editorMonitor) { ImGui::PopID(); continue; }
+                    std::string claimedBy;
+                    for (int zi = 0; zi < (int)zones->size(); zi++) {
+                        if (zi == ai) continue;
+                        auto& oz = *(*zones)[zi];
+                        if (oz.outputDest == OutputDest::Fullscreen && oz.outputMonitor == mi) {
+                            claimedBy = oz.name; break;
+                        }
+                    }
+                    char label[256];
+                    if (!claimedBy.empty()) {
+                        snprintf(label, sizeof(label), "%s  %dx%d  (-> %s)",
+                                 (*monitors)[mi].name.c_str(),
+                                 (*monitors)[mi].width, (*monitors)[mi].height,
+                                 claimedBy.c_str());
+                    } else {
+                        snprintf(label, sizeof(label), "%s  %dx%d",
+                                 (*monitors)[mi].name.c_str(),
+                                 (*monitors)[mi].width, (*monitors)[mi].height);
+                    }
+                    if (!claimedBy.empty())
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.6f));
+                    bool sel = (az.outputDest == OutputDest::Fullscreen && az.outputMonitor == mi);
+                    if (ImGui::Selectable(label, sel)) {
+                        if (!claimedBy.empty()) {
+                            for (int zi = 0; zi < (int)zones->size(); zi++) {
+                                if (zi == ai) continue;
+                                auto& oz = *(*zones)[zi];
+                                if (oz.outputDest == OutputDest::Fullscreen && oz.outputMonitor == mi) {
+                                    oz.outputDest = OutputDest::None;
+                                    oz.outputMonitor = -1;
+                                    break;
+                                }
+                            }
+                        }
+                        az.outputDest = OutputDest::Fullscreen;
+                        az.outputMonitor = mi;
+                    }
+                    if (!claimedBy.empty()) ImGui::PopStyleColor();
+                    ImGui::PopID();
+                }
+            }
+            if (ndiAvailable) {
+                ImGui::Separator();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.7f));
+                ImGui::Text("  NDI");
+                ImGui::PopStyleColor();
+                char ndiLabel[256];
+                std::string streamName = az.ndiStreamName.empty() ? az.name : az.ndiStreamName;
+                snprintf(ndiLabel, sizeof(ndiLabel), "Easel - %s", streamName.c_str());
+                bool sel = (az.outputDest == OutputDest::NDI);
+                if (ImGui::Selectable(ndiLabel, sel)) {
+                    az.outputDest = OutputDest::NDI;
+                    if (az.ndiStreamName.empty()) az.ndiStreamName = az.name;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::PopStyleColor();
+
+        // Composition chip + Fullscreen
+        {
+            static const char* presetLabels[] = {
+                "1920x1080 (1080p)", "3840x2160 (4K)", "1280x720 (720p)",
+                "2560x1440 (1440p)", "8000x2000 (Ultra-wide)", "1024x768", "Custom"
+            };
+            static const int presetW[] = { 1920, 3840, 1280, 2560, 8000, 1024, 0 };
+            static const int presetH[] = { 1080, 2160, 720, 1440, 2000, 768, 0 };
+            const int presetCount = 7;
+
+            ImGui::SameLine(0, 12);
+            char compLabel[48];
+            snprintf(compLabel, sizeof(compLabel), "%d x %d", az.width, az.height);
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 0.06f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.14f));
+            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.65f, 0.68f, 0.74f, 1.0f));
+            if (ImGui::Button(compLabel)) ImGui::OpenPopup("##CompPreset");
+            ImGui::PopStyleColor(3);
+
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 0.06f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.14f));
+            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.75f, 0.78f, 0.84f, 1.0f));
+            const char* fsLbl = m_editorFullscreenHint ? "Exit FS" : "Fullscreen";
+            if (ImGui::Button(fsLbl)) m_wantsFullscreenToggle = true;
+            ImGui::PopStyleColor(3);
+
+            if (ImGui::BeginPopup("##CompPreset")) {
+                for (int p = 0; p < presetCount - 1; p++) {
+                    bool sel = (az.width == presetW[p] && az.height == presetH[p]);
+                    if (ImGui::Selectable(presetLabels[p], sel)) {
+                        az.resize(presetW[p], presetH[p]);
+                        az.compPreset = p;
+                    }
+                }
+                ImGui::Separator();
+                static int s_customCompW = 1920, s_customCompH = 1080;
+                static int s_customCompZone = -1;
+                if (s_customCompZone != ai) {
+                    s_customCompW = az.width > 0 ? az.width : 1920;
+                    s_customCompH = az.height > 0 ? az.height : 1080;
+                    s_customCompZone = ai;
+                }
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.60f, 0.68f, 1.0f));
+                ImGui::TextUnformatted("Custom");
+                ImGui::PopStyleColor();
+                ImGui::SetNextItemWidth(80);
+                ImGui::InputInt("##compCW", &s_customCompW, 0);
+                ImGui::SameLine();
+                ImGui::TextDisabled("x");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(80);
+                ImGui::InputInt("##compCH", &s_customCompH, 0);
+                ImGui::SameLine();
+                bool valid = s_customCompW >= 64 && s_customCompH >= 64
+                          && s_customCompW <= 16384 && s_customCompH <= 16384;
+                if (!valid) ImGui::BeginDisabled();
+                if (ImGui::SmallButton("Apply")) {
+                    az.resize(s_customCompW, s_customCompH);
+                    az.compPreset = presetCount - 1;
+                    ImGui::CloseCurrentPopup();
+                }
+                if (!valid) ImGui::EndDisabled();
+                ImGui::EndPopup();
+            }
+        }
+
+        ImGui::PopStyleVar(2);
+    }
+
+    ImGui::Unindent(12);
 }

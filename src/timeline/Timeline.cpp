@@ -54,6 +54,14 @@ void Timeline::removeTrackForLayer(uint32_t layerId) {
     m_runtime.erase(std::remove_if(m_runtime.begin(), m_runtime.end(),
                     [layerId](const TrackRuntime& r){ return r.layerId == layerId; }),
                     m_runtime.end());
+    // Also scrub any between-row transitions that referenced this layer —
+    // otherwise the UI keeps rendering orphan bars pointing at a dead layer
+    // and applyToLayers() repeatedly fails to find the from/to layers.
+    m_transitions.erase(std::remove_if(m_transitions.begin(), m_transitions.end(),
+                    [layerId](const TimelineTransition& tr){
+                        return tr.fromLayerId == layerId || tr.toLayerId == layerId;
+                    }),
+                    m_transitions.end());
 }
 
 TimelineClip* Timeline::addClip(uint32_t layerId, double start, double dur,
@@ -102,11 +110,17 @@ Timeline::TrackRuntime& Timeline::runtimeFor(uint32_t layerId) {
 void Timeline::clear() {
     m_tracks.clear();
     m_transitions.clear();
+    m_markers.clear();
+    m_sections.clear();
+    m_lanes.clear();
     m_runtime.clear();
     m_playhead = 0.0;
     m_playing = false;
     m_nextClipId = 1;
     m_nextTransitionId = 1;
+    m_nextMarkerId = 1;
+    m_nextSectionId = 1;
+    m_nextLaneId = 1;
 }
 
 TimelineTransition* Timeline::addTransition(uint32_t fromLayerId, uint32_t toLayerId,
@@ -132,6 +146,69 @@ void Timeline::removeTransition(uint32_t transitionId) {
 
 TimelineTransition* Timeline::findTransition(uint32_t transitionId) {
     for (auto& t : m_transitions) if (t.id == transitionId) return &t;
+    return nullptr;
+}
+
+// ─── Markers ─────────────────────────────────────────────────────────
+uint32_t Timeline::addMarker(double time, const std::string& name,
+                             const std::string& sceneName) {
+    TimelineMarker m;
+    m.id = m_nextMarkerId++;
+    m.time = time < 0 ? 0 : time;
+    m.name = name;
+    m.sceneName = sceneName;
+    m_markers.push_back(m);
+    return m.id;
+}
+void Timeline::removeMarker(uint32_t id) {
+    m_markers.erase(std::remove_if(m_markers.begin(), m_markers.end(),
+                    [id](const TimelineMarker& mk){ return mk.id == id; }),
+                    m_markers.end());
+}
+TimelineMarker* Timeline::findMarker(uint32_t id) {
+    for (auto& mk : m_markers) if (mk.id == id) return &mk;
+    return nullptr;
+}
+
+// ─── Lanes ───────────────────────────────────────────────────────────
+uint32_t Timeline::addLane(uint32_t layerId, TimelineLaneKind kind,
+                           const std::string& paramName) {
+    TimelineLane l;
+    l.id        = m_nextLaneId++;
+    l.layerId   = layerId;
+    l.kind      = kind;
+    l.paramName = paramName.empty() ? std::string("opacity") : paramName;
+    m_lanes.push_back(l);
+    return l.id;
+}
+void Timeline::removeLane(uint32_t id) {
+    m_lanes.erase(std::remove_if(m_lanes.begin(), m_lanes.end(),
+                  [id](const TimelineLane& l){ return l.id == id; }),
+                  m_lanes.end());
+}
+TimelineLane* Timeline::findLane(uint32_t id) {
+    for (auto& l : m_lanes) if (l.id == id) return &l;
+    return nullptr;
+}
+
+// ─── Sections ────────────────────────────────────────────────────────
+uint32_t Timeline::addSection(double start, double end, const std::string& name) {
+    if (end < start + 0.1) end = start + 0.1;
+    TimelineSection s;
+    s.id = m_nextSectionId++;
+    s.startTime = start < 0 ? 0 : start;
+    s.endTime = end;
+    s.name = name;
+    m_sections.push_back(s);
+    return s.id;
+}
+void Timeline::removeSection(uint32_t id) {
+    m_sections.erase(std::remove_if(m_sections.begin(), m_sections.end(),
+                     [id](const TimelineSection& s){ return s.id == id; }),
+                     m_sections.end());
+}
+TimelineSection* Timeline::findSection(uint32_t id) {
+    for (auto& s : m_sections) if (s.id == id) return &s;
     return nullptr;
 }
 
@@ -164,6 +241,13 @@ nlohmann::json Timeline::toJson() const {
                 cj["transitionInName"]     = c.transitionInName;
                 cj["transitionInDuration"] = c.transitionInDuration;
             }
+            if (!c.transitionInShaderPath.empty()) {
+                cj["transitionInShaderPath"] = c.transitionInShaderPath;
+                cj["transitionInDuration"]   = c.transitionInDuration;
+            }
+            if (c.playbackMode != ClipPlaybackMode::Forward) {
+                cj["playbackMode"] = (int)c.playbackMode;
+            }
             clips.push_back(cj);
         }
         tj["clips"] = clips;
@@ -180,10 +264,48 @@ nlohmann::json Timeline::toJson() const {
         rj["startTime"]   = tr.startTime;
         rj["duration"]    = tr.duration;
         rj["name"]        = tr.name;
+        if (!tr.shaderPath.empty()) rj["shaderPath"] = tr.shaderPath;
         trs.push_back(rj);
     }
     j["transitions"]      = trs;
     j["nextTransitionId"] = m_nextTransitionId;
+
+    nlohmann::json ls = nlohmann::json::array();
+    for (const auto& l : m_lanes) {
+        nlohmann::json lj;
+        lj["id"]           = l.id;
+        lj["layerId"]      = l.layerId;
+        lj["kind"]         = (int)l.kind;
+        lj["paramName"]    = l.paramName;
+        lj["midiChannel"]  = l.midiChannel;
+        lj["audioSignal"]  = l.audioSignal;
+        lj["audioStrength"]= l.audioStrength;
+        nlohmann::json pts = nlohmann::json::array();
+        for (const auto& p : l.points) {
+            nlohmann::json pj;
+            pj["time"]  = p.time;
+            pj["value"] = p.value;
+            pj["n"]     = p.noteOrCC;
+            pts.push_back(pj);
+        }
+        lj["points"] = pts;
+        ls.push_back(lj);
+    }
+    j["lanes"]      = ls;
+    j["nextLaneId"] = m_nextLaneId;
+
+    nlohmann::json ss = nlohmann::json::array();
+    for (const auto& s : m_sections) {
+        nlohmann::json sj;
+        sj["id"]        = s.id;
+        sj["startTime"] = s.startTime;
+        sj["endTime"]   = s.endTime;
+        sj["name"]      = s.name;
+        if (s.tint != 0) sj["tint"] = s.tint;
+        ss.push_back(sj);
+    }
+    j["sections"]      = ss;
+    j["nextSectionId"] = m_nextSectionId;
     return j;
 }
 
@@ -214,8 +336,11 @@ void Timeline::fromJson(const nlohmann::json& j) {
                     c.tint = cj.value("tint", (uint32_t)0);
                     c.name = cj.value("name", std::string{});
                     c.sourcePath = cj.value("sourcePath", std::string{});
-                    c.transitionInName     = cj.value("transitionInName",     std::string{});
-                    c.transitionInDuration = cj.value("transitionInDuration", 0.5);
+                    c.transitionInName       = cj.value("transitionInName",       std::string{});
+                    c.transitionInShaderPath = cj.value("transitionInShaderPath", std::string{});
+                    c.transitionInDuration   = cj.value("transitionInDuration",   0.5);
+                    c.playbackMode           = (ClipPlaybackMode)cj.value("playbackMode",
+                                                    (int)ClipPlaybackMode::Forward);
                     if (c.id >= m_nextClipId) m_nextClipId = c.id + 1;
                     tr.clips.push_back(c);
                 }
@@ -233,11 +358,51 @@ void Timeline::fromJson(const nlohmann::json& j) {
             tr.startTime   = rj.value("startTime",   0.0);
             tr.duration    = rj.value("duration",    1.0);
             tr.name        = rj.value("name",        std::string{"crossfade"});
+            tr.shaderPath  = rj.value("shaderPath",  std::string{});
             if (tr.id >= m_nextTransitionId) m_nextTransitionId = tr.id + 1;
             if (tr.fromLayerId && tr.toLayerId) m_transitions.push_back(tr);
         }
     }
     m_nextTransitionId = j.value("nextTransitionId", m_nextTransitionId);
+
+    if (j.contains("lanes") && j["lanes"].is_array()) {
+        for (const auto& lj : j["lanes"]) {
+            TimelineLane l;
+            l.id            = lj.value("id",            m_nextLaneId++);
+            l.layerId       = lj.value("layerId",       (uint32_t)0);
+            l.kind          = (TimelineLaneKind)lj.value("kind", (int)TimelineLaneKind::Automation);
+            l.paramName     = lj.value("paramName",     std::string{"opacity"});
+            l.midiChannel   = lj.value("midiChannel",   0);
+            l.audioSignal   = lj.value("audioSignal",   0);
+            l.audioStrength = lj.value("audioStrength", 0.5f);
+            if (lj.contains("points") && lj["points"].is_array()) {
+                for (const auto& pj : lj["points"]) {
+                    TimelineLanePoint p;
+                    p.time     = pj.value("time",  0.0);
+                    p.value    = pj.value("value", 0.0f);
+                    p.noteOrCC = pj.value("n",     0);
+                    l.points.push_back(p);
+                }
+            }
+            if (l.id >= m_nextLaneId) m_nextLaneId = l.id + 1;
+            if (l.layerId != 0) m_lanes.push_back(l);
+        }
+    }
+    m_nextLaneId = j.value("nextLaneId", m_nextLaneId);
+
+    if (j.contains("sections") && j["sections"].is_array()) {
+        for (const auto& sj : j["sections"]) {
+            TimelineSection s;
+            s.id        = sj.value("id",        m_nextSectionId++);
+            s.startTime = sj.value("startTime", 0.0);
+            s.endTime   = sj.value("endTime",   s.startTime + 1.0);
+            s.name      = sj.value("name",      std::string{"Section"});
+            s.tint      = sj.value("tint",      (uint32_t)0);
+            if (s.id >= m_nextSectionId) m_nextSectionId = s.id + 1;
+            m_sections.push_back(s);
+        }
+    }
+    m_nextSectionId = j.value("nextSectionId", m_nextSectionId);
 }
 
 // Build a content source from a file path. Heuristic: .fs / .frag / .isf → ShaderSource,
@@ -266,7 +431,29 @@ static std::shared_ptr<ContentSource> loadSourceForPath(const std::string& path)
 void Timeline::applyToLayers(LayerStack& layers) {
     double t = m_playhead;
 
+    // Reset transitionProgress to 1.0 on any layer that isn't currently mid
+    // fade-in/out of its own Layer transition. Also clear any previous-frame
+    // between-row transition annotations — we re-set them below if a
+    // TimelineTransition is currently active for this layer.
+    for (int i = 0; i < layers.count(); i++) {
+        auto l = layers[i];
+        if (!l) continue;
+        if (!l->transitionActive && !l->shaderTransitionActive) {
+            l->transitionProgress = 1.0f;
+        }
+        l->betweenRowActive        = false;
+        l->betweenRowProgress      = 0.0f;
+        l->betweenRowGLName.clear();
+        l->betweenRowShaderPath.clear();
+    }
+
     for (auto& track : m_tracks) {
+        // Tracks with no clips don't drive visibility — otherwise a layer
+        // that just got added (and whose auto-clip hasn't been synced yet)
+        // would be force-hidden for a frame. Users can also use the layer
+        // stack without the timeline by simply not defining clips.
+        if (track.clips.empty()) continue;
+
         // Find current-frame active clip (first clip whose [start, end) contains t).
         const TimelineClip* active = nullptr;
         for (const auto& c : track.clips) {
@@ -288,8 +475,8 @@ void Timeline::applyToLayers(LayerStack& layers) {
         {
             // Edge: entering a new clip (or starting fresh).
             if (curActiveId != prevActiveId && curActiveId != 0) {
-                // Show the layer.
-                layer->visible = true;
+                // Show the layer unless the user manually hid it.
+                if (!layer->userHidden) layer->visible = true;
                 if (!layer->transitionActive && !layer->shaderTransitionActive) {
                     layer->transitionProgress = 1.0f;
                 }
@@ -305,9 +492,20 @@ void Timeline::applyToLayers(LayerStack& layers) {
                             }
                         }
 #endif
-                        // Priority: per-clip gl-transition > legacy ISF shader transition > instant.
-                        // Only transitions from an existing previous clip; first-clip entry is still instant.
-                        if (layer->source && !active->transitionInName.empty() && prevActiveId != 0) {
+                        // Priority: per-clip ISF shader > per-clip gl-transition >
+                        // legacy ISF shader transition > instant. Only transitions
+                        // from an existing previous clip; first-clip entry is still
+                        // instant.
+                        if (layer->source && !active->transitionInShaderPath.empty() && prevActiveId != 0) {
+                            // Route the per-clip ISF shader through the Layer's
+                            // shader-transition slot so CompositeEngine picks it
+                            // up via layer->transitionShaderPath + shaderTransitionActive.
+                            layer->transitionShaderPath = active->transitionInShaderPath;
+                            layer->transitionShaderInst.reset();
+                            layer->transitionType = TransitionType::Shader;
+                            layer->transitionDuration = (float)active->transitionInDuration;
+                            layer->startShaderTransition(src);
+                        } else if (layer->source && !active->transitionInName.empty() && prevActiveId != 0) {
                             layer->startGLTransition(src, active->transitionInName,
                                                      (float)active->transitionInDuration);
                         } else if (layer->source && layer->transitionType == TransitionType::Shader
@@ -346,14 +544,64 @@ void Timeline::applyToLayers(LayerStack& layers) {
             }
         }
 
+        // Per-clip playback-mode runtime: Loop wraps the video source back to
+        // sourceIn when it passes sourceIn + clip.duration; Hold pauses the
+        // source once it reaches that point. Only meaningful for video
+        // sources; shader sources ignore.
+#ifdef HAS_FFMPEG
+        if (active && layer->source) {
+            if (auto* vs = dynamic_cast<VideoSource*>(layer->source.get())) {
+                double clipElapsed = t - active->startTime;
+                double srcPos      = active->sourceIn + clipElapsed;
+                double srcEnd      = (active->sourceOut > 0.0)
+                                     ? active->sourceOut
+                                     : active->sourceIn + active->duration;
+                if (active->playbackMode == ClipPlaybackMode::Loop) {
+                    double loopLen = std::max(0.1, srcEnd - active->sourceIn);
+                    if (loopLen > 0.0) {
+                        double want = active->sourceIn
+                                      + std::fmod(clipElapsed, loopLen);
+                        if (std::abs(vs->currentTime() - want) > 1.0) {
+                            vs->seek(want);
+                        }
+                    }
+                    if (!vs->isPlaying()) vs->play();
+                } else if (active->playbackMode == ClipPlaybackMode::Hold) {
+                    if (srcPos >= srcEnd && vs->isPlaying()) {
+                        vs->pause();
+                    }
+                }
+                (void)srcPos;
+            }
+        }
+#endif
+
+        // Per-frame visibility reconciliation. Without this, a seek clears
+        // m_runtime (so prevActiveId resets to 0) and neither edge fires —
+        // leaving the layer stuck in whatever visible state it had before.
+        // With this, visibility always tracks "is the playhead inside a clip
+        // on this track?" regardless of how the playhead got here.
+        if (curActiveId != 0) {
+            if (!layer->userHidden) layer->visible = true;
+            // If a fade-out was in flight from a prior edge, cancel it —
+            // the user has re-entered the clip's window (via drag or seek).
+            if (layer->transitionActive && !layer->transitionDirection) {
+                layer->transitionActive   = false;
+                layer->transitionProgress = 1.0f;
+            }
+        } else if (!layer->transitionActive && !layer->shaderTransitionActive) {
+            // No clip under the playhead and nothing fading — hide the layer.
+            layer->visible = false;
+        }
+
         rt.activeClipId = curActiveId;
     }
 
-    // Cross-layer transitions: during [start,end], ramp the "from" layer's
-    // transitionProgress from 1→0 while leaving the "to" layer at 1. The
-    // compositor already multiplies effectiveOpacity by transitionProgress,
-    // so this gives a clean visual crossfade without stomping the base
-    // opacity slider.
+    // Cross-layer transitions: annotate the "to" layer with the shader blend
+    // parameters so CompositeEngine can run the gl-transition (or custom ISF)
+    // shader during composite. This is a real shader-driven crossfade — not
+    // just an opacity ramp — which is why the from/to layers both render
+    // fully and the shader blends the result.
     for (const auto& tr : m_transitions) {
         if (t < tr.startTime || t >= tr.endTime()) continue;
         double p = (t - tr.startTime) / std::max(tr.duration, 1e-3);
@@ -362,11 +610,11 @@ void Timeline::applyToLayers(LayerStack& layers) {
         for (int i = 0; i < layers.count(); i++) {
             auto l = layers[i];
             if (!l) continue;
-            if (l->id == tr.fromLayerId) {
-                l->transitionProgress = std::min(l->transitionProgress,
-                                                 (float)(1.0 - p));
-            } else if (l->id == tr.toLayerId) {
-                l->transitionProgress = std::min(l->transitionProgress, 1.0f);
+            if (l->id == tr.toLayerId) {
+                l->betweenRowActive       = true;
+                l->betweenRowProgress     = (float)p;
+                l->betweenRowGLName       = tr.name;
+                l->betweenRowShaderPath   = tr.shaderPath;
             }
         }
     }

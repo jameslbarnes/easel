@@ -41,6 +41,17 @@ public:
     uint32_t id = 0; // stable ID for zone visibility sets
     std::string name = "Layer";
     bool visible = true;
+    // User-forced hide from the Layer panel eye toggle. Survives Timeline's
+    // per-frame visibility reconciliation (which force-sets visible=true while
+    // a clip is under the playhead). When true, the compositor treats the
+    // layer as hidden regardless of `visible`.
+    bool userHidden = false;
+
+    // Mute / Solo — independent of the eye toggle. Mute hides the layer from
+    // the composite. Solo, when set on any layer, hides every non-solo'd
+    // layer (the compositor inspects the whole stack to decide).
+    bool muted  = false;
+    bool soloed = false;
     uint32_t groupId = 0; // 0 = ungrouped
     float opacity = 1.0f;
     BlendMode blendMode = BlendMode::Normal;
@@ -85,6 +96,16 @@ public:
     // GLTransitionLibrary — name is the bundled .glsl filename stem.
     std::string glTransitionName;       // e.g. "doorway", "LinearBlur", "fade"
     bool        glTransitionActive = false;
+
+    // Cross-layer (between-row) transition state. Set per frame by
+    // Timeline::applyToLayers when a TimelineTransition's window contains the
+    // playhead and this layer is the "to" target. The CompositeEngine reads
+    // these fields and blends the accumulated stack-so-far with this layer's
+    // solo render via the named gl-transition (or shaderPath if set).
+    bool        betweenRowActive        = false;
+    float       betweenRowProgress      = 0.0f;
+    std::string betweenRowGLName;       // gl-transition name; used when shaderPath empty
+    std::string betweenRowShaderPath;   // optional ISF shader path
 
     // Edge feather (0.0 = hard edge, 0.5 = max soft blend)
     float feather = 0.0f;

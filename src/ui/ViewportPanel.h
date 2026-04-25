@@ -30,6 +30,17 @@ public:
                 const std::vector<std::unique_ptr<MappingProfile>>* allMappings = nullptr,
                 std::function<void()> inlineSetupSection = nullptr);
 
+    // Shared secondary-nav row (CANVAS/STAGE pills on the left, zone tabs +
+    // OUTPUT combo + composition chip + Fullscreen on the right). Rendered
+    // by both the Canvas viewport and the Stage panel so switching
+    // workspaces doesn't shift the nav geometry.
+    void renderNavBar(bool stageActive,
+                      std::vector<std::unique_ptr<OutputZone>>* zones,
+                      int* activeZone,
+                      const std::vector<MonitorInfo>* monitors,
+                      bool ndiAvailable,
+                      int editorMonitor);
+
     // Layer transform overlay — drag to move, handles to resize
     void renderLayerOverlay(LayerStack& stack, int& selectedLayer, int canvasW = 1920, int canvasH = 1080);
 
@@ -51,6 +62,12 @@ public:
     // Application should respond by exiting mask edit mode.
     bool wantsExitMaskMode() const { return m_wantsExitMaskMode; }
     void clearExitMaskSignal() { m_wantsExitMaskMode = false; }
+
+    // Signal: user clicked the Fullscreen button in the viewport toolbar.
+    // Application should respond by toggling editor fullscreen.
+    bool wantsFullscreenToggle() const { return m_wantsFullscreenToggle; }
+    void clearFullscreenSignal() { m_wantsFullscreenToggle = false; }
+    void setEditorFullscreen(bool on) { m_editorFullscreenHint = on; }
 
     void setLayerSelected(bool sel) { m_layerSelected = sel; }
     bool isHovered() const { return m_hovered; }
@@ -114,6 +131,10 @@ private:
     bool m_wantsMaskEdit = false;
     bool m_wantsExitMaskMode = false;
     glm::vec2 m_maskEditClickUV = {0, 0};
+
+    // Fullscreen toggle — set by the inline toolbar button, read by Application.
+    bool m_wantsFullscreenToggle = false;
+    bool m_editorFullscreenHint = false;  // read-only display state
 
     // Orbit camera drag state (ObjMesh mode)
     bool m_orbitDragging = false;

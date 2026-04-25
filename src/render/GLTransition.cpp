@@ -59,11 +59,39 @@ const char* kVertSrc =
 
 // Strip any embedded `#version` lines from the user shader so our 330 core
 // prelude is the only one GLSL sees. Also strip `precision …float;` (GLES).
+//
+// gl-transitions.com shaders use a convention where a uniform's default
+// value is specified in a trailing comment, e.g.
+//     uniform float persp; // = 0.7
+// Since Easel only drives `progress` / `ratio` / audio uniforms, the rest
+// would come through as zeroed, breaking transitions whose math depends on
+// non-zero defaults (cube's persp=0.7, unzoom=0.3 are required). Convert
+// those declarations into `const float NAME = VALUE;` so the defaults are
+// baked in at compile time. Also handles uniform int, vec2/3/4, bool.
 std::string sanitize(const std::string& src) {
     std::string s = std::regex_replace(src,
         std::regex(R"(#version\s+\d+[^\n]*)"), "");
     s = std::regex_replace(s,
         std::regex(R"(precision\s+\w+\s+float\s*;)"), "");
+
+    // uniform float NAME; // = 0.7    →  const float NAME = 0.7;
+    s = std::regex_replace(s,
+        std::regex(R"(uniform\s+float\s+(\w+)\s*;\s*//\s*=\s*([-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?))"),
+        "const float $1 = $2;");
+    // uniform int NAME; // = 3        →  const int NAME = 3;
+    s = std::regex_replace(s,
+        std::regex(R"(uniform\s+int\s+(\w+)\s*;\s*//\s*=\s*([-+]?[0-9]+))"),
+        "const int $1 = $2;");
+    // uniform bool NAME; // = true    →  const bool NAME = true;
+    s = std::regex_replace(s,
+        std::regex(R"(uniform\s+bool\s+(\w+)\s*;\s*//\s*=\s*(true|false))"),
+        "const bool $1 = $2;");
+    // uniform vec2 NAME; // = vec2(0.5, 0.5)  →  const vec2 NAME = vec2(0.5, 0.5);
+    s = std::regex_replace(s,
+        std::regex(R"(uniform\s+(vec[234])\s+(\w+)\s*;\s*//\s*=\s*(vec[234]\s*\([^)]*\)))"),
+        "const $1 $2 = $3;");
+    // uniform vec3/4 NAME; // = ivec3(...) also accepted via loose rule above.
+
     return s;
 }
 
@@ -205,11 +233,19 @@ GLTransitionLibrary& GLTransitionLibrary::instance() {
 
 void GLTransitionLibrary::scan(const std::string& dir) {
     m_entries.clear();
+    m_scannedDirs.clear();
+    scanAdditional(dir);
+}
+
+void GLTransitionLibrary::scanAdditional(const std::string& dir) {
     std::error_code ec;
     if (!fs::exists(dir, ec)) {
-        std::cerr << "[GLTransitionLibrary] scan: directory missing: " << dir << "\n";
+        std::cerr << "[GLTransitionLibrary] scanAdditional: directory missing: "
+                  << dir << "\n";
         return;
     }
+    m_scannedDirs.push_back(dir);
+    int added = 0;
     for (auto& ent : fs::directory_iterator(dir, ec)) {
         if (!ent.is_regular_file()) continue;
         auto p = ent.path();
@@ -217,10 +253,51 @@ void GLTransitionLibrary::scan(const std::string& dir) {
         auto name = p.stem().string();
         Entry e;
         e.path = p.string();
-        m_entries.emplace(std::move(name), std::move(e));
+        auto t = fs::last_write_time(p, ec);
+        if (!ec) e.mtimeRaw = (int64_t)t.time_since_epoch().count();
+        // Later dirs override earlier ones (user shadows bundled).
+        m_entries[name] = std::move(e);
+        added++;
     }
-    std::cerr << "[GLTransitionLibrary] scanned " << m_entries.size()
-              << " transitions in " << dir << "\n";
+    std::cerr << "[GLTransitionLibrary] scanAdditional: +" << added
+              << " from " << dir << "  (total " << m_entries.size() << ")\n";
+}
+
+void GLTransitionLibrary::checkAndReload() {
+    std::error_code ec;
+
+    // 1. Hot-reload: any entry whose source file's mtime changed gets its
+    //    compiled runner discarded so get() recompiles on next use.
+    for (auto& kv : m_entries) {
+        Entry& e = kv.second;
+        auto t = fs::last_write_time(e.path, ec);
+        if (ec) continue;
+        int64_t cur = (int64_t)t.time_since_epoch().count();
+        if (cur != e.mtimeRaw) {
+            e.mtimeRaw = cur;
+            e.runner.reset();
+            e.triedCompile = false;
+            std::cerr << "[GLTransitionLibrary] hot-reload: " << kv.first << "\n";
+        }
+    }
+
+    // 2. Discover new files dropped into any of the scanned dirs.
+    for (auto& dir : m_scannedDirs) {
+        for (auto& ent : fs::directory_iterator(dir, ec)) {
+            if (!ent.is_regular_file()) continue;
+            auto p = ent.path();
+            if (p.extension() != ".glsl") continue;
+            auto name = p.stem().string();
+            if (m_entries.count(name)) continue;
+            Entry e;
+            e.path = p.string();
+            auto t = fs::last_write_time(p, ec);
+            if (!ec) e.mtimeRaw = (int64_t)t.time_since_epoch().count();
+            m_entries.emplace(std::move(name), std::move(e));
+            std::cerr << "[GLTransitionLibrary] picked up new transition: "
+                      << p.string() << "\n";
+        }
+    }
 }
 
 std::vector<std::string> GLTransitionLibrary::names() const {

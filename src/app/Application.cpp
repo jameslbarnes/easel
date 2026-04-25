@@ -58,6 +58,10 @@ static std::string defaultProjectPath() {
 #ifdef __APPLE__
 // Implemented in FileDialog_mac.mm
 extern std::string openFileDialog_mac(const char* filter);
+
+// Implemented in WindowChrome_mac.mm — exposed as C so ObjC++ name mangling
+// doesn't interfere with the link from this C++ TU.
+extern "C" void EaselMac_UnifyTitleBar(GLFWwindow*);
 extern std::string saveFileDialog_mac(const char* filter, const char* defaultExt);
 #endif
 
@@ -130,6 +134,13 @@ bool Application::init() {
         return false;
     }
 
+#ifdef __APPLE__
+    // Unify the title bar so the ImGui main menu sits alongside the
+    // traffic-light buttons (Figma / VS Code style), freeing the row the
+    // OS would otherwise reserve for a separate title strip.
+    EaselMac_UnifyTitleBar(m_window);
+#endif
+
     // Set window icon (search multiple paths since exe may be in build/Release/).
     // The bundled icon is too large for X11 window-manager properties on Linux.
 #ifndef __linux__
@@ -171,6 +182,16 @@ bool Application::init() {
 
     // Scan bundled gl-transitions shaders. Lazy-compile on first use.
     GLTransitionLibrary::instance().scan("assets/transitions/gl");
+
+    // Also scan the user's drop-in folder at ~/Documents/Easel/transitions/
+    // so custom `.glsl` files appear in the timeline transition picker
+    // alongside the bundled ones. Created on first launch if missing.
+    if (const char* home = std::getenv("HOME")) {
+        std::string userTransitionsDir = std::string(home) + "/Documents/Easel/transitions";
+        std::error_code ec;
+        std::filesystem::create_directories(userTransitionsDir, ec);
+        GLTransitionLibrary::instance().scanAdditional(userTransitionsDir);
+    }
 
     // Create default mapping profile
     auto mapping = std::make_unique<MappingProfile>();
@@ -477,8 +498,44 @@ void Application::run() {
             m_audioRMS = m_audioAnalyzer.smoothedRMS();
             m_bpmSync.update(dt);
 
-            // Advance timeline playhead and push clip → layer state before compositing.
-            m_timeline.advance(dt);
+            // Keep timeline tracks in sync with the layer stack every frame,
+            // even when the Timeline panel is hidden. Newly-added layers get
+            // a default clip spanning their natural duration so the clip-
+            // driven visibility logic in applyToLayers works for them from
+            // frame one. (Previously this lived inside renderTimelinePanel
+            // and didn't run with the panel collapsed.)
+            {
+                std::unordered_set<uint32_t> liveIds;
+                for (int i = 0; i < m_layerStack.count(); i++) {
+                    auto l = m_layerStack[i];
+                    if (!l || l->id == 0) continue;
+                    liveIds.insert(l->id);
+                    if (auto* tr = m_timeline.findTrack(l->id)) {
+                        tr->name = l->name;
+                    } else {
+                        m_timeline.ensureTrack(l->id, l->name);
+                        double d = (l->source) ? l->source->duration() : 0.0;
+                        if (d <= 0.0) d = m_timeline.duration();
+                        if (d > m_timeline.duration()) d = m_timeline.duration();
+                        m_timeline.addClip(l->id, 0.0, d, l->name);
+                    }
+                }
+                auto& tracks = m_timeline.tracks();
+                for (int i = (int)tracks.size() - 1; i >= 0; i--) {
+                    if (!liveIds.count(tracks[i].layerId)) {
+                        m_timeline.removeTrackForLayer(tracks[i].layerId);
+                    }
+                }
+            }
+
+            // Advance timeline playhead and push clip → layer state before
+            // compositing. dt is clamped to avoid the playhead leaping when a
+            // modal dialog (Add Layer, Open Project, etc.) blocked the main
+            // thread for multiple seconds — `now - lastTime` would otherwise
+            // jump the scrubber to the end of the timeline after the dialog.
+            float tlDt = dt;
+            if (tlDt > 0.1f) tlDt = 1.0f / 60.0f;
+            m_timeline.advance(tlDt);
             m_timeline.applyToLayers(m_layerStack);
 
             // Export flow: auto-stop recorder + pause when playhead crosses the Work Area end.
@@ -550,11 +607,15 @@ void Application::run() {
 
             m_ui.beginFrame();
 
-            // Undo / Redo keybinds — use GLFW for reliable detection
+            // Undo / Redo keybinds — use GLFW for reliable detection.
+            // macOS uses Cmd (Super), everything else uses Ctrl; accept both so
+            // the same keystroke works across platforms.
             if (!ImGui::GetIO().WantTextInput) {
                 static bool sUndoPrev = false, sRedoPrev = false;
                 bool ctrl = glfwGetKey(m_window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
-                            glfwGetKey(m_window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS;
+                            glfwGetKey(m_window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS ||
+                            glfwGetKey(m_window, GLFW_KEY_LEFT_SUPER)   == GLFW_PRESS ||
+                            glfwGetKey(m_window, GLFW_KEY_RIGHT_SUPER)  == GLFW_PRESS;
                 bool shift = glfwGetKey(m_window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
                              glfwGetKey(m_window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
                 bool z = glfwGetKey(m_window, GLFW_KEY_Z) == GLFW_PRESS;
@@ -563,10 +624,19 @@ void Application::run() {
                 bool undoNow = ctrl && z && !shift;
                 bool redoNow = ctrl && ((z && shift) || y);
 
-                if (undoNow && !sUndoPrev) m_undoStack.undo(m_layerStack, m_selectedLayer);
-                if (redoNow && !sRedoPrev) m_undoStack.redo(m_layerStack, m_selectedLayer);
+                if (undoNow && !sUndoPrev) m_undoStack.undo(m_layerStack, m_selectedLayer, m_timeline);
+                if (redoNow && !sRedoPrev) m_undoStack.redo(m_layerStack, m_selectedLayer, m_timeline);
                 sUndoPrev = undoNow;
                 sRedoPrev = redoNow;
+
+                // Esc — clear any current selection (layer + mask edit mode)
+                // so the inspector empties and side-panels show their default
+                // state. Behaves like "click off" without having to find an
+                // empty spot in the canvas.
+                if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                    m_selectedLayer = -1;
+                    m_maskEditMode = false;
+                }
 
                 // Delete / Backspace → remove selected layer. Guarded by
                 // WantTextInput so typing in the shader editor or name field
@@ -1581,11 +1651,11 @@ void Application::renderUI() {
         }
     }
 
-#ifdef HAS_FFMPEG
-    float transportBarH = 56.0f;
-#else
+    // Legacy bottom transport bar was merged into the Timeline panel; no
+    // widgets render in the reserved strip anymore. Dockspace now spans
+    // the full window so we don't leak a dead empty black band below the
+    // dock node.
     float transportBarH = 0.0f;
-#endif
     renderMenuBar();
     m_ui.setupDockspace(transportBarH);
 
@@ -1637,8 +1707,13 @@ void Application::renderUI() {
         }
         if (!previewTex) previewTex = m_testPattern.id();
         m_viewportPanel.setLayerSelected(m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count());
+        m_viewportPanel.setEditorFullscreen(m_editorFullscreen);
         m_viewportPanel.render(previewTex, mappingForZone(z), projAspect,
                                &m_zones, &m_activeZone, &monitors, ndiAvail, editorMon, &m_mappings);
+        if (m_viewportPanel.wantsFullscreenToggle()) {
+            m_viewportPanel.clearFullscreenSignal();
+            toggleEditorFullscreen();
+        }
     }
 
     // Handle signals from viewport tabs
@@ -1693,21 +1768,36 @@ void Application::renderUI() {
         if (!path.empty()) loadShader(path);
     }
 
-    // --- Masks panel --- (visible only in Stage workspace per UIManager whitelist)
-    if (m_ui.isPanelVisible("Masks")) {
-    ImGui::Begin("Masks");
+    // Warp editor renders FIRST so the mapping parameters (corner pin / mesh
+    // warp / obj mesh) appear at the TOP of the Mapping panel, with masks
+    // tucked below as a collapsible dropdown.
     {
-        // Edge blend sits at the top of Masks — both are output-stage refinements
-        // that clip / blend the composited zone before it's sent to the projector.
-        renderEdgeBlendInline(zone);
-        ImGui::Dummy(ImVec2(0, 4));
-        {
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            ImVec2 p = ImGui::GetCursorScreenPos();
-            float w = ImGui::GetContentRegionAvail().x;
-            dl->AddLine(ImVec2(p.x, p.y), ImVec2(p.x + w, p.y), IM_COL32(255, 255, 255, 25));
+        auto* mpEarly = mappingForZone(zone);
+        if (mpEarly && m_ui.isPanelVisible("Mapping")) {
+            auto prevWarpMode = mpEarly->warpMode;
+            m_warpEditor.render(*mpEarly, m_maskEditMode, &m_mappings, zone.mappingIndex);
+            if (mpEarly->warpMode != prevWarpMode) {
+                bool needsDepth = (mpEarly->warpMode == ViewportPanel::WarpMode::ObjMesh);
+                zone.warpFBO.create(zone.width, zone.height, needsDepth);
+            }
+            if (m_warpEditor.wantsLoadOBJ()) {
+                std::string path = openFileDialog("3D Models\0*.obj;*.gltf;*.glb\0OBJ Files\0*.obj\0glTF Files\0*.gltf;*.glb\0All Files\0*.*\0");
+                if (!path.empty()) {
+                    mpEarly->objMeshWarp.loadModel(path);
+                }
+            }
         }
-        ImGui::Dummy(ImVec2(0, 6));
+    }
+
+    // --- Masks section (lives inside the Mapping panel as a collapsible
+    // dropdown BELOW the mapping parameters). Closed by default — expand to
+    // tweak canvas/layer masks.
+    if (m_ui.isPanelVisible("Mapping")) {
+    ImGui::Begin("        ###Mapping");
+    if (ImGui::CollapsingHeader("Masks"))
+    {
+        // (Edge Blend moved to the bottom of this panel — you only want to
+        //  reach for it AFTER you've shaped a mask, not before.)
 
         // ===== Canvas Masks (output-level, applied to entire composite) =====
         auto* canvasMaskMapping = mappingForZone(zone);
@@ -1809,14 +1899,9 @@ void Application::renderUI() {
             }
         }
 
-        // Divider between canvas and layer masks
-        ImGui::Dummy(ImVec2(0, 6));
-        {
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            ImVec2 p = ImGui::GetCursorScreenPos();
-            dl->AddLine(p, ImVec2(p.x + ImGui::GetContentRegionAvail().x, p.y), IM_COL32(255, 255, 255, 40));
-        }
-        ImGui::Dummy(ImVec2(0, 6));
+        // Spacing between Canvas Masks and Layer Masks — no hairline
+        // divider, just generous vertical rhythm to separate the groups.
+        ImGui::Dummy(ImVec2(0, 16));
 
         // ===== Layer Masks (per-layer, follow layer transform) =====
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
@@ -1977,10 +2062,18 @@ void Application::renderUI() {
             ImGui::PopStyleColor();
         }
         } // end layer masks scope
+
+        // --- Edge Blend (moved to the bottom) ----------------------------
+        // Edge blend is a projector-output refinement you reach for after a
+        // mask is shaped. No hairline divider — vertical spacing does the
+        // separating so the section rhythm stays clean.
+        ImGui::Dummy(ImVec2(0, 16));
+        renderEdgeBlendInline(zone);
+
         masks_panel_done:;
     }
     ImGui::End();
-    }  // end Masks visibility guard
+    }  // end Mapping panel (merged Masks section)
 
     std::shared_ptr<Layer> selectedLayer;
     if (m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count()) {
@@ -2025,26 +2118,9 @@ void Application::renderUI() {
         m_propertyPanel.undoNeeded = false;
     }
 
-    // Render warp editor FIRST so it can set m_maskEditMode
+    // Warp editor now renders earlier in the frame (before the masks block)
+    // so mapping parameters sit above the Masks dropdown in the panel.
     auto* mp = mappingForZone(zone);
-    if (mp && m_ui.isPanelVisible("Mapping")) {
-        auto prevWarpMode = mp->warpMode;
-        m_warpEditor.render(*mp, m_maskEditMode, &m_mappings, zone.mappingIndex);
-
-        // Recreate warp FBO with/without depth when mode changes
-        if (mp->warpMode != prevWarpMode) {
-            bool needsDepth = (mp->warpMode == ViewportPanel::WarpMode::ObjMesh);
-            zone.warpFBO.create(zone.width, zone.height, needsDepth);
-        }
-
-        // Handle OBJ load request
-        if (m_warpEditor.wantsLoadOBJ()) {
-            std::string path = openFileDialog("3D Models\0*.obj;*.gltf;*.glb\0OBJ Files\0*.obj\0glTF Files\0*.gltf;*.glb\0All Files\0*.*\0");
-            if (!path.empty()) {
-                mp->objMeshWarp.loadModel(path);
-            }
-        }
-    }
 
     // Set viewport edit mode AFTER warp editor (which may toggle m_maskEditMode)
     {
@@ -2116,76 +2192,121 @@ void Application::renderUI() {
             zoneTextures.push_back(zp->warpFBO.textureId());
         }
 
-        // Stage panel: 3D viewport + "Setup" inspector (displays, projectors,
-        // surfaces). Inspector used to live inside Scenes/Stage tab — it
-        // belongs here with the 3D preview it configures, not alongside the
-        // layer-snapshot list.
-        if (m_ui.isPanelVisible("Stage")) {
+        // Stage panel — layout top→bottom: (1) 3D viewport, (2) Setup
+        // collapsible, (3) Scenes collapsible (merged in from the old Scenes
+        // tab). Viewport gets the bulk of the panel; Setup and Scenes sit
+        // below, each collapsible so the viewport breathes when closed.
+        if (m_ui.isPanelVisible("Stage") && UIManager::sShowStage) {
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
             ImGui::Begin("Stage");
-            if (ImGui::CollapsingHeader("Setup", ImGuiTreeNodeFlags_DefaultOpen)) {
-                m_stageView.renderSceneInspector(zoneTextures);
+            ImGui::PopStyleVar();
+
+            // Shared secondary-nav row (pills + zones + OUTPUT + composition
+            // chip + Fullscreen). Using the same helper as Canvas guarantees
+            // the element positions don't shift when switching workspaces.
+            {
+                auto monitors = ProjectorOutput::enumerateMonitors();
+                bool ndiAvail = false;
+#ifdef HAS_NDI
+                ndiAvail = NDIRuntime::instance().isAvailable();
+#endif
+                int editorMon = -1;
+                {
+                    int wx, wy;
+                    glfwGetWindowPos(m_window, &wx, &wy);
+                    for (size_t mi = 0; mi < monitors.size(); mi++) {
+                        if (wx >= monitors[mi].x && wx < monitors[mi].x + monitors[mi].width &&
+                            wy >= monitors[mi].y && wy < monitors[mi].y + monitors[mi].height) {
+                            editorMon = (int)mi;
+                            break;
+                        }
+                    }
+                }
+                m_viewportPanel.setEditorFullscreen(m_editorFullscreen);
+                m_viewportPanel.renderNavBar(true, &m_zones, &m_activeZone,
+                                             &monitors, ndiAvail, editorMon);
+                if (m_viewportPanel.wantsFullscreenToggle()) {
+                    m_viewportPanel.clearFullscreenSignal();
+                    toggleEditorFullscreen();
+                }
             }
-            // 3D viewport fills the remaining space below the inspector.
-            m_stageView.render(zoneTextures, nullptr);
+
+            // Pinned toolbar at the top of the Stage panel — drawn BEFORE the
+            // viewport child so it always stays visible as Setup / Scenes open
+            // or scroll below.
+            m_stageView.renderToolbar();
+            ImGui::Dummy(ImVec2(0, 4));
+
+            float panelH = ImGui::GetContentRegionAvail().y;
+            // Reserve space for the two collapsible sections. 40px covers the
+            // two section headers when both are closed; open sections scroll
+            // inside their own child regions below.
+            float reservedH = 80.0f;
+            float viewportH = std::max(200.0f, panelH - reservedH);
+
+            // --- 3D viewport (first) ---
+            ImGui::BeginChild("##StageViewport", ImVec2(0, viewportH), false);
+            m_stageView.renderUI(zoneTextures);
             if (m_stageView.wantsImport()) {
                 m_stageView.clearImportSignal();
-                std::string path = openFileDialog("3D Models\0*.obj;*.gltf;*.glb\0All Files\0*.*\0");
-                if (!path.empty()) {
-                    m_stageView.loadModel(path);
-                }
+                std::string path = openFileDialog(
+                    "3D Models\0*.obj;*.gltf;*.glb\0All Files\0*.*\0");
+                if (!path.empty()) m_stageView.loadModel(path);
             }
-            ImGui::End();
-        }
+            ImGui::EndChild();
 
-        // Scenes panel: named snapshots of the full layer stack (visibility,
-        // opacity, transform, blend mode). Click a scene to instantly recall
-        // that composition. Useful for live shows (cue a "build" / "drop" /
-        // "outro" look) and A/B-ing compositions while designing.
-        if (m_ui.isPanelVisible("Scenes")) {
-            ImGui::Begin("Scenes");
-            ImGui::TextDisabled("Snapshots of your layer stack.\n"
-                                "Save one, click to recall it instantly.");
-            ImGui::Spacing();
-
-            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.36f, 0.42f, 0.82f, 0.85f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.46f, 0.54f, 0.94f, 0.95f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.28f, 0.34f, 0.72f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-            if (ImGui::Button("+ Save current composition", ImVec2(-1, 0))) {
-                char nm[32];
-                snprintf(nm, sizeof(nm), "Scene %d", m_sceneManager.count() + 1);
-                m_sceneManager.saveScene(nm, m_layerStack);
+            // --- Setup (displays / projectors / surfaces) ---
+            if (ImGui::CollapsingHeader("Setup")) {
+                m_stageView.renderSceneInspector(zoneTextures);
             }
-            ImGui::PopStyleColor(4);
 
-            ImGui::Spacing();
-            int removeIdx = -1;
-            for (int s = 0; s < m_sceneManager.count(); s++) {
-                ImGui::PushID(30000 + s);
-                auto& scene = m_sceneManager[s];
-                float w = ImGui::GetContentRegionAvail().x - 24;
-                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.06f, 0.07f, 0.10f, 0.90f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 1.00f, 1.00f, 0.20f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.00f, 1.00f, 1.00f, 0.35f));
-                if (ImGui::Button(scene.name.c_str(), ImVec2(w, 0))) {
-                    m_sceneManager.recallScene(s, m_layerStack);
-                }
-                ImGui::PopStyleColor(3);
-                ImGui::SameLine();
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.3f, 0.3f, 0.7f));
-                if (ImGui::SmallButton("x")) removeIdx = s;
-                ImGui::PopStyleColor();
-                ImGui::PopID();
-            }
-            if (removeIdx >= 0) m_sceneManager.removeScene(removeIdx);
-
-            if (m_sceneManager.count() == 0) {
+            // --- Scenes (layer-stack snapshots) — merged in from the old
+            // Scenes tab. Save a composition, click a name to recall it.
+            if (ImGui::CollapsingHeader("Scenes")) {
+                ImGui::TextDisabled("Snapshots of your layer stack.");
                 ImGui::Spacing();
-                ImGui::TextDisabled("No scenes yet. Arrange your layers the way\n"
-                                    "you want them, then click Save.");
+
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1.0f, 1.0f, 1.0f, 0.10f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.25f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.0f, 1.0f, 1.0f, 0.40f));
+                ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+                if (ImGui::Button("+ Save current composition", ImVec2(-1, 0))) {
+                    char nm[32];
+                    snprintf(nm, sizeof(nm), "Scene %d", m_sceneManager.count() + 1);
+                    m_sceneManager.saveScene(nm, m_layerStack);
+                }
+                ImGui::PopStyleColor(4);
+
+                ImGui::Spacing();
+                int removeIdx = -1;
+                for (int s = 0; s < m_sceneManager.count(); s++) {
+                    ImGui::PushID(30000 + s);
+                    auto& scene = m_sceneManager[s];
+                    float w = ImGui::GetContentRegionAvail().x - 24;
+                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.06f, 0.07f, 0.10f, 0.90f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 1.00f, 1.00f, 0.20f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.00f, 1.00f, 1.00f, 0.35f));
+                    if (ImGui::Button(scene.name.c_str(), ImVec2(w, 0))) {
+                        m_sceneManager.recallScene(s, m_layerStack);
+                    }
+                    ImGui::PopStyleColor(3);
+                    ImGui::SameLine();
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.3f, 0.3f, 0.7f));
+                    if (ImGui::SmallButton("x")) removeIdx = s;
+                    ImGui::PopStyleColor();
+                    ImGui::PopID();
+                }
+                if (removeIdx >= 0) m_sceneManager.removeScene(removeIdx);
+                if (m_sceneManager.count() == 0) {
+                    ImGui::Spacing();
+                    ImGui::TextDisabled("No scenes yet — save one to recall later.");
+                }
             }
+
             ImGui::End();
         }
+
+        // (Old separate Scenes panel removed — merged into Stage above.)
     }
 
     // Projector settings are now rendered inline inside the Canvas tab
@@ -2383,20 +2504,65 @@ void Application::renderUI() {
             }
             ImGui::PopStyleColor(4);
         } else {
-            // Connected — show shader browser
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
+            // Connected — show shader browser. Color language: green means
+            // "connected" (a healthy state, not an alert). Disconnect is a
+            // calm muted pill — no red, since disconnecting is a normal user
+            // action, not an error. Refresh lives as a small icon right next
+            // to Disconnect to keep the row compact.
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.35f, 0.78f, 0.52f, 1.0f));
             ImGui::Text("Connected");
             ImGui::PopStyleColor();
-            ImGui::SameLine();
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-            ImGui::Text("(%d shaders)", (int)m_shaderClaw.shaders().size());
-            ImGui::PopStyleColor();
+            // (Shader count removed — the tile gallery below makes the number
+            //  obvious from scanning; a bare integer added noise.)
 
-            ImGui::SameLine(ImGui::GetContentRegionAvail().x - 50);
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.15f, 0.15f, 0.20f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.2f, 0.2f, 0.40f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 0.25f, 0.25f, 0.60f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+            // Right-aligned cluster: [⟳] Disconnect. Refresh icon sizes to
+            // the actual text-line height so it matches SmallButton's vertical
+            // footprint — previously `GetFrameHeight()` made it ~2x too tall.
+            const float kDiscW = ImGui::CalcTextSize("Disconnect").x
+                               + ImGui::GetStyle().FramePadding.x * 2.0f + 6.0f;
+            const float kIconH = ImGui::GetTextLineHeight();
+            float rightClusterW = kIconH + 6.0f + kDiscW;
+            ImGui::SameLine(ImGui::GetContentRegionAvail().x - rightClusterW);
+
+            // Refresh — small circular-arrow glyph, sized to match text row.
+            {
+                ImVec2 p0 = ImGui::GetCursorScreenPos();
+                bool clicked = ImGui::InvisibleButton("##SCRefresh", ImVec2(kIconH, kIconH));
+                bool hov = ImGui::IsItemHovered();
+                ImDrawList* d = ImGui::GetWindowDrawList();
+                ImU32 bg = hov ? IM_COL32(255, 255, 255, 28)
+                               : IM_COL32(255, 255, 255, 10);
+                d->AddRectFilled(p0, ImVec2(p0.x + kIconH, p0.y + kIconH), bg, 4.0f);
+
+                float cx = p0.x + kIconH * 0.5f;
+                float cy = p0.y + kIconH * 0.5f;
+                float r  = kIconH * 0.30f;
+                ImU32 fg = IM_COL32(235, 240, 250, 230);
+                const int seg = 20;
+                for (int s = 0; s < seg; s++) {
+                    float a0 = -0.35f * 3.14159f + (s    / (float)seg) * 5.2f;
+                    float a1 = -0.35f * 3.14159f + ((s+1)/ (float)seg) * 5.2f;
+                    d->AddLine(ImVec2(cx + cosf(a0)*r, cy + sinf(a0)*r),
+                               ImVec2(cx + cosf(a1)*r, cy + sinf(a1)*r),
+                               fg, 1.2f);
+                }
+                float ae = -0.35f * 3.14159f + 5.2f;
+                float ax = cx + cosf(ae) * r;
+                float ay = cy + sinf(ae) * r;
+                d->AddTriangleFilled(ImVec2(ax - 2.5f, ay - 2.5f),
+                                     ImVec2(ax + 2.5f, ay - 2.5f),
+                                     ImVec2(ax,        ay + 2.5f), fg);
+                if (hov) ImGui::SetTooltip("Refresh shader list");
+                if (clicked) m_shaderClaw.refreshManifest();
+            }
+
+            ImGui::SameLine(0, 6);
+
+            // Disconnect — neutral ghost pill (no alarming red).
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.20f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.0f, 1.0f, 1.0f, 0.35f));
+            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.72f, 0.76f, 0.82f, 1.0f));
             if (ImGui::SmallButton("Disconnect")) {
                 m_shaderClaw.disconnect();
                 m_scThumbnails.clear();
@@ -2406,21 +2572,8 @@ void Application::renderUI() {
             }
             ImGui::PopStyleColor(4);
 
-            // Refresh button
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.12f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.25f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.45f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-            if (ImGui::Button("Refresh", ImVec2(-1, 0))) {
-                m_shaderClaw.refreshManifest();
-            }
-            ImGui::PopStyleColor(4);
-
-            ImGui::Dummy(ImVec2(0, 4));
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            ImVec2 p = ImGui::GetCursorScreenPos();
-            float w = ImGui::GetContentRegionAvail().x;
-            dl->AddLine(ImVec2(p.x, p.y), ImVec2(p.x + w, p.y), IM_COL32(255, 255, 255, 40));
+            // (Old wide Refresh button + hairline divider removed — they added
+            // clutter without structural value.)
             ImGui::Dummy(ImVec2(0, 6));
 
             // Update animated preview shader (for hovered item)
@@ -2432,31 +2585,31 @@ void Application::renderUI() {
                 previewValid = (m_scPreviewFrame > 2);
             }
 
-            // Generate static thumbnails (one shader per frame to avoid lag)
+            // Generate static thumbnails (one shader per frame to avoid lag).
+            // Rendered at 160x160 for the gallery grid — bigger than the old
+            // 48x48 list cell so thumbnails read even at 2x DPI.
+            const int kThumbRes = 160;
             if (m_scThumbRenderer) {
-                m_scThumbRenderer->setResolution(48, 48);
+                m_scThumbRenderer->setResolution(kThumbRes, kThumbRes);
                 m_scThumbRenderer->update();
                 m_scThumbRenderFrame++;
                 if (m_scThumbRenderFrame > 3) {
-                    // Capture the rendered frame into a static texture
                     auto& entry = m_scThumbnails[m_scThumbRenderPath];
                     if (!entry.texture) entry.texture = std::make_shared<Texture>();
-                    // Read pixels from the shader FBO
-                    std::vector<uint8_t> pixels(48 * 48 * 4);
+                    std::vector<uint8_t> pixels(kThumbRes * kThumbRes * 4);
                     GLint prevFBO;
                     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
-                    // ShaderSource renders to its own FBO, read from its texture
                     GLuint thumbTex = m_scThumbRenderer->textureId();
                     if (thumbTex != 0) {
                         GLuint tempFBO;
                         glGenFramebuffers(1, &tempFBO);
                         glBindFramebuffer(GL_FRAMEBUFFER, tempFBO);
                         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, thumbTex, 0);
-                        glReadPixels(0, 0, 48, 48, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+                        glReadPixels(0, 0, kThumbRes, kThumbRes, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
                         glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
                         glDeleteFramebuffers(1, &tempFBO);
-                        entry.texture->createEmpty(48, 48);
-                        entry.texture->updateData(pixels.data(), 48, 48);
+                        entry.texture->createEmpty(kThumbRes, kThumbRes);
+                        entry.texture->updateData(pixels.data(), kThumbRes, kThumbRes);
                         entry.ready = true;
                     }
                     m_scThumbRenderer.reset();
@@ -2481,14 +2634,33 @@ void Application::renderUI() {
                 }
             }
 
-            // Shader list with always-visible thumbnails
+            // ─── Gallery grid ───────────────────────────────────────────
+            // Big thumbnail tiles laid out in a responsive grid (auto-sizes
+            // columns to panel width). Each tile = thumbnail + title. Click a
+            // thumbnail to add that shader as a layer; hover to see it
+            // animated. Works like a shader-picker gallery.
             std::string hoveredPath;
-            float thumbSize = 36.0f;
-            for (int i = 0; i < (int)m_shaderClaw.shaders().size(); i++) {
-                const auto& shader = m_shaderClaw.shaders()[i];
+            const float cellPad     = 8.0f;
+            const float labelH      = 22.0f;
+            const float minCellW    = 132.0f;
+            const float maxCellW    = 200.0f;
+            float availW = ImGui::GetContentRegionAvail().x;
+            // Figure out how many columns fit.
+            int cols = std::max(1, (int)((availW + cellPad) / (minCellW + cellPad)));
+            float cellW = (availW - cellPad * (cols - 1)) / (float)cols;
+            if (cellW > maxCellW) cellW = maxCellW;
+            float thumbSize = cellW;           // square thumbs, full cell width
+            float cellH = thumbSize + labelH;
+
+            const auto& shaders = m_shaderClaw.shaders();
+            for (int i = 0; i < (int)shaders.size(); i++) {
+                const auto& shader = shaders[i];
                 ImGui::PushID(2000 + i);
 
-                // Show thumbnail (animated if hovered, static otherwise)
+                // Layout: new row every `cols` items
+                if (i % cols != 0) ImGui::SameLine(0, cellPad);
+                ImVec2 cellPos = ImGui::GetCursorScreenPos();
+
                 bool isHoveredShader = (shader.fullPath == m_scPreviewPath);
                 GLuint thumbTex = 0;
                 if (isHoveredShader && previewValid && m_scPreview) {
@@ -2499,49 +2671,67 @@ void Application::renderUI() {
                         thumbTex = it->second.texture->id();
                 }
 
+                // Invisible hit button covering the whole cell — click = add, hover = preview.
+                bool clicked = ImGui::InvisibleButton("##tile", ImVec2(thumbSize, cellH));
+                bool hov = ImGui::IsItemHovered();
+                ImDrawList* d = ImGui::GetWindowDrawList();
+
+                // Tile background + subtle border (brightens on hover).
+                ImU32 tileBg   = hov ? IM_COL32(255, 255, 255, 22) : IM_COL32(255, 255, 255, 10);
+                ImU32 tileEdge = hov ? IM_COL32(255, 255, 255, 140) : IM_COL32(255, 255, 255, 50);
+                d->AddRectFilled(cellPos,
+                                 ImVec2(cellPos.x + thumbSize, cellPos.y + cellH),
+                                 tileBg, 6.0f);
+                d->AddRect(cellPos,
+                           ImVec2(cellPos.x + thumbSize, cellPos.y + cellH),
+                           tileEdge, 6.0f, 0, 1.0f);
+
+                // Thumbnail — clipped square at top of cell.
+                ImVec2 thumbMin(cellPos.x + 4, cellPos.y + 4);
+                ImVec2 thumbMax(cellPos.x + thumbSize - 4, cellPos.y + thumbSize - 4);
                 if (thumbTex) {
-                    ImGui::Image((ImTextureID)(intptr_t)thumbTex,
-                                 ImVec2(thumbSize, thumbSize), ImVec2(0, 1), ImVec2(1, 0));
-                    ImGui::SameLine();
+                    d->AddImageRounded((ImTextureID)(intptr_t)thumbTex,
+                                       thumbMin, thumbMax,
+                                       ImVec2(0, 1), ImVec2(1, 0),
+                                       IM_COL32(255, 255, 255, 255), 4.0f);
                 } else {
-                    // Placeholder
-                    ImVec2 p = ImGui::GetCursorScreenPos();
-                    ImGui::GetWindowDrawList()->AddRectFilled(p,
-                        ImVec2(p.x + thumbSize, p.y + thumbSize), IM_COL32(30, 35, 45, 255), 3.0f);
-                    ImGui::Dummy(ImVec2(thumbSize, thumbSize));
-                    ImGui::SameLine();
+                    d->AddRectFilled(thumbMin, thumbMax,
+                                     IM_COL32(25, 28, 38, 255), 4.0f);
+                    // Centered ellipsis to hint that a thumbnail is still cooking.
+                    const char* wait = "...";
+                    ImVec2 ws = ImGui::CalcTextSize(wait);
+                    d->AddText(ImVec2(thumbMin.x + (thumbMax.x - thumbMin.x - ws.x) * 0.5f,
+                                      thumbMin.y + (thumbMax.y - thumbMin.y - ws.y) * 0.5f),
+                               IM_COL32(120, 130, 150, 200), wait);
                 }
 
-                ImGui::BeginGroup();
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-                if (ImGui::SmallButton("+")) {
-                    loadShader(shader.fullPath);
+                // Title — truncated to fit the cell width.
+                std::string title = shader.title.empty() ? "(untitled)" : shader.title;
+                float titleMaxW = thumbSize - 16.0f;
+                ImVec2 ts = ImGui::CalcTextSize(title.c_str());
+                if (ts.x > titleMaxW) {
+                    // Naive truncation — trim until it fits + ellipsis.
+                    while (title.size() > 1 && ImGui::CalcTextSize((title + "...").c_str()).x > titleMaxW) {
+                        title.pop_back();
+                    }
+                    title += "...";
+                    ts = ImGui::CalcTextSize(title.c_str());
                 }
-                ImGui::PopStyleColor(4);
+                d->AddText(ImVec2(cellPos.x + (thumbSize - ts.x) * 0.5f,
+                                  cellPos.y + thumbSize - 2),
+                           isHoveredShader ? IM_COL32(255, 255, 255, 255)
+                                           : IM_COL32(220, 226, 235, 220),
+                           title.c_str());
 
-                ImGui::SameLine();
-                ImGui::PushStyleColor(ImGuiCol_Text, isHoveredShader
-                    ? ImVec4(1.0f, 1.0f, 1.0f, 1.0f)
-                    : ImVec4(0.85f, 0.88f, 0.92f, 1.0f));
-                ImGui::Text("%s", shader.title.c_str());
-                ImGui::PopStyleColor();
-
-                if (!shader.description.empty()) {
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.8f));
-                    std::string desc = shader.description;
-                    if (desc.length() > 40) desc = desc.substr(0, 37) + "...";
-                    ImGui::Text("%s", desc.c_str());
-                    ImGui::PopStyleColor();
-                }
-                ImGui::EndGroup();
-
-                // Load animated preview when hovered
-                if (ImGui::IsItemHovered()) {
+                if (hov) {
                     hoveredPath = shader.fullPath;
+                    if (!shader.description.empty()) {
+                        ImGui::SetTooltip("%s\n\n%s", shader.title.c_str(), shader.description.c_str());
+                    } else {
+                        ImGui::SetTooltip("%s", shader.title.c_str());
+                    }
                 }
+                if (clicked) loadShader(shader.fullPath);
 
                 ImGui::PopID();
             }
@@ -2825,13 +3015,42 @@ void Application::renderUI() {
     }  // end Etherea tab
 
     if (sourcesTabsOpen && ImGui::BeginTabItem("Particles")) {
-        ImGui::TextWrapped("1 million GPU particles - state-texture ping-pong, GL_POINTS instancing. Drop onto a layer.");
+        ImGui::TextWrapped("GPU particle system — drop onto a layer.");
         ImGui::Dummy(ImVec2(0, 8));
-        if (ImGui::Button("+ Add Particle Field (1M)", ImVec2(-1, 0))) {
+        if (ImGui::Button("+ Add Particle System", ImVec2(-1, 0))) {
             addParticles();
         }
         ImGui::EndTabItem();
     }
+
+#ifdef HAS_OPENCV
+    if (sourcesTabsOpen && ImGui::BeginTabItem("Camera")) {
+        ImGui::TextWrapped("Live webcam feed — drop onto a layer.");
+        ImGui::Dummy(ImVec2(0, 8));
+
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
+        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+        for (int i = 0; i < 4; i++) {
+            ImGui::PushID(9000 + i);
+            char label[32];
+            snprintf(label, sizeof(label), "+ Add Camera %d", i);
+            if (ImGui::Button(label, ImVec2(-1, 0))) {
+                addWebcam(i);
+            }
+            ImGui::PopID();
+        }
+        ImGui::PopStyleColor(4);
+
+        ImGui::Dummy(ImVec2(0, 6));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.60f, 0.68f, 1.0f));
+        ImGui::TextWrapped("Camera 0 is typically the built-in webcam. If a camera is already in use by the scene scanner it cannot be opened a second time.");
+        ImGui::PopStyleColor();
+
+        ImGui::EndTabItem();
+    }
+#endif
 
     // Capture tab (moved from position 1 to 4)
     if (sourcesTabsOpen && ImGui::BeginTabItem("Capture")) {
@@ -2943,116 +3162,15 @@ void Application::renderUI() {
     if (sourcesTabsOpen) ImGui::EndTabBar();
     ImGui::End();
 
-#ifdef HAS_FFMPEG
-    if (m_ui.isPanelVisible("Stream")) {
-    ImGui::Begin("Stream");
-    {
-        // Stream settings only — actions are in the transport bar
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-        ImGui::Text("YouTube Stream Key");
-        ImGui::PopStyleColor();
-        ImGui::SetNextItemWidth(-1);
-        ImGui::InputText("##StreamKey", m_streamKeyBuf, sizeof(m_streamKeyBuf),
-                         ImGuiInputTextFlags_Password);
-
-        static const char* aspectNames[] = { "16:9", "4:3", "16:10", "Source" };
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-        ImGui::Text("Aspect");
-        ImGui::PopStyleColor();
-        ImGui::SameLine(58);
-        ImGui::SetNextItemWidth(-1);
-        ImGui::Combo("##Aspect", &m_streamAspect, aspectNames, 4);
-
-        if (m_rtmpOutput.isActive()) {
-            ImGui::Dummy(ImVec2(0, 4));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
-            int secs = (int)m_rtmpOutput.uptimeSeconds();
-            ImGui::Text("LIVE  %02d:%02d:%02d", secs / 3600, (secs / 60) % 60, secs % 60);
-            ImGui::PopStyleColor();
-            if (m_rtmpOutput.droppedFrames() > 0) {
-                ImGui::SameLine();
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.6f, 0.2f, 1.0f));
-                ImGui::Text("(%d dropped)", m_rtmpOutput.droppedFrames());
-                ImGui::PopStyleColor();
-            }
-        } else {
-            ImGui::Dummy(ImVec2(0, 4));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.35f, 0.38f, 0.44f, 1.0f));
-            ImGui::TextWrapped("Use the transport bar below to go live or record.");
-            ImGui::PopStyleColor();
-        }
-    }
-    ImGui::End();
-    }  // end Stream visibility guard
-#endif
+// (Stream panel removed — stream key + aspect now live in the GO LIVE
+//  popup on the timeline transport bar.)
 
     // Audio panel — BPM, device, levels, gain controls
     if (m_ui.isPanelVisible("Audio")) {
-    ImGui::Begin("Audio");
+    ImGui::Begin("        ###Audio");
     {
-        // --- BPM (moved from Properties panel) ---
-        {
-            float currentBPM = m_bpmSync.bpm();
-            float w = ImGui::GetContentRegionAvail().x;
-
-            // Beat indicator dots + BPM text
-            {
-                ImDrawList* dl = ImGui::GetWindowDrawList();
-                ImVec2 p = ImGui::GetCursorScreenPos();
-                float dotY = p.y + 8;
-                for (int b = 0; b < 4; b++) {
-                    float dotCX = p.x + b * 16.0f;
-                    int beatInBar = m_bpmSync.beatCount() % 4;
-                    bool isCurrent = (b == beatInBar) && currentBPM > 0;
-                    float pulse = isCurrent ? m_bpmSync.beatPulse() : 0.0f;
-                    float r = 4.0f + pulse * 2.0f;
-                    dl->AddCircleFilled(ImVec2(dotCX + 6, dotY), r,
-                                        isCurrent ? IM_COL32(0, 220, 255, (int)(140 + pulse * 115))
-                                                  : IM_COL32(50, 60, 80, 120));
-                }
-                char bpmBuf[16];
-                if (currentBPM > 0) snprintf(bpmBuf, sizeof(bpmBuf), "%.1f BPM", currentBPM);
-                else snprintf(bpmBuf, sizeof(bpmBuf), "--- BPM");
-                dl->AddText(ImVec2(p.x + 74, p.y + 2),
-                            currentBPM > 0 ? IM_COL32(255, 255, 255, 255) : IM_COL32(100, 115, 140, 180),
-                            bpmBuf);
-                ImGui::Dummy(ImVec2(w, 18));
-            }
-
-            // TAP + BPM input + Reset
-            {
-                float btnW = (w - ImGui::GetStyle().ItemSpacing.x * 2) / 3.0f;
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.10f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.25f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.40f));
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-                if (ImGui::Button("TAP", ImVec2(btnW, 0))) m_bpmSync.tap();
-                ImGui::PopStyleColor(4);
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(btnW);
-                float bpmVal = currentBPM;
-                if (ImGui::DragFloat("##BPMVal", &bpmVal, 0.5f, 0.0f, 300.0f, "%.0f BPM"))
-                    m_bpmSync.setBPM(bpmVal);
-                ImGui::SameLine();
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.05f, 0.05f, 0.15f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.1f, 0.1f, 0.3f));
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.35f, 0.35f, 0.8f));
-                if (ImGui::Button("Reset", ImVec2(btnW, 0))) {
-                    m_bpmSync.setBPM(0);
-                    m_bpmSync.resetPhase();
-                }
-                ImGui::PopStyleColor(3);
-            }
-            ImGui::Dummy(ImVec2(0, 6));
-            ImGui::Separator();
-            ImGui::Dummy(ImVec2(0, 4));
-        }
-
-        // --- Device selection ---
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-        ImGui::Text("Input");
-        ImGui::PopStyleColor();
-
+        // --- Device selection: [ Input ] [ combo ................ ] [ Refresh ]
+        //     Single-line layout — label + combo + refresh all share a row.
 #ifdef HAS_FFMPEG
         if (m_audioDevices.empty()) {
             m_audioDevices = VideoRecorder::enumerateAudioDevices();
@@ -3061,7 +3179,20 @@ void Application::renderUI() {
         if (m_selectedAudioDevice >= 0 && m_selectedAudioDevice < (int)m_audioDevices.size()) {
             currentName = m_audioDevices[m_selectedAudioDevice].name.c_str();
         }
-        ImGui::SetNextItemWidth(-1);
+
+        ImGui::AlignTextToFramePadding();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+        ImGui::Text("Input");
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+
+        // Reserve room for the Refresh button at the right, combo fills the rest.
+        float refreshW = ImGui::CalcTextSize("Refresh").x
+                       + ImGui::GetStyle().FramePadding.x * 2.0f;
+        float availRow = ImGui::GetContentRegionAvail().x;
+        float comboW   = availRow - refreshW - ImGui::GetStyle().ItemSpacing.x;
+        if (comboW < 80.0f) comboW = 80.0f;
+        ImGui::SetNextItemWidth(comboW);
         if (ImGui::BeginCombo("##AudioInput", currentName)) {
             if (ImGui::Selectable("System Audio (loopback)", m_selectedAudioDevice == -1)) {
                 m_selectedAudioDevice = -1;
@@ -3077,10 +3208,16 @@ void Application::renderUI() {
             }
             ImGui::EndCombo();
         }
+        ImGui::SameLine();
         if (ImGui::SmallButton("Refresh##audio")) {
             m_audioDevices = VideoRecorder::enumerateAudioDevices();
         }
 #else
+        ImGui::AlignTextToFramePadding();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+        ImGui::Text("Input");
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
         ImGui::TextDisabled("Audio device selection requires FFmpeg build");
 #endif
 
@@ -3164,20 +3301,27 @@ void Application::renderUI() {
         ImGui::Text("Gain");
         ImGui::PopStyleColor();
 
-        ImGui::SetNextItemWidth(-1);
-        ImGui::SliderFloat("Input##masterGain", &m_audioAnalyzer.inputGain(), 0.0f, 10.0f, "%.2fx");
-        ImGui::SetNextItemWidth(-1);
-        ImGui::SliderFloat("Bass##bGain", &m_audioAnalyzer.bassGain(), 0.0f, 5.0f, "%.2fx");
-        ImGui::SetNextItemWidth(-1);
-        ImGui::SliderFloat("Low##lmGain", &m_audioAnalyzer.lowMidGain(), 0.0f, 5.0f, "%.2fx");
-        ImGui::SetNextItemWidth(-1);
-        ImGui::SliderFloat("High##hmGain", &m_audioAnalyzer.highMidGain(), 0.0f, 5.0f, "%.2fx");
-        ImGui::SetNextItemWidth(-1);
-        ImGui::SliderFloat("Treble##tGain", &m_audioAnalyzer.trebleGain(), 0.0f, 5.0f, "%.2fx");
+        // Labeled gain rows — label in a fixed left column, slider fills
+        // the remainder. Previously the label rendered AFTER the slider
+        // (ImGui default) and got clipped off the panel's right edge.
+        auto gainRow = [](const char* label, const char* id, float* v,
+                           float minV, float maxV, const char* fmt) {
+            ImGui::AlignTextToFramePadding();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.60f, 0.63f, 0.70f, 1.0f));
+            ImGui::Text("%s", label);
+            ImGui::PopStyleColor();
+            ImGui::SameLine(64);
+            ImGui::SetNextItemWidth(-1);
+            ImGui::SliderFloat(id, v, minV, maxV, fmt);
+        };
+        gainRow("Input",  "##masterGain", &m_audioAnalyzer.inputGain(),   0.0f, 10.0f, "%.2fx");
+        gainRow("Bass",   "##bGain",      &m_audioAnalyzer.bassGain(),    0.0f,  5.0f, "%.2fx");
+        gainRow("Low",    "##lmGain",     &m_audioAnalyzer.lowMidGain(),  0.0f,  5.0f, "%.2fx");
+        gainRow("High",   "##hmGain",     &m_audioAnalyzer.highMidGain(), 0.0f,  5.0f, "%.2fx");
+        gainRow("Treble", "##tGain",      &m_audioAnalyzer.trebleGain(),  0.0f,  5.0f, "%.2fx");
 
         ImGui::Dummy(ImVec2(0, 4));
-        ImGui::SetNextItemWidth(-1);
-        ImGui::SliderFloat("Gate##nGate", &m_audioAnalyzer.noiseGate(), 0.0f, 0.5f, "%.2f");
+        gainRow("Gate", "##nGate", &m_audioAnalyzer.noiseGate(), 0.0f, 0.5f, "%.2f");
 
         if (ImGui::SmallButton("Reset Gains")) {
             m_audioAnalyzer.inputGain() = 1.0f;
@@ -3288,13 +3432,72 @@ void Application::renderUI() {
             ImGui::PopStyleColor();
         }
 #endif
+
+        // --- BPM (bottom of panel — secondary to the metering and gain
+        //     controls above, which change far more often during a session).
+        ImGui::Dummy(ImVec2(0, 8));
+        ImGui::Separator();
+        ImGui::Dummy(ImVec2(0, 6));
+        {
+            float currentBPM = m_bpmSync.bpm();
+            float w = ImGui::GetContentRegionAvail().x;
+
+            // Beat indicator dots + BPM text
+            {
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                ImVec2 p = ImGui::GetCursorScreenPos();
+                float dotY = p.y + 8;
+                for (int b = 0; b < 4; b++) {
+                    float dotCX = p.x + b * 16.0f;
+                    int beatInBar = m_bpmSync.beatCount() % 4;
+                    bool isCurrent = (b == beatInBar) && currentBPM > 0;
+                    float pulse = isCurrent ? m_bpmSync.beatPulse() : 0.0f;
+                    float r = 4.0f + pulse * 2.0f;
+                    dl->AddCircleFilled(ImVec2(dotCX + 6, dotY), r,
+                                        isCurrent ? IM_COL32(0, 220, 255, (int)(140 + pulse * 115))
+                                                  : IM_COL32(50, 60, 80, 120));
+                }
+                char bpmBuf[16];
+                if (currentBPM > 0) snprintf(bpmBuf, sizeof(bpmBuf), "%.1f BPM", currentBPM);
+                else snprintf(bpmBuf, sizeof(bpmBuf), "--- BPM");
+                dl->AddText(ImVec2(p.x + 74, p.y + 2),
+                            currentBPM > 0 ? IM_COL32(255, 255, 255, 255) : IM_COL32(100, 115, 140, 180),
+                            bpmBuf);
+                ImGui::Dummy(ImVec2(w, 18));
+            }
+
+            // TAP + BPM input + Reset
+            {
+                float btnW = (w - ImGui::GetStyle().ItemSpacing.x * 2) / 3.0f;
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.10f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.25f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.40f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+                if (ImGui::Button("TAP", ImVec2(btnW, 0))) m_bpmSync.tap();
+                ImGui::PopStyleColor(4);
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(btnW);
+                float bpmVal = currentBPM;
+                if (ImGui::DragFloat("##BPMVal", &bpmVal, 0.5f, 0.0f, 300.0f, "%.0f BPM"))
+                    m_bpmSync.setBPM(bpmVal);
+                ImGui::SameLine();
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.05f, 0.05f, 0.15f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.1f, 0.1f, 0.3f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.35f, 0.35f, 0.8f));
+                if (ImGui::Button("Reset", ImVec2(btnW, 0))) {
+                    m_bpmSync.setBPM(0);
+                    m_bpmSync.resetPhase();
+                }
+                ImGui::PopStyleColor(3);
+            }
+        }
     }
     ImGui::End();
     }  // end Audio visibility guard
 
     // MIDI panel — device selection + mapping
     if (m_ui.isPanelVisible("MIDI")) {
-    ImGui::Begin("MIDI");
+    ImGui::Begin("        ###MIDI");
     {
         // Device selection
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
@@ -3470,6 +3673,11 @@ void Application::renderUI() {
         renderTimelinePanel();
     }
 
+    // Overlay inspector tab icons (Properties/Mapping/Audio/MIDI) after all
+    // panels have rendered so the icon painting lands on top of ImGui's
+    // native tab bar text.
+    m_ui.drawInspectorTabIcons();
+
     // Scenes panel now renders in the Stage-view scope above (where zoneTextures is live).
 }
 
@@ -3515,8 +3723,11 @@ void Application::startTimelineExport() {
 // Interactions: click ruler to seek, drag playhead to scrub, drag clip body to
 // move, drag clip edges to trim, right-click track for +Clip at cursor.
 void Application::renderTimelinePanel() {
-    // Generous inner padding so the ruler and tracks don't kiss the window edges.
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(20, 14));
+    // Tight edge margins — left 12px matches the Canvas/Stage nav indent,
+    // vertical 16px keeps the transport row centred inside the minimised
+    // height (FrameHeight + 32). Previously 20px left caused play/stop to
+    // float ~40px from the window edge while REC hugged the right.
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 16));
     // NoCollapse disables ImGui's default title-bar chevron — we render our
     // own minimize button at the far right of the transport row instead.
     ImGui::Begin("Timeline", nullptr, ImGuiWindowFlags_NoCollapse);
@@ -3526,24 +3737,61 @@ void Application::renderTimelinePanel() {
     // don't obey SetNextWindowSize, so we reach into the dock builder and
     // resize the containing node directly. Previous expanded height is saved
     // so "expand" restores whatever height the user had dragged to.
+    //
+    // Expanded-height auto-fit: if the user never dragged the splitter, we
+    // size the node to fit the current content (transport + ruler + tracks +
+    // audio lane) so empty space below the audio waveform doesn't render as
+    // a dead black strip. Once they drag, that override wins until the next
+    // minimize cycle.
+    // File-scope static lives at the bottom of the function too (measured
+    // there). Forward-declared here so both ends share the same storage.
+    static float s_tlMeasuredContentH = 0.0f;
     {
         static bool   s_prevMinimized = false;
         static ImVec2 s_savedExpanded(0, 0);
+        // Tab bar is hidden via NoTabBar, so we don't reserve space for it.
+        // Minimised height = one transport row + 16px even top/bottom
+        // padding (matches the WindowPadding push above — no dead strip).
+        const float tabBarH = ImGui::GetFrameHeight() + 4.0f;
+        const float minH = ImGui::GetFrameHeight() + 32.0f; // transport-only
+        const float fitH = (s_tlMeasuredContentH > 0.0f)
+                           ? s_tlMeasuredContentH + tabBarH
+                           : 160.0f;
         if (m_timelineMinimized != s_prevMinimized) {
             ImGuiID dockId = ImGui::GetWindowDockID();
             if (ImGuiDockNode* node = ImGui::DockBuilderGetNode(dockId)) {
                 if (m_timelineMinimized) {
-                    s_savedExpanded = node->Size;
-                    float minH = ImGui::GetFrameHeightWithSpacing() + 24.0f;
+                    // Only save a meaningful expanded height — if the panel
+                    // was already tiny for some reason (no tracks on launch
+                    // etc.), falling back to fitH on next expand is better
+                    // than restoring to a useless 50px sliver.
+                    if (node->Size.y > minH + 40.0f) s_savedExpanded = node->Size;
                     ImGui::DockBuilderSetNodeSize(dockId, ImVec2(node->Size.x, minH));
                 } else {
-                    float restoreH = (s_savedExpanded.y > 80.0f)
-                                   ? s_savedExpanded.y
-                                   : ImGui::GetMainViewport()->Size.y * 0.28f;
+                    // Expand: pick the largest of (last-dragged, fit-to-
+                    // content, a sensible default) so the panel always pops
+                    // up visibly even if the saved height was stale.
+                    float restoreH = s_savedExpanded.y;
+                    if (fitH     > restoreH) restoreH = fitH;
+                    if (220.0f   > restoreH) restoreH = 220.0f;
                     ImGui::DockBuilderSetNodeSize(dockId, ImVec2(node->Size.x, restoreH));
                 }
             }
             s_prevMinimized = m_timelineMinimized;
+        } else {
+            // Every frame: if we have a measured content height and the node
+            // is close to our last-known target, snap it to the fresh measure.
+            // This kills the dead black strip below the audio lane AND follows
+            // layer add/remove without dragging.
+            ImGuiID dockId = ImGui::GetWindowDockID();
+            if (ImGuiDockNode* node = ImGui::DockBuilderGetNode(dockId)) {
+                static float s_lastFitH = 0.0f;
+                float targetH = m_timelineMinimized ? minH : fitH;
+                if (s_lastFitH > 0.0f && std::abs(node->Size.y - s_lastFitH) < 8.0f) {
+                    ImGui::DockBuilderSetNodeSize(dockId, ImVec2(node->Size.x, targetH));
+                }
+                s_lastFitH = fitH;
+            }
         }
     }
 
@@ -3630,12 +3878,25 @@ void Application::renderTimelinePanel() {
                 if (!hits.empty()) m_timeline.sortTrack(tr.layerId);
             }
         }
+        // M = drop a marker at the playhead (scripted-show cue point).
+        if (ImGui::IsKeyPressed(ImGuiKey_M)) {
+            m_undoStack.pushState(m_layerStack, m_selectedLayer, m_timeline);
+            m_timeline.addMarker(m_timeline.playhead(), "Cue");
+        }
+        // (Backspace/Delete handler for selected clip lives later in the
+        //  function where s_ctxClipId is in scope.)
     }
 
     // --- Layout constants (shared with ruler + tracks so everything aligns) ---
     const float labelW   = 120.0f;   // track-name / mute-solo column width
     const float trackH   = 36.0f;
     const float rulerH   = 20.0f;
+
+    // (Timeline tab bar is hidden via ImGuiDockNodeFlags_NoTabBar — no
+    // minimise/expand chevron rendered here. m_timelineMinimized is still
+    // honoured below via the transport row keeping its height while the
+    // ruler/track rows are collapsed when the user sets the flag some
+    // other way, e.g. future keyboard shortcut.)
 
     // --- Transport row — shifted to align with the ruler region so the timeline
     //     reads as one vertical stack instead of ruler-indented-from-transport.
@@ -3701,17 +3962,17 @@ void Application::renderTimelinePanel() {
 
         // Transport sits flush-left against the window padding — same left edge
         // as the REC / output-route buttons in the bottom transport bar.
-        // Minimize toggle — uses the same iconBtn as play/stop/loop to stay in
-        // the same visual family. kind 6/7 draws a tiny down/up chevron instead
-        // of a Unicode character (which rendered as "?" when the font lacked
-        // the glyph — see prior screenshot).
-        if (iconBtn("##TLMin", m_timelineMinimized ? 7 : 6, false)) {
+        // Minimize button moved out of this row — it lives at the top-left of
+        // the panel, visually adjacent to the "Timeline" tab header.
+        // Expand / collapse the panel. When minimized, the chevron points up
+        // (click to reveal tracks); when expanded, it points down (click to
+        // collapse to the transport-only strip). This is the only visible
+        // affordance for the minimize state — without it new users have no way
+        // to find their tracks since the timeline ships minimized.
+        if (iconBtn("##TimelineMinimize", m_timelineMinimized ? 7 : 6))
             m_timelineMinimized = !m_timelineMinimized;
-        }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip(
-            m_timelineMinimized ? "Expand timeline (show tracks)"
-                                : "Minimize timeline (transport only)");
-        ImGui::SameLine(0, 8);
+        ImGui::SameLine();
+
         bool playing = m_timeline.isPlaying();
         if (iconBtn("##PlayPause", playing ? 1 : 0, playing)) m_timeline.togglePlay();
         ImGui::SameLine();
@@ -3720,14 +3981,61 @@ void Application::renderTimelinePanel() {
         bool loop = m_timeline.looping();
         if (iconBtn("##Loop", 3, loop)) m_timeline.setLooping(!loop);
 
+        // Timecode — click-to-seek playhead, double-click to edit total length.
+        // Hit-target is FrameHeight tall so vertical center matches the icon
+        // buttons and framed widgets on the rest of the row.
         ImGui::SameLine(0, 16);
-        ImGui::AlignTextToFramePadding();  // baseline with DragFloat/buttons
         double ph = m_timeline.playhead();
         int pm = (int)ph / 60, ps = (int)ph % 60;
         double dur = m_timeline.duration();
         int dm = (int)dur / 60, ds = (int)dur % 60;
-        ImGui::Text("%02d:%02d / %02d:%02d", pm, ps, dm, ds);
+        char tcBuf[32];
+        snprintf(tcBuf, sizeof(tcBuf), "%02d:%02d / %02d:%02d", pm, ps, dm, ds);
+        ImVec2 tcTextSize = ImGui::CalcTextSize(tcBuf);
+        float  tcFrameH   = ImGui::GetFrameHeight();
+        ImVec2 tcPos      = ImGui::GetCursorScreenPos();
+        bool tcClicked = ImGui::InvisibleButton("##TCEdit",
+                                                ImVec2(tcTextSize.x, tcFrameH));
+        bool tcDouble  = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
+        // Draw text vertically centered inside the FrameHeight-tall hit box.
+        ImGui::GetWindowDrawList()->AddText(
+            ImVec2(tcPos.x, tcPos.y + (tcFrameH - tcTextSize.y) * 0.5f),
+            ImGui::IsItemHovered() ? IM_COL32(255, 255, 255, 255)
+                                   : IM_COL32(220, 226, 235, 235),
+            tcBuf);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+            "Double-click to edit timeline duration.");
+        if (tcDouble) ImGui::OpenPopup("##DurEdit");
+        (void)tcClicked;
 
+        // Inline duration editor — opens beneath the timecode on double-click.
+        if (ImGui::BeginPopup("##DurEdit")) {
+            ImGui::TextDisabled("Timeline duration");
+            ImGui::Separator();
+            static int s_mm = 0, s_ss = 0;
+            // Seed from the live duration each time the popup opens fresh.
+            if (!ImGui::IsItemVisible() && !ImGui::IsAnyItemFocused()) {
+                s_mm = dm; s_ss = ds;
+            }
+            ImGui::SetNextItemWidth(50);
+            ImGui::InputInt("##MM", &s_mm, 0); ImGui::SameLine(); ImGui::TextUnformatted("m");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(50);
+            ImGui::InputInt("##SS", &s_ss, 0); ImGui::SameLine(); ImGui::TextUnformatted("s");
+            if (ImGui::Button("Set", ImVec2(-1, 0))) {
+                if (s_mm < 0) s_mm = 0; if (s_ss < 0) s_ss = 0;
+                if (s_ss > 59) s_ss = 59;
+                double d = s_mm * 60.0 + s_ss;
+                if (d < 1.0) d = 1.0;
+                m_timeline.setDuration(d);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+
+        // `Dur 60s` numeric field stays as a secondary way to adjust duration.
+        // With ConfigDragClickToInputText=true, a click on it becomes a text
+        // edit, so users can also type here without touching the timecode.
         ImGui::SameLine(0, 16);
         ImGui::AlignTextToFramePadding();
         ImGui::TextDisabled("Dur");
@@ -3759,261 +4067,261 @@ void Application::renderTimelinePanel() {
             }
         }
 
-        // ── REC / audio / GO LIVE cluster: right-anchored AFTER the collapse
-        //    button. We reserve its width first so Export + TLCollapse can be
-        //    positioned to the LEFT of the cluster.
+        // ── Transport row layout (left → right):
+        //   [play/stop/loop] [time] [dur] [zoom]
+        //   ... [AUDIO COMBO][METER]  (centered together as one group)
+        //   ... [WORK AREA (click-to-edit)] [REC]
+        //
+        // REC is the single record/export action — it starts a timeline export
+        // (seeks to Work Area start, plays + records, auto-stops at Work Area
+        // end). It lives right next to the Work Area readout so "this time
+        // range → record this" reads as a single workflow unit.
 #ifdef HAS_FFMPEG
-        const float kRecBtnW    = 64.0f;
-        const float kAudioComboW= 150.0f;
-        const float kMeterW     = 100.0f;
-        const float kGoLiveBtnW = 80.0f;
-        const float kClusterGap = 10.0f;
-        const float kClusterBtnPreGap = 14.0f; // gap between TLCollapse and cluster
-        const float kRecClusterW = kRecBtnW + kClusterGap + kAudioComboW
-                                 + kClusterGap + kMeterW + kClusterGap + kGoLiveBtnW;
-#else
-        const float kRecClusterW = 0.0f;
-        const float kClusterBtnPreGap = 0.0f;
-#endif
+        const float kRecBtnW     = 64.0f;
+        const float kAudioComboW = 150.0f;
+        const float kMeterW      = 100.0f;
+        const float kGap         = 10.0f;
 
-        // Right-aligned: Work Area readout + Export button.
-        // Export renders the Work Area (or full duration) to an .mp4 —
-        // seeks to the in-point, plays, auto-stops at the out-point.
+        auto& zone = activeZone();
+        float frameH = ImGui::GetFrameHeight();
+        updateAudioMeter();
+        (void)zone;
+
+        auto pillBtn = [&](const char* id, const char* label, float w,
+                           ImU32 borderCol, ImU32 textCol, bool enabled = true) -> bool {
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            ImVec2 size(w, frameH);
+            if (!enabled) ImGui::BeginDisabled();
+            bool clicked = ImGui::InvisibleButton(id, size);
+            bool hov = ImGui::IsItemHovered();
+            if (!enabled) ImGui::EndDisabled();
+            ImDrawList* d = ImGui::GetWindowDrawList();
+            ImU32 bg = hov ? IM_COL32(255, 255, 255, 30)
+                           : IM_COL32(255, 255, 255, 15);
+            d->AddRectFilled(p, ImVec2(p.x + size.x, p.y + size.y), bg, 5.0f);
+            d->AddRect(p, ImVec2(p.x + size.x, p.y + size.y), borderCol, 5.0f, 0, 1.0f);
+            ImVec2 ts = ImGui::CalcTextSize(label);
+            d->AddText(ImVec2(p.x + (size.x - ts.x) * 0.5f,
+                              p.y + (size.y - ts.y) * 0.5f),
+                       textCol, label);
+            return clicked && enabled;
+        };
+
+        const ImU32 kAccentDim = IM_COL32(255, 255, 255, 80);
+        const ImU32 kRed       = IM_COL32(255, 70, 70, 255);
+        const ImU32 kRedDim    = IM_COL32(255, 70, 70, 140);
+        float timeNow = (float)ImGui::GetTime();
+
+        bool recording  = m_recorder.isActive();
+        bool exporting  = m_timelineExporting;
+
+        // Refresh audio device enumeration every 3s so the combo stays current.
+        {
+            static double lastEnum = 0;
+            double nowT = glfwGetTime();
+            if (m_audioDevices.empty() || nowT - lastEnum > 3.0) {
+                lastEnum = nowT;
+                m_audioDevices = VideoRecorder::enumerateAudioDevices();
+                m_outputDevices.clear();
+                for (auto& dv : m_audioDevices) {
+                    if (!dv.isCapture) m_outputDevices.push_back(dv);
+                }
+            }
+        }
+
+        // Work Area label (pre-compute so right-anchored width is known).
+        double wa0 = m_timeline.workAreaStart();
+        double wa1 = m_timeline.workAreaEnd();
+        int wm0 = (int)wa0 / 60, ws0 = (int)wa0 % 60;
+        int wm1 = (int)wa1 / 60, ws1 = (int)wa1 % 60;
+        char waLbl[48];
+        snprintf(waLbl, sizeof(waLbl), "%d:%02d-%d:%02d", wm0, ws0, wm1, ws1);
+        float waW = ImGui::CalcTextSize(waLbl).x;
+
+        // Centered group: [Audio combo][Meter] — treated as one block so both
+        // sit in the middle of the transport row, with the meter reading next
+        // to the source that drives it.
+        float centerGroupW = kAudioComboW + kGap + kMeterW;
+        std::string audioPreview = m_mixerEnabled ? "Mixer" : "System Audio";
+        if (!m_mixerEnabled && m_selectedAudioDevice >= 0 &&
+            m_selectedAudioDevice < (int)m_audioDevices.size()) {
+            audioPreview = m_audioDevices[m_selectedAudioDevice].name;
+            if (audioPreview.length() > 20) audioPreview = audioPreview.substr(0, 17) + "...";
+        }
+        ImGui::SameLine(0, 0);
+        float contentMaxX = ImGui::GetWindowContentRegionMax().x;
+        float contentMinX = ImGui::GetWindowContentRegionMin().x;
+        float centerX = (contentMinX + contentMaxX) * 0.5f - centerGroupW * 0.5f;
+        if (centerX > ImGui::GetCursorPosX()) ImGui::SetCursorPosX(centerX);
+        ImGui::SetNextItemWidth(kAudioComboW);
+        if (ImGui::BeginCombo("##AudioSrc", audioPreview.c_str())) {
+            if (ImGui::Selectable("System Audio", !m_mixerEnabled && m_selectedAudioDevice == -1 && m_audioAnalyzer.wantsSystemAudio())) {
+                if (m_mixerEnabled) { m_audioMixer.stop(); m_audioAnalyzer.setExternalFeed(false); m_mixerEnabled = false; }
+                m_selectedAudioDevice = -1;
+                m_audioAnalyzer.setWantsSystemAudio(true);
+            }
+            for (int i = 0; i < (int)m_audioDevices.size(); i++) {
+                ImGui::PushID(i);
+                if (ImGui::Selectable(m_audioDevices[i].name.c_str(), !m_mixerEnabled && m_selectedAudioDevice == i)) {
+                    if (m_mixerEnabled) { m_audioMixer.stop(); m_audioAnalyzer.setExternalFeed(false); m_mixerEnabled = false; }
+                    m_selectedAudioDevice = i;
+                    m_audioAnalyzer.setWantsSystemAudio(false);
+                }
+                ImGui::PopID();
+            }
+            ImGui::Separator();
+            if (ImGui::Selectable("Mixer", m_mixerEnabled)) {
+                if (!m_mixerEnabled) {
+                    m_mixerEnabled = true;
+                    m_audioAnalyzer.setExternalFeed(true);
+                    m_audioAnalyzer.setWantsSystemAudio(true);
+                    if (m_audioMixer.inputCount() == 0)
+                        m_audioMixer.addInput("", "System Audio", false);
+                    m_audioMixer.start();
+                }
+            }
+            ImGui::EndCombo();
+        }
+
+        // Stereo level meter — sits immediately to the right of the audio combo.
+        ImGui::SameLine(0, kGap);
+        {
+            ImVec2 mpos = ImGui::GetCursorScreenPos();
+            float meterH = 14.0f;
+            float meterY = mpos.y + (frameH - meterH) * 0.5f;
+            float gap = 2.0f, singleH = (meterH - gap) * 0.5f;
+            ImU32 trackBg = IM_COL32(20, 24, 35, 200);
+            ImDrawList* d = ImGui::GetWindowDrawList();
+            d->AddRectFilled(ImVec2(mpos.x, meterY),
+                             ImVec2(mpos.x + kMeterW, meterY + singleH), trackBg, 2.0f);
+            d->AddRectFilled(ImVec2(mpos.x, meterY + singleH + gap),
+                             ImVec2(mpos.x + kMeterW, meterY + meterH), trackBg, 2.0f);
+            float fillL = m_audioLevelSmoothL * kMeterW;
+            float fillR = m_audioLevelSmoothR * kMeterW;
+            d->AddRectFilled(ImVec2(mpos.x, meterY),
+                             ImVec2(mpos.x + fillL, meterY + singleH), kAccentDim, 2.0f);
+            d->AddRectFilled(ImVec2(mpos.x, meterY + singleH + gap),
+                             ImVec2(mpos.x + fillR, meterY + meterH), kAccentDim, 2.0f);
+            ImGui::Dummy(ImVec2(kMeterW, frameH));
+        }
+
+        // Right-anchored cluster: [Work Area click-to-edit] [REC] [GO LIVE].
+        // REC sits next to the Work Area time so "this range → record it"
+        // reads as one continuous action; GO LIVE tails the cluster at the
+        // window's right edge.
+        const char* goLiveLbl = m_rtmpOutput.isActive() ? "END LIVE" : "GO LIVE";
+        float goLiveW = ImGui::CalcTextSize(goLiveLbl).x
+                      + ImGui::GetStyle().FramePadding.x * 2.0f;
+        ImGui::SameLine(0, 0);
+        // Right-edge margin matches the timeline WindowPadding on the left
+        // (~12px) so REC / GO LIVE sit the same distance from the window edge
+        // as play/stop/loop sit from their left edge.
+        float rightAnchorX = contentMaxX - waW - kGap - kRecBtnW - kGap - goLiveW - 4.0f;
+        if (rightAnchorX > ImGui::GetCursorPosX()) ImGui::SetCursorPosX(rightAnchorX);
+        {
+            ImVec2 wapos = ImGui::GetCursorScreenPos();
+            bool waClicked = ImGui::InvisibleButton("##WAEdit",
+                                                    ImVec2(waW, frameH));
+            bool waHov = ImGui::IsItemHovered();
+            ImGui::GetWindowDrawList()->AddText(
+                ImVec2(wapos.x, wapos.y + (frameH - ImGui::CalcTextSize(waLbl).y) * 0.5f),
+                waHov ? IM_COL32(255, 255, 255, 255)
+                      : IM_COL32(200, 210, 225, 200),
+                waLbl);
+            if (waHov) ImGui::SetTooltip(
+                "Work Area — the range REC will capture.\n"
+                "Click to edit start/end (or use I / O at playhead).");
+            if (waClicked) ImGui::OpenPopup("##WAEditPopup");
+
+            if (ImGui::BeginPopup("##WAEditPopup")) {
+                ImGui::TextDisabled("Work Area (record range)");
+                ImGui::Separator();
+                static int s_sM = 0, s_sS = 0, s_eM = 0, s_eS = 0;
+                if (ImGui::IsWindowAppearing()) {
+                    s_sM = (int)wa0 / 60; s_sS = (int)wa0 % 60;
+                    s_eM = (int)wa1 / 60; s_eS = (int)wa1 % 60;
+                }
+                ImGui::TextUnformatted("Start");
+                ImGui::SameLine(70);
+                ImGui::SetNextItemWidth(50);
+                ImGui::InputInt("##sM", &s_sM, 0); ImGui::SameLine(); ImGui::TextUnformatted("m");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(50);
+                ImGui::InputInt("##sS", &s_sS, 0); ImGui::SameLine(); ImGui::TextUnformatted("s");
+
+                ImGui::TextUnformatted("End");
+                ImGui::SameLine(70);
+                ImGui::SetNextItemWidth(50);
+                ImGui::InputInt("##eM", &s_eM, 0); ImGui::SameLine(); ImGui::TextUnformatted("m");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(50);
+                ImGui::InputInt("##eS", &s_eS, 0); ImGui::SameLine(); ImGui::TextUnformatted("s");
+
+                ImGui::Separator();
+                if (ImGui::Button("Set", ImVec2(120, 0))) {
+                    if (s_sM < 0) s_sM = 0; if (s_sS < 0) s_sS = 0; if (s_sS > 59) s_sS = 59;
+                    if (s_eM < 0) s_eM = 0; if (s_eS < 0) s_eS = 0; if (s_eS > 59) s_eS = 59;
+                    double start = s_sM * 60.0 + s_sS;
+                    double end   = s_eM * 60.0 + s_eS;
+                    double dur   = m_timeline.duration();
+                    if (start < 0) start = 0;
+                    if (end > dur) end = dur;
+                    if (end < start + 0.1) end = start + 0.1;
+                    m_timeline.setWorkArea(start, end);
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Reset", ImVec2(-1, 0))) {
+                    m_timeline.resetWorkArea();
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
+        }
+
+        // REC — red pill, anchored at the far right next to Work Area time.
+        ImGui::SameLine(0, kGap);
+        const char* recLabel = (recording || exporting) ? "STOP" : "REC";
+        if (pillBtn("##Rec", recLabel, kRecBtnW, kRedDim, kRed)) {
+            if (recording || exporting) {
+                if (exporting) { m_timeline.pause(); m_timelineExporting = false; }
+                if (recording) m_recorder.stop();
+            } else {
+                m_recorder.setAudioDevice(m_selectedAudioDevice);
+                startTimelineExport();
+            }
+        }
+        // GO LIVE sits immediately to the right of REC — both are "broadcast"
+        // actions, so they cluster together at the tail of the transport row.
+        ImGui::SameLine(0, kGap);
+        renderGoLiveButton();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+            (recording || exporting)
+              ? "Click to stop recording."
+              : "Click to record the Work Area to MP4.");
+        if (recording) {
+            float pulse = 0.5f + 0.5f * sinf(timeNow * 4.0f);
+            ImVec2 itemMin = ImGui::GetItemRectMin();
+            ImVec2 itemMax = ImGui::GetItemRectMax();
+            ImDrawList* d = ImGui::GetWindowDrawList();
+            d->AddCircleFilled(ImVec2(itemMin.x + 8.0f, itemMin.y + (itemMax.y - itemMin.y) * 0.5f),
+                               3.0f, IM_COL32(255, 70, 70, (int)(pulse * 255)));
+        }
+#else
+        // Non-FFmpeg builds: Work Area right-anchored only.
         {
             double wa0 = m_timeline.workAreaStart();
             double wa1 = m_timeline.workAreaEnd();
             int wm0 = (int)wa0 / 60, ws0 = (int)wa0 % 60;
             int wm1 = (int)wa1 / 60, ws1 = (int)wa1 % 60;
             char waLbl[48];
-            snprintf(waLbl, sizeof(waLbl), "%d:%02d–%d:%02d", wm0, ws0, wm1, ws1);
-
-            float waW  = ImGui::CalcTextSize(waLbl).x;
-            float pad  = 12.0f;
-            float rightReserve = kRecClusterW + kClusterBtnPreGap;
-            float targetX = ImGui::GetWindowContentRegionMax().x - rightReserve - pad - waW;
-
+            snprintf(waLbl, sizeof(waLbl), "%d:%02d-%d:%02d", wm0, ws0, wm1, ws1);
+            float waW = ImGui::CalcTextSize(waLbl).x;
             ImGui::SameLine();
+            float targetX = ImGui::GetWindowContentRegionMax().x - 12.0f - waW;
             if (targetX > ImGui::GetCursorPosX()) ImGui::SetCursorPosX(targetX);
             ImGui::AlignTextToFramePadding();
             ImGui::TextDisabled("%s", waLbl);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
-                "Work Area — the range that Export will render.\n"
-                "Press I at playhead to set in-point, O to set out-point.\n"
-                "Press \\ to reset (full duration).\n"
-                "Trigger Export via right-click on REC.");
-        }
-
-        // (Secondary collapse toggle removed — the panel-level minimize on the
-        // far left of the header is the single authoritative show/hide control.)
-
-#ifdef HAS_FFMPEG
-        // ── REC / System Audio / meter / GO LIVE cluster (merged from old
-        //    bottom transport bar). Right-anchored at the very end of the row.
-        {
-            auto& zone = activeZone();
-            float frameH = ImGui::GetFrameHeight();
-            updateAudioMeter();
-
-            // Jump to the cluster's right-anchored start.
-            ImGui::SameLine(0, 0);
-            float clusterStartX = ImGui::GetWindowContentRegionMax().x - kRecClusterW;
-            if (clusterStartX > ImGui::GetCursorPosX())
-                ImGui::SetCursorPosX(clusterStartX);
-
-            // Custom "pill" button matching iconBtn height — used for REC/STOP/GO LIVE.
-            auto pillBtn = [&](const char* id, const char* label, float w,
-                               ImU32 borderCol, ImU32 textCol, bool enabled = true) -> bool {
-                ImVec2 p = ImGui::GetCursorScreenPos();
-                ImVec2 size(w, frameH);
-                if (!enabled) ImGui::BeginDisabled();
-                bool clicked = ImGui::InvisibleButton(id, size);
-                bool hov = ImGui::IsItemHovered();
-                if (!enabled) ImGui::EndDisabled();
-                ImDrawList* d = ImGui::GetWindowDrawList();
-                ImU32 bg = hov ? IM_COL32(255, 255, 255, 30)
-                               : IM_COL32(255, 255, 255, 15);
-                d->AddRectFilled(p, ImVec2(p.x + size.x, p.y + size.y), bg, 5.0f);
-                d->AddRect(p, ImVec2(p.x + size.x, p.y + size.y), borderCol, 5.0f, 0, 1.0f);
-                ImVec2 ts = ImGui::CalcTextSize(label);
-                d->AddText(ImVec2(p.x + (size.x - ts.x) * 0.5f,
-                                  p.y + (size.y - ts.y) * 0.5f),
-                           textCol, label);
-                return clicked && enabled;
-            };
-
-            // Unified palette — matches the iconBtn family: muted white borders,
-            // bright white icon/text; red only for active-recording / live.
-            const ImU32 kAccent    = IM_COL32(235, 240, 250, 245);
-            const ImU32 kAccentDim = IM_COL32(255, 255, 255, 80);
-            const ImU32 kText      = IM_COL32(235, 240, 250, 245);
-            const ImU32 kTextDim   = IM_COL32(130, 140, 155, 180);
-            const ImU32 kRed       = IM_COL32(255, 70, 70, 255);
-            const ImU32 kRedDim    = IM_COL32(255, 70, 70, 140);
-            float timeNow = (float)ImGui::GetTime();
-
-            // REC / STOP (in-place swap). Right-click opens a menu with
-            // timeline-export — the old separate Export pill is merged here.
-            bool recording  = m_recorder.isActive();
-            bool exporting  = m_timelineExporting;
-            const char* recLabel = (recording || exporting)
-                                     ? (exporting ? "EXPORT" : "STOP")
-                                     : "REC";
-            if (!recording) {
-                if (pillBtn("##Rec", recLabel, kRecBtnW, kRedDim, kRed)) {
-                    if (exporting) {
-                        m_timeline.pause();
-                        m_timelineExporting = false;
-                    } else {
-                        auto now = std::chrono::system_clock::now();
-                        auto t = std::chrono::system_clock::to_time_t(now);
-                        struct tm tm_buf;
-#ifdef _WIN32
-                        localtime_s(&tm_buf, &t);
-#else
-                        localtime_r(&t, &tm_buf);
-#endif
-                        char fname[128];
-                        strftime(fname, sizeof(fname), "recordings/%Y%m%d_%H%M%S.mp4", &tm_buf);
-                        m_recorder.setAudioDevice(m_selectedAudioDevice);
-                        m_recorder.start(fname, zone.warpFBO.width(), zone.warpFBO.height(), 30);
-                    }
-                }
-                if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
-                    ImGui::OpenPopup("##RecMenu");
-                if (ImGui::BeginPopup("##RecMenu")) {
-                    if (ImGui::MenuItem("Record Canvas (MP4)")) {
-                        auto now = std::chrono::system_clock::now();
-                        auto t = std::chrono::system_clock::to_time_t(now);
-                        struct tm tm_buf;
-#ifdef _WIN32
-                        localtime_s(&tm_buf, &t);
-#else
-                        localtime_r(&t, &tm_buf);
-#endif
-                        char fname[128];
-                        strftime(fname, sizeof(fname), "recordings/%Y%m%d_%H%M%S.mp4", &tm_buf);
-                        m_recorder.setAudioDevice(m_selectedAudioDevice);
-                        m_recorder.start(fname, zone.warpFBO.width(), zone.warpFBO.height(), 30);
-                    }
-                    if (ImGui::MenuItem("Export Timeline Work Area", nullptr, false, !exporting)) {
-                        startTimelineExport();
-                    }
-                    ImGui::EndPopup();
-                }
-                if (ImGui::IsItemHovered(ImGuiHoveredFlags_None))
-                    ImGui::SetTooltip(
-                        exporting ? "Click to stop timeline export."
-                                  : "Click to record canvas (MP4).\n"
-                                    "Right-click for timeline export.");
-            } else {
-                if (pillBtn("##StopRec", "STOP", kRecBtnW, kRedDim, kRed)) {
-                    m_recorder.stop();
-                }
-                // Pulse dot + timer as overlay on top of the button area.
-                float pulse = 0.5f + 0.5f * sinf(timeNow * 4.0f);
-                ImVec2 itemMin = ImGui::GetItemRectMin();
-                ImVec2 itemMax = ImGui::GetItemRectMax();
-                ImDrawList* d = ImGui::GetWindowDrawList();
-                d->AddCircleFilled(ImVec2(itemMin.x + 8.0f, itemMin.y + (itemMax.y - itemMin.y) * 0.5f),
-                                   3.0f, IM_COL32(255, 70, 70, (int)(pulse * 255)));
-            }
-            ImGui::SameLine(0, kClusterGap);
-
-            // System Audio combo — refresh device list every 3s.
-            {
-                static double lastEnum = 0;
-                double nowT = glfwGetTime();
-                if (m_audioDevices.empty() || nowT - lastEnum > 3.0) {
-                    lastEnum = nowT;
-                    m_audioDevices = VideoRecorder::enumerateAudioDevices();
-                    m_outputDevices.clear();
-                    for (auto& dv : m_audioDevices) {
-                        if (!dv.isCapture) m_outputDevices.push_back(dv);
-                    }
-                }
-            }
-            std::string audioPreview = m_mixerEnabled ? "Mixer" : "System Audio";
-            if (!m_mixerEnabled && m_selectedAudioDevice >= 0 &&
-                m_selectedAudioDevice < (int)m_audioDevices.size()) {
-                audioPreview = m_audioDevices[m_selectedAudioDevice].name;
-                if (audioPreview.length() > 20) audioPreview = audioPreview.substr(0, 17) + "...";
-            }
-            ImGui::SetNextItemWidth(kAudioComboW);
-            if (ImGui::BeginCombo("##AudioSrc", audioPreview.c_str())) {
-                if (ImGui::Selectable("System Audio", !m_mixerEnabled && m_selectedAudioDevice == -1)) {
-                    if (m_mixerEnabled) { m_audioMixer.stop(); m_audioAnalyzer.setExternalFeed(false); m_mixerEnabled = false; }
-                    m_selectedAudioDevice = -1;
-                }
-                for (int i = 0; i < (int)m_audioDevices.size(); i++) {
-                    ImGui::PushID(i);
-                    if (ImGui::Selectable(m_audioDevices[i].name.c_str(), !m_mixerEnabled && m_selectedAudioDevice == i)) {
-                        if (m_mixerEnabled) { m_audioMixer.stop(); m_audioAnalyzer.setExternalFeed(false); m_mixerEnabled = false; }
-                        m_selectedAudioDevice = i;
-                    }
-                    ImGui::PopID();
-                }
-                ImGui::Separator();
-                if (ImGui::Selectable("Mixer", m_mixerEnabled)) {
-                    if (!m_mixerEnabled) {
-                        m_mixerEnabled = true;
-                        m_audioAnalyzer.setExternalFeed(true);
-                        if (m_audioMixer.inputCount() == 0)
-                            m_audioMixer.addInput("", "System Audio", false);
-                        m_audioMixer.start();
-                    }
-                }
-                ImGui::EndCombo();
-            }
-            ImGui::SameLine(0, kClusterGap);
-
-            // Compact stereo level meter (two thin bars stacked).
-            {
-                ImVec2 mpos = ImGui::GetCursorScreenPos();
-                float meterH = 14.0f;
-                float meterY = mpos.y + (frameH - meterH) * 0.5f;
-                float gap = 2.0f, singleH = (meterH - gap) * 0.5f;
-                ImU32 trackBg = IM_COL32(20, 24, 35, 200);
-                ImDrawList* d = ImGui::GetWindowDrawList();
-                d->AddRectFilled(ImVec2(mpos.x, meterY),
-                                 ImVec2(mpos.x + kMeterW, meterY + singleH), trackBg, 2.0f);
-                d->AddRectFilled(ImVec2(mpos.x, meterY + singleH + gap),
-                                 ImVec2(mpos.x + kMeterW, meterY + meterH), trackBg, 2.0f);
-                float fillL = m_audioLevelSmoothL * kMeterW;
-                float fillR = m_audioLevelSmoothR * kMeterW;
-                d->AddRectFilled(ImVec2(mpos.x, meterY),
-                                 ImVec2(mpos.x + fillL, meterY + singleH), kAccentDim, 2.0f);
-                d->AddRectFilled(ImVec2(mpos.x, meterY + singleH + gap),
-                                 ImVec2(mpos.x + fillR, meterY + meterH), kAccentDim, 2.0f);
-                ImGui::Dummy(ImVec2(kMeterW, frameH));
-            }
-            ImGui::SameLine(0, kClusterGap);
-
-            // GO LIVE / END
-            static const int aspectNums[] = { 16, 4, 16, 0 };
-            static const int aspectDens[] = { 9,  3, 10, 0 };
-            if (!m_rtmpOutput.isActive()) {
-                bool hasKey = m_streamKeyBuf[0] != '\0';
-                if (pillBtn("##Live", "GO LIVE", kGoLiveBtnW, kAccentDim,
-                            hasKey ? kAccent : kTextDim, hasKey)) {
-                    m_rtmpOutput.start(m_streamKeyBuf, zone.warpFBO.width(), zone.warpFBO.height(),
-                                       aspectNums[m_streamAspect], aspectDens[m_streamAspect], 30);
-                }
-                if (!hasKey && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                    ImGui::SetTooltip("Set stream key in the Stream tab");
-            } else {
-                if (pillBtn("##EndLive", "END", kGoLiveBtnW, kRedDim, kRed)) {
-                    m_rtmpOutput.stop();
-                }
-                // Pulse dot overlay on left edge of the END button.
-                float pulse = 0.5f + 0.5f * sinf(timeNow * 3.0f);
-                ImVec2 itemMin = ImGui::GetItemRectMin();
-                ImVec2 itemMax = ImGui::GetItemRectMax();
-                ImDrawList* d = ImGui::GetWindowDrawList();
-                d->AddCircleFilled(ImVec2(itemMin.x + 8.0f, itemMin.y + (itemMax.y - itemMin.y) * 0.5f),
-                                   3.0f, IM_COL32(255, 255, 255, (int)(pulse * 255)));
-                (void)kAccent; // silence unused-variable warning on some paths
-            }
-            (void)kText; (void)kTextDim; // not all paths use these
         }
 #endif
     }
@@ -4025,7 +4333,7 @@ void Application::renderTimelinePanel() {
         return;
     }
 
-    ImGui::Dummy(ImVec2(0, 6));
+    ImGui::Dummy(ImVec2(0, 4));
 
   if (!s_tlCollapsed) {
 
@@ -4094,6 +4402,75 @@ void Application::renderTimelinePanel() {
                     ImVec2(x + 4, rulerOrigin.y + 4),
                     IM_COL32(255, 255, 255, 150), lbl);
     }
+    // ── Section bands — colored strips on the ruler for intro/drop/etc. ──
+    {
+        int si = 0;
+        for (const auto& s : m_timeline.sections()) {
+            float sx0 = rulerOrigin.x + timeToX(s.startTime);
+            float sx1 = rulerOrigin.x + timeToX(s.endTime);
+            if (sx1 <= rulerOrigin.x || sx0 >= rulerOrigin.x + trackAreaW) { si++; continue; }
+            if (sx0 < rulerOrigin.x) sx0 = rulerOrigin.x;
+            if (sx1 > rulerOrigin.x + trackAreaW) sx1 = rulerOrigin.x + trackAreaW;
+            // Palette: cycle 5 calm hues tied to section id so the same
+            // section keeps its color across edits.
+            ImU32 palette[5] = {
+                IM_COL32(120, 180, 230,  90),
+                IM_COL32(200, 130, 230,  90),
+                IM_COL32(230, 180, 120,  90),
+                IM_COL32(140, 220, 170,  90),
+                IM_COL32(230, 140, 180,  90),
+            };
+            ImU32 tint = s.tint != 0 ? (ImU32)s.tint : palette[s.id % 5];
+            dl->AddRectFilled(ImVec2(sx0, rulerOrigin.y),
+                              ImVec2(sx1, rulerOrigin.y + rulerH),
+                              tint, 4.0f);
+            if (!s.name.empty()) {
+                dl->AddText(ImGui::GetFont(), 10.0f,
+                            ImVec2(sx0 + 6, rulerOrigin.y + 2),
+                            IM_COL32(240, 245, 250, 220), s.name.c_str());
+            }
+            si++;
+        }
+    }
+
+    // ── Markers — vertical dots on the ruler. Click to jump. ─────────────
+    {
+        uint32_t toRemoveMarker = 0;
+        for (const auto& mk : m_timeline.markers()) {
+            float mx = rulerOrigin.x + timeToX(mk.time);
+            if (mx < rulerOrigin.x - 4 || mx > rulerOrigin.x + trackAreaW + 4) continue;
+            // Diamond glyph at the bottom of the ruler.
+            float cy = rulerOrigin.y + rulerH - 3;
+            dl->AddCircleFilled(ImVec2(mx, cy), 4.0f,
+                                IM_COL32(255, 220, 120, 230));
+            dl->AddLine(ImVec2(mx, rulerOrigin.y + 2),
+                        ImVec2(mx, cy),
+                        IM_COL32(255, 220, 120, 120), 1.0f);
+            if (!mk.name.empty()) {
+                dl->AddText(ImGui::GetFont(), 10.0f,
+                            ImVec2(mx + 6, rulerOrigin.y + 4),
+                            IM_COL32(255, 230, 180, 220), mk.name.c_str());
+            }
+            // Click → seek playhead to marker; shift+click → delete.
+            ImVec2 hitMin(mx - 6, rulerOrigin.y + rulerH - 9);
+            ImGui::PushID((int)(mk.id + 0x90000000));
+            ImGui::SetCursorScreenPos(hitMin);
+            if (ImGui::InvisibleButton("##mk", ImVec2(12, 12))) {
+                if (ImGui::GetIO().KeyShift) toRemoveMarker = mk.id;
+                else                          m_timeline.seek(mk.time);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s  (click to jump, shift-click to delete)",
+                                  mk.name.c_str());
+            }
+            ImGui::PopID();
+        }
+        if (toRemoveMarker) {
+            m_undoStack.pushState(m_layerStack, m_selectedLayer, m_timeline);
+            m_timeline.removeMarker(toRemoveMarker);
+        }
+    }
+
     // ── Work Area band — visible subset that Export will render. ─────────
     // Draw the band BEHIND the ruler invisible button so drags on the band
     // itself are handled below (they would otherwise hit the ruler-seek path).
@@ -4155,6 +4532,116 @@ void Application::renderTimelinePanel() {
         s_tlScroll = 0.0;
     }
 
+    // Right-click ruler → section / marker create menu. `s_rulerMenuTime`
+    // captures the mouse time at open so the menu's "Add Section Here" and
+    // "Add Marker Here" resolve relative to where the click landed.
+    static double s_rulerMenuTime = 0.0;
+    static uint32_t s_sectionEditId = 0;
+    if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(1)) {
+        s_rulerMenuTime = xToTime(mxRel);
+        ImGui::OpenPopup("##RulerMenu");
+    }
+    if (ImGui::BeginPopup("##RulerMenu")) {
+        int mm = (int)s_rulerMenuTime / 60, ss = (int)s_rulerMenuTime % 60;
+        ImGui::TextDisabled("At %d:%02d", mm, ss);
+        ImGui::Separator();
+        if (ImGui::MenuItem("Add Section Here")) {
+            m_undoStack.pushState(m_layerStack, m_selectedLayer, m_timeline);
+            double start = s_rulerMenuTime;
+            double end   = std::min(m_timeline.duration(), start + 8.0);
+            uint32_t sid = m_timeline.addSection(start, end, "Section");
+            s_sectionEditId = sid;
+        }
+        if (ImGui::MenuItem("Add Section from Work Area")) {
+            m_undoStack.pushState(m_layerStack, m_selectedLayer, m_timeline);
+            uint32_t sid = m_timeline.addSection(m_timeline.workAreaStart(),
+                                                 m_timeline.workAreaEnd(),
+                                                 "Section");
+            s_sectionEditId = sid;
+        }
+        if (ImGui::MenuItem("Add Marker Here")) {
+            m_undoStack.pushState(m_layerStack, m_selectedLayer, m_timeline);
+            m_timeline.addMarker(s_rulerMenuTime, "Cue");
+        }
+        if (!m_timeline.sections().empty()) {
+            ImGui::Separator();
+            ImGui::TextDisabled("Sections");
+            uint32_t toRemove = 0;
+            for (const auto& s : m_timeline.sections()) {
+                ImGui::PushID((int)(s.id + 0x80000000));
+                char buf[128];
+                snprintf(buf, sizeof(buf), "%s  [%d:%02d-%d:%02d]",
+                         s.name.empty() ? "Section" : s.name.c_str(),
+                         (int)s.startTime / 60, (int)s.startTime % 60,
+                         (int)s.endTime   / 60, (int)s.endTime   % 60);
+                if (ImGui::MenuItem(buf)) {
+                    m_timeline.seek(s.startTime);
+                    s_sectionEditId = s.id;
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("X")) toRemove = s.id;
+                ImGui::PopID();
+            }
+            if (toRemove) {
+                m_undoStack.pushState(m_layerStack, m_selectedLayer, m_timeline);
+                m_timeline.removeSection(toRemove);
+            }
+        }
+        ImGui::EndPopup();
+    }
+
+    // ── Section rename / time editor ────────────────────────────────────
+    // Opens right after "Add Section Here" (or via shift-click on a band
+    // in the ruler) so users can name the act and nudge its bounds.
+    if (s_sectionEditId != 0) {
+        if (auto* sec = m_timeline.findSection(s_sectionEditId)) {
+            ImGui::SetNextWindowPos(ImGui::GetMousePos(), ImGuiCond_Appearing);
+            if (ImGui::Begin("##SectionEdit", nullptr,
+                             ImGuiWindowFlags_NoDocking
+                             | ImGuiWindowFlags_AlwaysAutoResize
+                             | ImGuiWindowFlags_NoCollapse)) {
+                ImGui::TextDisabled("Section");
+                static char nameBuf[128] = {};
+                static uint32_t lastId = 0;
+                if (lastId != s_sectionEditId) {
+                    std::snprintf(nameBuf, sizeof(nameBuf), "%s", sec->name.c_str());
+                    lastId = s_sectionEditId;
+                }
+                ImGui::SetNextItemWidth(200);
+                if (ImGui::InputText("Name", nameBuf, sizeof(nameBuf))) {
+                    sec->name = nameBuf;
+                }
+                float start = (float)sec->startTime;
+                float end   = (float)sec->endTime;
+                ImGui::SetNextItemWidth(120);
+                if (ImGui::DragFloat("Start", &start, 0.1f, 0.0f,
+                                      (float)m_timeline.duration(), "%.1fs")) {
+                    if (start < 0) start = 0;
+                    if (start >= end - 0.1f) start = end - 0.1f;
+                    sec->startTime = start;
+                }
+                ImGui::SetNextItemWidth(120);
+                if (ImGui::DragFloat("End", &end, 0.1f, 0.0f,
+                                      (float)m_timeline.duration(), "%.1fs")) {
+                    if (end <= start + 0.1f) end = start + 0.1f;
+                    if (end > m_timeline.duration()) end = (float)m_timeline.duration();
+                    sec->endTime = end;
+                }
+                if (ImGui::Button("Done")) s_sectionEditId = 0;
+                ImGui::SameLine();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 0.4f, 0.4f, 1));
+                if (ImGui::Button("Delete")) {
+                    m_timeline.removeSection(s_sectionEditId);
+                    s_sectionEditId = 0;
+                }
+                ImGui::PopStyleColor();
+            }
+            ImGui::End();
+        } else {
+            s_sectionEditId = 0;
+        }
+    }
+
     // Mouse wheel over the timeline = horizontal pan. Zoom is slider-only now.
     {
         float wheel = ImGui::GetIO().MouseWheel;
@@ -4186,8 +4673,19 @@ void Application::renderTimelinePanel() {
     static uint32_t s_trPickerId = 0;
     static ImVec2   s_trPickerPos(0, 0);
 
+    // Multi-select set — keyed by (layerId<<32 | clipId). Sibling to s_ctxClipId:
+    // s_ctxClipId is the "primary" selection (what the inspector edits), and
+    // s_multiSel extends that for batch drag/delete.
+    static std::set<uint64_t> s_multiSel;
+    auto selKey = [](uint32_t layerId, uint32_t clipId) -> uint64_t {
+        return ((uint64_t)layerId << 32) | clipId;
+    };
+    // Per-selected-clip original start times — captured at drag start, so the
+    // drag delta applies consistently to every selected clip.
+    static std::map<uint64_t, double> s_dragStartOffsets;
+
     // --- Track rows (pill-shaped, flush-left, AE-style) ---
-    const float trackSpacing = 6.0f;
+    const float trackSpacing = 4.0f;
     const float trimZone     = 8.0f; // edge hot-zone width in pixels
 
     // Build a layerId → groupId map so the loop below knows when to emit a
@@ -4270,8 +4768,11 @@ void Application::renderTimelinePanel() {
         ImVec2 trackOrigin(rowOrigin.x + gutterW, rowOrigin.y); // clip area start
         float rowY = rowOrigin.y;
 
-        // Full-width invisible hit area — covers both gutter + track area so
-        // we can right-click anywhere in the row and get reasonable cursor state.
+        // Full-width invisible hit area for hover/drag in the clip lane.
+        // SetNextItemAllowOverlap lets the gutter's visibility dot + layer-name
+        // buttons (drawn later, on top) still receive clicks even though this
+        // button covers the gutter region.
+        ImGui::SetNextItemAllowOverlap();
         ImGui::InvisibleButton("##track", ImVec2(gutterW + trackAreaW, trackH));
 
         // Track pill — only over the clip area; the gutter gets its own treatment.
@@ -4342,9 +4843,79 @@ void Application::renderTimelinePanel() {
             bool selected = (dragLayerId == track.layerId && dragClipId == clip.id);
             bool hover    = (mx >= x0 && mx <= x1 && my >= a.y && my <= b.y && ImGui::IsItemHovered());
             ClipKind k    = resolveKind(clip);
-            ImU32 fill    = (clip.tint != 0) ? (ImU32)clip.tint : kindFill(k, selected, hover);
-            ImU32 border  = kindEdge(k, selected);
+            bool inMultiSel = s_multiSel.count(selKey(track.layerId, clip.id)) > 0;
+            ImU32 fill    = (clip.tint != 0) ? (ImU32)clip.tint : kindFill(k, selected || inMultiSel, hover);
+            ImU32 border  = (selected || inMultiSel)
+                          ? IM_COL32(255, 220, 110, 235)
+                          : kindEdge(k, false);
             dl->AddRectFilled(a, b, fill, 6.0f);
+
+            // ── Live thumbnail for video/image clips currently under the
+            //    playhead. Draws the active layer's source texture with its
+            //    flip honored, tinted with the fill alpha so it never drowns
+            //    out the label. Shader clips skip this path (the source has
+            //    no "frame" per se).
+            if (k == ClipKind::Video && x1 - x0 > 30.0f) {
+                Layer* live = nullptr;
+                for (int i = 0; i < m_layerStack.count(); i++) {
+                    auto l = m_layerStack[i];
+                    if (l && l->id == track.layerId) { live = l.get(); break; }
+                }
+                if (live && live->source && live->source->textureId() != 0
+                    && clip.contains(m_timeline.playhead()))
+                {
+                    bool flipV = live->source->isFlippedV();
+                    ImVec2 uv0 = flipV ? ImVec2(0,1) : ImVec2(0,0);
+                    ImVec2 uv1 = flipV ? ImVec2(1,0) : ImVec2(1,1);
+                    dl->PushClipRect(a, b, true);
+                    dl->AddImage((ImTextureID)(intptr_t)live->source->textureId(),
+                                 a, b, uv0, uv1, IM_COL32(255, 255, 255, 160));
+                    dl->PopClipRect();
+                }
+            }
+
+            // ── Stylized audio visualization — a horizontal capsule pattern
+            //    for audio-extension clips so they read as "audio" at a
+            //    glance. Honest about not being real peaks; we draw a thin
+            //    envelope anchored to the clip rect so it looks like a
+            //    waveform placeholder without claiming to have decoded the
+            //    file.
+            {
+                auto lastDot = clip.sourcePath.find_last_of('.');
+                std::string ext = (lastDot == std::string::npos)
+                                  ? "" : clip.sourcePath.substr(lastDot);
+                for (auto& c : ext) c = (char)tolower((unsigned char)c);
+                bool isAudio = (ext == ".wav" || ext == ".mp3"
+                             || ext == ".m4a" || ext == ".flac"
+                             || ext == ".aiff" || ext == ".aif"
+                             || ext == ".ogg");
+                if (isAudio && x1 - x0 > 30.0f) {
+                    float midY = (a.y + b.y) * 0.5f;
+                    float h    = (b.y - a.y) * 0.35f;
+                    // Deterministic amplitude from a cheap hash of path+id
+                    // so the same clip always looks the same across frames.
+                    auto hashAt = [&](int i) -> float {
+                        uint32_t s = clip.id * 2654435761u + (uint32_t)i * 374761393u;
+                        s = (s ^ (s >> 15)) * 2246822519u;
+                        s = (s ^ (s >> 13)) * 3266489917u;
+                        s ^= s >> 16;
+                        return (s & 0xFFFF) / 65535.0f;
+                    };
+                    int buckets = (int)((x1 - x0) / 3.0f);
+                    if (buckets > 240) buckets = 240;
+                    dl->PushClipRect(a, b, true);
+                    for (int i = 0; i < buckets; i++) {
+                        float u  = (float)i / buckets;
+                        float px = x0 + u * (x1 - x0);
+                        float amp = h * (0.35f + 0.65f * hashAt(i));
+                        dl->AddLine(ImVec2(px, midY - amp),
+                                    ImVec2(px, midY + amp),
+                                    IM_COL32(255, 255, 255, 90), 1.2f);
+                    }
+                    dl->PopClipRect();
+                }
+            }
+
             dl->AddRect(a, b, border, 6.0f, 0, 1.0f);
 
             // Label: prefer filename (the "what will this clip play?" question),
@@ -4380,13 +4951,17 @@ void Application::renderTimelinePanel() {
             }
 
             // Begin drag on click within this clip rect — also select the clip
-            // so the inline inspector strip appears below the tracks.
+            // so the inline inspector strip appears below the tracks. Shift /
+            // Cmd / Ctrl toggles membership in the multi-select set.
             if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(0) && dragClipId == 0
                 && mx >= x0 && mx <= x1 && my >= a.y && my <= b.y)
             {
                 int mode = 0;
                 if (mx < x0 + trimZone) mode = 1;
                 else if (mx > x1 - trimZone) mode = 2;
+                // Snapshot timeline BEFORE the drag so Cmd+Z restores the
+                // pre-drag clip position/size.
+                m_undoStack.pushState(m_layerStack, m_selectedLayer, m_timeline);
                 dragLayerId = track.layerId;
                 dragClipId = clip.id;
                 dragMode = mode;
@@ -4395,6 +4970,31 @@ void Application::renderTimelinePanel() {
                 dragAnchor = ImGui::GetIO().MousePos;
                 s_ctxLayerId = track.layerId;
                 s_ctxClipId  = clip.id;
+
+                bool additive = ImGui::GetIO().KeyShift
+                             || ImGui::GetIO().KeySuper
+                             || ImGui::GetIO().KeyCtrl;
+                uint64_t k = selKey(track.layerId, clip.id);
+                if (additive) {
+                    if (s_multiSel.count(k)) s_multiSel.erase(k);
+                    else                     s_multiSel.insert(k);
+                } else if (!s_multiSel.count(k)) {
+                    // Plain click on an unselected clip → exclusive selection.
+                    s_multiSel.clear();
+                    s_multiSel.insert(k);
+                }
+
+                // Capture every selected clip's startTime for batch-move delta.
+                s_dragStartOffsets.clear();
+                if (mode == 0) {
+                    for (uint64_t sk : s_multiSel) {
+                        uint32_t lid = (uint32_t)(sk >> 32);
+                        uint32_t cid = (uint32_t)(sk & 0xFFFFFFFFu);
+                        if (auto* c = m_timeline.findClip(lid, cid)) {
+                            s_dragStartOffsets[sk] = c->startTime;
+                        }
+                    }
+                }
             }
 
         }
@@ -4453,19 +5053,21 @@ void Application::renderTimelinePanel() {
                         IM_COL32(255, 255, 255, 18), 1.0f);
 
             // Visibility dot — clickable, toggles layer->visible.
+            // AllowOverlap lets this button receive clicks despite the
+            // full-row ##track InvisibleButton drawn earlier.
             float dotCx = rowOrigin.x + 14;
             float dotCy = rowY + trackH * 0.5f;
             ImU32 dotCol = visible ? IM_COL32(230, 235, 245, 240)
                                    : IM_COL32(120, 130, 140, 140);
             dl->AddCircleFilled(ImVec2(dotCx, dotCy), 4.5f, dotCol);
             ImGui::SetCursorScreenPos(ImVec2(dotCx - 8, dotCy - 8));
+            ImGui::SetNextItemAllowOverlap();
             if (ImGui::InvisibleButton("##vis", ImVec2(16, 16))) {
                 if (layerForRow) layerForRow->visible = !layerForRow->visible;
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip(
                 visible ? "Layer visible — click to hide"
-                        : "Layer hidden — click to show\n"
-                          "(same control as the Layer panel dot)");
+                        : "Layer hidden — click to show");
 
             // Kind swatch — small rounded square tinted by ClipKind.
             ImU32 swatch = (swatchKind == ClipKind::Video)  ? IM_COL32(130, 156, 255, 220)
@@ -4484,11 +5086,158 @@ void Application::renderTimelinePanel() {
                                 : IM_COL32(150, 158, 170, 200),
                         track.name.empty() ? "Layer" : track.name.c_str());
             dl->PopClipRect();
+
+            // Clickable name region — selects this layer in the app so the
+            // Property panel shows its knobs. Drawn after the ##track button
+            // so hits land here first (AllowOverlap makes the outer ##track
+            // transparent to this).
+            ImGui::SetCursorScreenPos(ImVec2(rowOrigin.x + 24, rowY + 4));
+            ImGui::SetNextItemAllowOverlap();
+            if (ImGui::InvisibleButton("##layerPick",
+                                       ImVec2(gutterW - 28, trackH - 8))) {
+                // Find the layer's index in the stack so PropertyPanel picks it up.
+                for (int i = 0; i < m_layerStack.count(); i++) {
+                    auto l = m_layerStack[i];
+                    if (l && l->id == track.layerId) { m_selectedLayer = i; break; }
+                }
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                "Click to edit layer properties");
         }
 
         // (Right-click-to-add-clip removed — layers auto-create their bar when
         // they appear in the stack. Per-clip context menu on existing bars
         // still opens on right-click via the clip-hover block above.)
+
+        // ── Sublanes (automation / MIDI / audio-reactive) ─────────────────
+        // One thin row per TimelineLane bound to this track. Renders placeholder
+        // keyframe dots for automation, note blocks for MIDI, and a level
+        // histogram for audio-reactive bindings — none of these drive runtime
+        // yet (data-model stubs), but the row lets users plant points and
+        // structure their show.
+        {
+            uint32_t toRemoveLane = 0;
+            for (auto& ln : m_timeline.lanes()) {
+                if (ln.layerId != track.layerId) continue;
+                const float lnH = 18.0f;
+                ImVec2 lnO = ImGui::GetCursorScreenPos();
+                ImVec2 lnClip(lnO.x + gutterW, lnO.y);
+                ImGui::Dummy(ImVec2(gutterW + trackAreaW, lnH));
+
+                // Background + gutter label
+                dl->AddRectFilled(ImVec2(lnO.x, lnO.y + 1),
+                                  ImVec2(lnO.x + gutterW - 4, lnO.y + lnH - 1),
+                                  IM_COL32(255, 255, 255, 6), 4.0f);
+                dl->AddRectFilled(lnClip,
+                                  ImVec2(lnClip.x + trackAreaW, lnO.y + lnH),
+                                  IM_COL32(255, 255, 255, 6), 4.0f);
+                ImU32 kindCol;
+                switch (ln.kind) {
+                    case TimelineLaneKind::Automation:    kindCol = IM_COL32(130, 200, 255, 200); break;
+                    case TimelineLaneKind::MIDI:          kindCol = IM_COL32(255, 180, 120, 200); break;
+                    case TimelineLaneKind::AudioReactive: kindCol = IM_COL32(130, 230, 170, 200); break;
+                    default:                              kindCol = IM_COL32(220, 220, 220, 200); break;
+                }
+                dl->AddRectFilled(ImVec2(lnO.x + 18, lnO.y + lnH * 0.5f - 3),
+                                  ImVec2(lnO.x + 24, lnO.y + lnH * 0.5f + 3),
+                                  kindCol, 1.5f);
+                char lblBuf[96];
+                snprintf(lblBuf, sizeof(lblBuf), "%s  %s",
+                         timelineLaneKindName(ln.kind),
+                         ln.paramName.empty() ? "(param)" : ln.paramName.c_str());
+                dl->AddText(ImGui::GetFont(), 10.0f,
+                            ImVec2(lnO.x + 30, lnO.y + (lnH - 10.0f) * 0.5f),
+                            IM_COL32(220, 230, 245, 230), lblBuf);
+
+                // Per-kind body render. Double-click empty area adds a point.
+                ImGui::PushID((int)(ln.id + 0x70000000));
+                ImGui::SetCursorScreenPos(lnClip);
+                ImGui::InvisibleButton("##ln", ImVec2(trackAreaW, lnH));
+                bool laneHover = ImGui::IsItemHovered();
+                if (laneHover && ImGui::IsMouseDoubleClicked(0)) {
+                    TimelineLanePoint p;
+                    p.time  = xToTime(ImGui::GetIO().MousePos.x - lnClip.x);
+                    p.value = 0.5f;
+                    ln.points.push_back(p);
+                }
+                if (laneHover && ImGui::IsMouseClicked(1)) {
+                    ImGui::OpenPopup("##LaneMenu");
+                }
+                if (ImGui::BeginPopup("##LaneMenu")) {
+                    if (ImGui::MenuItem("Clear points")) ln.points.clear();
+                    if (ImGui::MenuItem("Remove lane"))   toRemoveLane = ln.id;
+                    ImGui::EndPopup();
+                }
+
+                if (ln.kind == TimelineLaneKind::Automation) {
+                    // Draw points as dots and lines between them. Sort by time
+                    // for the polyline connection.
+                    std::sort(ln.points.begin(), ln.points.end(),
+                              [](const TimelineLanePoint& a, const TimelineLanePoint& b){
+                                  return a.time < b.time;
+                              });
+                    for (size_t i = 0; i + 1 < ln.points.size(); i++) {
+                        const auto& p0 = ln.points[i];
+                        const auto& p1 = ln.points[i + 1];
+                        float x0 = lnClip.x + timeToX(p0.time);
+                        float x1 = lnClip.x + timeToX(p1.time);
+                        float y0 = lnO.y + lnH - 2.0f - p0.value * (lnH - 4.0f);
+                        float y1 = lnO.y + lnH - 2.0f - p1.value * (lnH - 4.0f);
+                        dl->AddLine(ImVec2(x0, y0), ImVec2(x1, y1), kindCol, 1.2f);
+                    }
+                    for (const auto& p : ln.points) {
+                        float px = lnClip.x + timeToX(p.time);
+                        float py = lnO.y + lnH - 2.0f - p.value * (lnH - 4.0f);
+                        dl->AddCircleFilled(ImVec2(px, py), 3.0f, kindCol);
+                    }
+                } else if (ln.kind == TimelineLaneKind::MIDI) {
+                    // Each point = a small note block at its time, 0.5s wide.
+                    for (const auto& p : ln.points) {
+                        float px0 = lnClip.x + timeToX(p.time);
+                        float px1 = lnClip.x + timeToX(p.time + 0.5);
+                        dl->AddRectFilled(ImVec2(px0, lnO.y + 3),
+                                          ImVec2(px1, lnO.y + lnH - 3),
+                                          kindCol, 2.0f);
+                    }
+                } else if (ln.kind == TimelineLaneKind::AudioReactive) {
+                    // Dashed horizontal band — visual note that this binds to
+                    // live audio signal rather than stored keyframes.
+                    for (float x = lnClip.x; x < lnClip.x + trackAreaW; x += 8) {
+                        dl->AddLine(ImVec2(x,     lnO.y + lnH * 0.5f),
+                                    ImVec2(x + 4, lnO.y + lnH * 0.5f),
+                                    kindCol, 1.4f);
+                    }
+                }
+                ImGui::PopID();
+            }
+            if (toRemoveLane) m_timeline.removeLane(toRemoveLane);
+        }
+
+        // ── "+ Lane" row — one-shot button that offers the three lane kinds.
+        {
+            ImGui::PushID((int)(track.layerId + 0x60000000));
+            ImVec2 rO = ImGui::GetCursorScreenPos();
+            ImGui::Dummy(ImVec2(gutterW, 14));
+            ImGui::SetCursorScreenPos(ImVec2(rO.x + 20, rO.y));
+            if (ImGui::SmallButton("+ Lane")) {
+                ImGui::OpenPopup("##AddLaneMenu");
+            }
+            if (ImGui::BeginPopup("##AddLaneMenu")) {
+                if (ImGui::MenuItem("Automation (opacity)")) {
+                    m_timeline.addLane(track.layerId,
+                                        TimelineLaneKind::Automation, "opacity");
+                }
+                if (ImGui::MenuItem("MIDI")) {
+                    m_timeline.addLane(track.layerId, TimelineLaneKind::MIDI, "CC1");
+                }
+                if (ImGui::MenuItem("Audio-Reactive")) {
+                    m_timeline.addLane(track.layerId,
+                                        TimelineLaneKind::AudioReactive, "bass > opacity");
+                }
+                ImGui::EndPopup();
+            }
+            ImGui::PopID();
+        }
 
         ImGui::PopID();
         ImGui::Dummy(ImVec2(0, trackSpacing));
@@ -4572,6 +5321,7 @@ void Application::renderTimelinePanel() {
                     int mode = 0;
                     if (mx < tx0 + trimZone)      mode = 1;
                     else if (mx > tx1 - trimZone) mode = 2;
+                    m_undoStack.pushState(m_layerStack, m_selectedLayer, m_timeline);
                     dragLayerId = 0xFFFFFFFF;   // sentinel: "this is a transition drag"
                     dragClipId  = tr.id;
                     dragMode    = mode;
@@ -4629,6 +5379,7 @@ void Application::renderTimelinePanel() {
                         dl->AddLine(ImVec2(px, py - 3), ImVec2(px, py + 3),
                                     IM_COL32(255, 255, 255, 230), 1.5f);
                         if (clicked) {
+                            m_undoStack.pushState(m_layerStack, m_selectedLayer, m_timeline);
                             double d = std::min(1.0, (ovEnd - ovStart) * 0.6);
                             m_timeline.addTransition(aId, bId,
                                                      ovMid - d * 0.5, d,
@@ -4656,7 +5407,7 @@ void Application::renderTimelinePanel() {
         auto names = GLTransitionLibrary::instance().names();
         std::string preview = selClip->transitionInName.empty()
                               ? std::string("No transition")
-                              : std::string("→ ") + selClip->transitionInName;
+                              : std::string("> ") + selClip->transitionInName;
         ImGui::SetNextItemWidth(180);
         if (ImGui::BeginCombo("##clipXition", preview.c_str())) {
             if (ImGui::Selectable("No transition", selClip->transitionInName.empty())) {
@@ -4670,12 +5421,75 @@ void Application::renderTimelinePanel() {
         }
 
         // Transition duration — only meaningful when a transition is set.
-        if (!selClip->transitionInName.empty()) {
+        if (!selClip->transitionInName.empty() || !selClip->transitionInShaderPath.empty()) {
             ImGui::SameLine(0, 10);
             ImGui::SetNextItemWidth(110);
             float xd = (float)selClip->transitionInDuration;
             if (ImGui::SliderFloat("##clipXitionDur", &xd, 0.05f, 4.0f, "%.2fs")) {
                 selClip->transitionInDuration = (double)xd;
+            }
+        }
+
+        // Playback-mode dropdown — drives how the clip's source plays as the
+        // playhead moves through it (Loop / Hold are wired into applyToLayers).
+        ImGui::SameLine(0, 14);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("Mode");
+        ImGui::SameLine(0, 6);
+        ImGui::SetNextItemWidth(110);
+        if (ImGui::BeginCombo("##clipMode",
+                               clipPlaybackModeName(selClip->playbackMode))) {
+            for (int i = 0; i < 5; i++) {
+                ClipPlaybackMode m = (ClipPlaybackMode)i;
+                bool sel = (m == selClip->playbackMode);
+                if (ImGui::Selectable(clipPlaybackModeName(m), sel)) {
+                    selClip->playbackMode = m;
+                }
+                if (sel) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+            "Forward / Loop / Hold are wired. Reverse & Ping-Pong are UI-only.");
+
+        // Custom ISF shader path for the per-clip enter transition. Overrides
+        // the gl-transitions name above; routed through the Layer's shader
+        // transition slot in Timeline::applyToLayers.
+        ImGui::SameLine(0, 14);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("ISF");
+        ImGui::SameLine(0, 6);
+        {
+            static char isfBuf[512];
+            static uint32_t lastClipId = 0;
+            if (lastClipId != s_ctxClipId) {
+                std::snprintf(isfBuf, sizeof(isfBuf), "%s",
+                              selClip->transitionInShaderPath.c_str());
+                lastClipId = s_ctxClipId;
+            }
+            ImGui::SetNextItemWidth(140);
+            if (ImGui::InputText("##clipISF", isfBuf, sizeof(isfBuf),
+                                  ImGuiInputTextFlags_EnterReturnsTrue)) {
+                selClip->transitionInShaderPath = isfBuf;
+            }
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                selClip->transitionInShaderPath = isfBuf;
+            }
+            ImGui::SameLine(0, 4);
+            if (ImGui::SmallButton("...")) {
+                std::string path = openFileDialog(
+                    "ISF Shaders\0*.fs;*.frag;*.glsl\0All\0*.*\0");
+                if (!path.empty()) {
+                    selClip->transitionInShaderPath = path;
+                    std::snprintf(isfBuf, sizeof(isfBuf), "%s", path.c_str());
+                }
+            }
+            if (!selClip->transitionInShaderPath.empty()) {
+                ImGui::SameLine(0, 4);
+                if (ImGui::SmallButton("x##clearISF")) {
+                    selClip->transitionInShaderPath.clear();
+                    isfBuf[0] = '\0';
+                }
             }
         }
 
@@ -4698,9 +5512,25 @@ void Application::renderTimelinePanel() {
             d->AddText(ImVec2(bp.x + (w - ts.x) * 0.5f, bp.y + (h - ts.y) * 0.5f),
                        tx, dl_);
             if (clk) {
-                m_timeline.removeClip(s_ctxLayerId, s_ctxClipId);
+                m_undoStack.pushState(m_layerStack, m_selectedLayer, m_timeline);
+                if (s_multiSel.size() > 1) {
+                    for (uint64_t sk : s_multiSel) {
+                        uint32_t lid = (uint32_t)(sk >> 32);
+                        uint32_t cid = (uint32_t)(sk & 0xFFFFFFFFu);
+                        m_timeline.removeClip(lid, cid);
+                    }
+                    s_multiSel.clear();
+                } else {
+                    m_timeline.removeClip(s_ctxLayerId, s_ctxClipId);
+                }
                 s_ctxClipId = 0;
             }
+        }
+
+        // Show selection count when more than one clip is selected.
+        if (s_multiSel.size() > 1) {
+            ImGui::SameLine(0, 14);
+            ImGui::TextDisabled("%d selected", (int)s_multiSel.size());
         }
         ImGui::PopID();
     }
@@ -4712,17 +5542,72 @@ void Application::renderTimelinePanel() {
         ImGui::SetNextWindowPos(s_trPickerPos);
         if (ImGui::BeginPopup("##TrPicker")) {
             if (auto* tr = m_timeline.findTransition(s_trPickerId)) {
-                ImGui::TextDisabled("Effect");
+                ImGui::TextDisabled("Effect (built-in)");
                 ImGui::Separator();
                 auto names = GLTransitionLibrary::instance().names();
                 ImGui::PushItemWidth(180);
                 for (const auto& n : names) {
-                    bool sel = (tr->name == n);
+                    bool sel = (tr->name == n && tr->shaderPath.empty());
                     if (ImGui::Selectable(n.c_str(), sel)) {
                         tr->name = n;
+                        tr->shaderPath.clear(); // switching back to built-in
                     }
                 }
                 ImGui::PopItemWidth();
+
+                // Custom ISF shader picker — any .fs file that exposes
+                // `from`/`to`/`progress` uniforms becomes a transition. Lets
+                // users drive the cross-layer blend with their own shaders.
+                ImGui::Separator();
+                ImGui::TextDisabled("Custom shader");
+                if (!tr->shaderPath.empty()) {
+                    // Show just the basename so the popup stays narrow.
+                    std::string base = tr->shaderPath;
+                    auto slash = base.find_last_of("/\\");
+                    if (slash != std::string::npos) base = base.substr(slash + 1);
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.82f, 0.70f, 1.0f, 1.0f));
+                    ImGui::TextWrapped("%s", base.c_str());
+                    ImGui::PopStyleColor();
+                }
+
+                // Quick-pick from the ShaderClaw library when connected so
+                // users don't have to browse to their shaders folder for
+                // every transition. Picking sets shaderPath and clears the
+                // built-in `name` so the ISF path takes precedence.
+                if (m_shaderClaw.isConnected()) {
+                    const auto& scList = m_shaderClaw.shaders();
+                    if (!scList.empty()) {
+                        ImGui::SetNextItemWidth(180);
+                        if (ImGui::BeginCombo("##XitionSCPick", "From ShaderClaw...")) {
+                            for (const auto& s : scList) {
+                                const char* label = s.title.empty()
+                                                    ? s.file.c_str()
+                                                    : s.title.c_str();
+                                if (ImGui::Selectable(label)) {
+                                    tr->shaderPath = s.fullPath;
+                                    tr->name.clear();
+                                }
+                            }
+                            ImGui::EndCombo();
+                        }
+                    }
+                }
+
+                if (ImGui::Button(tr->shaderPath.empty() ? "Choose shader file..."
+                                                         : "Change shader...",
+                                  ImVec2(180, 0))) {
+                    std::string path = openFileDialog(
+                        "ISF Shaders\0*.fs;*.frag;*.glsl\0All\0*.*\0");
+                    if (!path.empty()) {
+                        tr->shaderPath = path;
+                        tr->name.clear();
+                    }
+                }
+                if (!tr->shaderPath.empty()) {
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Clear")) tr->shaderPath.clear();
+                }
+
                 ImGui::Separator();
                 float xd = (float)tr->duration;
                 ImGui::SetNextItemWidth(180);
@@ -4732,6 +5617,7 @@ void Application::renderTimelinePanel() {
                 ImGui::Separator();
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
                 if (ImGui::Selectable("Delete transition")) {
+                    m_undoStack.pushState(m_layerStack, m_selectedLayer, m_timeline);
                     m_timeline.removeTransition(s_trPickerId);
                     s_trPickerId = 0;
                 }
@@ -4862,23 +5748,61 @@ void Application::renderTimelinePanel() {
         if (!m_timeline.findClip(dragLayerId, dragClipId)) {
             dragLayerId = dragClipId = 0;
             dragMode = 0;
+            s_dragStartOffsets.clear();
         } else if (ImGui::IsMouseReleased(0)) {
             dragLayerId = dragClipId = 0;
             dragMode = 0;
+            s_dragStartOffsets.clear();
         } else {
             float dx = ImGui::GetIO().MousePos.x - dragAnchor.x;
             double dt = xToTime(dx) - xToTime(0.0f); // pixels → seconds
             if (auto* clip = m_timeline.findClip(dragLayerId, dragClipId)) {
-                // Playhead snap: pull within 6px to the playhead time.
+                // Snap to playhead AND to other clip edges on any track,
+                // pulling within ~6px.
                 double ph = m_timeline.playhead();
                 auto maybeSnap = [&](double& t) {
                     float dxp = timeToX(t) - timeToX(ph);
-                    if (std::abs(dxp) < 6.0f) t = ph;
+                    if (std::abs(dxp) < 6.0f) { t = ph; return; }
+                    // Neighbor clip edges (skip the clip being dragged itself).
+                    for (const auto& tr : m_timeline.tracks()) {
+                        for (const auto& c : tr.clips) {
+                            if (tr.layerId == dragLayerId && c.id == dragClipId) continue;
+                            // Skip anything in the selected-set when batch-moving
+                            // — snapping a group to itself locks it in place.
+                            if (dragMode == 0 && s_multiSel.count(selKey(tr.layerId, c.id))) continue;
+                            float dxs = timeToX(t) - timeToX(c.startTime);
+                            if (std::abs(dxs) < 6.0f) { t = c.startTime; return; }
+                            float dxe = timeToX(t) - timeToX(c.endTime());
+                            if (std::abs(dxe) < 6.0f) { t = c.endTime();   return; }
+                        }
+                    }
                 };
+                double tlDur = m_timeline.duration();
                 if (dragMode == 0) { // move
                     clip->startTime = dragStartTime + dt;
                     if (clip->startTime < 0) clip->startTime = 0;
+                    // Keep the clip fully inside the timeline — trim tail
+                    // never spills past the end.
+                    if (clip->startTime + clip->duration > tlDur)
+                        clip->startTime = tlDur - clip->duration;
+                    if (clip->startTime < 0) clip->startTime = 0;
                     maybeSnap(clip->startTime);
+                    // Batch-move every other selected clip by the actual delta
+                    // the primary clip ended up with (after snap/clamp).
+                    double actualDelta = clip->startTime - dragStartTime;
+                    for (const auto& kv : s_dragStartOffsets) {
+                        uint64_t sk = kv.first;
+                        if (sk == selKey(dragLayerId, dragClipId)) continue;
+                        uint32_t lid = (uint32_t)(sk >> 32);
+                        uint32_t cid = (uint32_t)(sk & 0xFFFFFFFFu);
+                        if (auto* c = m_timeline.findClip(lid, cid)) {
+                            double ns = kv.second + actualDelta;
+                            if (ns < 0) ns = 0;
+                            if (ns + c->duration > tlDur) ns = tlDur - c->duration;
+                            if (ns < 0) ns = 0;
+                            c->startTime = ns;
+                        }
+                    }
                 } else if (dragMode == 1) { // left trim
                     double newStart = dragStartTime + dt;
                     double newDur = dragStartDur - dt;
@@ -4890,15 +5814,41 @@ void Application::renderTimelinePanel() {
                 } else if (dragMode == 2) { // right trim
                     double newDur = dragStartDur + dt;
                     if (newDur < 0.1) newDur = 0.1;
+                    if (clip->startTime + newDur > tlDur)
+                        newDur = tlDur - clip->startTime;
                     clip->duration = newDur;
                     double e = clip->startTime + clip->duration;
                     maybeSnap(e);
                     clip->duration = e - clip->startTime;
                     if (clip->duration < 0.1) clip->duration = 0.1;
                 }
+                // Keep every touched track sorted so subsequent edge-snap
+                // lookups and clip-enter logic stay consistent.
                 m_timeline.sortTrack(dragLayerId);
+                if (dragMode == 0) {
+                    for (const auto& kv : s_dragStartOffsets) {
+                        uint32_t lid = (uint32_t)(kv.first >> 32);
+                        if (lid != dragLayerId) m_timeline.sortTrack(lid);
+                    }
+                }
             }
         }
+    }
+
+    // --- Auto-scroll: keep the playhead on-screen during playback ---
+    // Once the playhead passes the right 85% of the visible window, nudge the
+    // horizontal scroll so the playhead lands near the left 15% of the view.
+    // Only runs while playing — scrubbing and manual scroll stay unaffected.
+    if (m_timeline.isPlaying()) {
+        double visEnd = s_tlScroll + visibleDur;
+        if (playhead > s_tlScroll + visibleDur * 0.85
+            || playhead < s_tlScroll) {
+            s_tlScroll = playhead - visibleDur * 0.15;
+            if (s_tlScroll < 0.0) s_tlScroll = 0.0;
+            if (s_tlScroll + visibleDur > duration) s_tlScroll = duration - visibleDur;
+            if (s_tlScroll < 0.0) s_tlScroll = 0.0;
+        }
+        (void)visEnd;
     }
 
     // --- Playhead line (drawn on top) ---
@@ -4918,6 +5868,10 @@ void Application::renderTimelinePanel() {
     }
 
   } // end of if (!s_tlCollapsed)
+
+    // Measure actual content height for next frame's auto-fit. CursorPosY is
+    // window-local; add a bit of bottom padding to match the window style.
+    s_tlMeasuredContentH = ImGui::GetCursorPosY() + 14.0f;
 
     ImGui::End();
 }
@@ -5272,8 +6226,29 @@ void Application::renderTransportBar() {
 #endif
 
 void Application::renderMenuBar() {
+    // Taller main menu row with even top/bottom padding around the text so
+    // EDIT/FILE/LAYER/ZONE sit centred in the row next to the traffic-light
+    // buttons. Slight font-scale-down (via SetWindowFontScale on the menu
+    // window) makes the caps sit a notch smaller than body text.
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10, 8));
     if (ImGui::BeginMainMenuBar()) {
-        if (ImGui::BeginMenu("Edit")) {
+        if (ImGuiWindow* mw = ImGui::GetCurrentWindow()) mw->FontWindowScale = 0.88f;
+#ifdef __APPLE__
+        // Reserve space on the left for the macOS traffic-light buttons
+        // (close / min / max) — the window title bar has been merged into
+        // the content area so they now sit inside our ImGui row. In
+        // native fullscreen AppKit hides the traffic-lights, so skip
+        // the inset or the menu row gets an ugly empty gap on the left.
+        if (!m_editorFullscreen) {
+            const float kTrafficLightInset = 78.0f;
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + kTrafficLightInset);
+        } else {
+            // Fullscreen: AppKit hides the traffic-lights, so push the menu
+            // flush against the left edge (override the menu window padding).
+            ImGui::SetCursorPosX(0.0f);
+        }
+#endif
+        if (ImGui::BeginMenu("EDIT")) {
             if (ImGui::MenuItem("Undo", "Ctrl+Z", false, m_undoStack.canUndo())) {
                 m_undoStack.undo(m_layerStack, m_selectedLayer);
             }
@@ -5282,7 +6257,7 @@ void Application::renderMenuBar() {
             }
             ImGui::EndMenu();
         }
-        if (ImGui::BeginMenu("File")) {
+        if (ImGui::BeginMenu("FILE")) {
             if (ImGui::MenuItem("New Project")) {
                 m_undoStack.pushState(m_layerStack, m_selectedLayer);
                 while (m_layerStack.count() > 0) {
@@ -5322,6 +6297,9 @@ void Application::renderMenuBar() {
                 std::string path = openFileDialog(
                     "ISF Shaders\0*.fs;*.frag;*.glsl\0All Files\0*.*\0");
                 if (!path.empty()) loadShader(path);
+            }
+            if (ImGui::MenuItem("Add Particle System")) {
+                addParticles();
             }
 #ifdef HAS_NDI
             if (NDIRuntime::instance().isAvailable() && ImGui::BeginMenu("Add NDI Source")) {
@@ -5368,7 +6346,7 @@ void Application::renderMenuBar() {
             ImGui::EndMenu();
         }
 
-        if (ImGui::BeginMenu("Layer")) {
+        if (ImGui::BeginMenu("LAYER")) {
             if (ImGui::MenuItem("Remove Selected") && m_selectedLayer >= 0) {
                 m_undoStack.pushState(m_layerStack, m_selectedLayer);
                 uint32_t rid = (m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count() && m_layerStack[m_selectedLayer])
@@ -5403,7 +6381,7 @@ void Application::renderMenuBar() {
             ImGui::EndMenu();
         }
 
-        if (ImGui::BeginMenu("Zone")) {
+        if (ImGui::BeginMenu("ZONE")) {
             if (ImGui::MenuItem("Add Zone")) {
                 addZone();
             }
@@ -5424,40 +6402,109 @@ void Application::renderMenuBar() {
             ImGui::EndMenu();
         }
 
-        // Fullscreen toggle in menu bar
+        // Fullscreen lives next to the composition chip in the viewport;
+        // GO LIVE lives next to REC in the timeline transport. The menu bar
+        // now carries only the Edit/File/Layer/Zone dropdowns so it fits
+        // inside the unified title bar.
+        ImGui::EndMainMenuBar();
+    }
+    ImGui::PopStyleVar();
+}
+
+#ifdef HAS_FFMPEG
+void Application::renderGoLiveButton() {
+    const char* lbl = m_rtmpOutput.isActive() ? "END LIVE" : "GO LIVE";
+    if (m_rtmpOutput.isActive()) {
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.35f, 0.06f, 0.06f, 0.80f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.55f, 0.10f, 0.10f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.70f, 0.14f, 0.14f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.00f, 0.55f, 0.55f, 1.00f));
+    } else {
+        bool hasKey = m_streamKeyBuf[0] != '\0';
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.07f, 0.22f, 0.36f, 0.55f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.10f, 0.32f, 0.52f, 0.90f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.14f, 0.40f, 0.62f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_Text,
+            hasKey ? ImVec4(0.38f, 0.76f, 1.00f, 1.00f)
+                   : ImVec4(0.60f, 0.62f, 0.68f, 1.00f));
+    }
+    if (ImGui::Button(lbl)) {
+        if (m_rtmpOutput.isActive()) {
+            m_rtmpOutput.stop();
+        } else {
+            ImGui::OpenPopup("##GoLivePopup");
+        }
+    }
+    ImGui::PopStyleColor(4);
+
+    if (ImGui::BeginPopup("##GoLivePopup")) {
+        ImGui::TextDisabled("Stream to RTMP");
         ImGui::Separator();
-        if (ImGui::MenuItem(m_editorFullscreen ? "Exit Fullscreen" : "Fullscreen", "F11")) {
-            if (!m_editorFullscreen) {
-                glfwGetWindowPos(m_window, &m_savedWindowX, &m_savedWindowY);
-                glfwGetWindowSize(m_window, &m_savedWindowW, &m_savedWindowH);
-                int monCount = 0;
-                GLFWmonitor** monitors = glfwGetMonitors(&monCount);
-                GLFWmonitor* best = glfwGetPrimaryMonitor();
-                int wx, wy;
-                glfwGetWindowPos(m_window, &wx, &wy);
-                for (int mi = 0; mi < monCount; mi++) {
-                    int mx, my;
-                    glfwGetMonitorPos(monitors[mi], &mx, &my);
-                    const GLFWvidmode* mode = glfwGetVideoMode(monitors[mi]);
-                    if (wx >= mx && wx < mx + mode->width &&
-                        wy >= my && wy < my + mode->height) {
-                        best = monitors[mi];
-                        break;
-                    }
-                }
-                const GLFWvidmode* mode = glfwGetVideoMode(best);
-                glfwSetWindowMonitor(m_window, best, 0, 0,
-                                     mode->width, mode->height, mode->refreshRate);
-                m_editorFullscreen = true;
-            } else {
-                glfwSetWindowMonitor(m_window, nullptr,
-                                     m_savedWindowX, m_savedWindowY,
-                                     m_savedWindowW, m_savedWindowH, 0);
-                m_editorFullscreen = false;
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.59f, 0.62f, 0.68f, 0.90f));
+        ImGui::Text("YouTube Stream Key");
+        ImGui::PopStyleColor();
+        ImGui::SetNextItemWidth(260);
+        ImGui::InputText("##StreamKeyMenu", m_streamKeyBuf,
+                         sizeof(m_streamKeyBuf),
+                         ImGuiInputTextFlags_Password);
+        static const char* aspectNames[] = { "16:9", "4:3", "16:10", "Source" };
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.59f, 0.62f, 0.68f, 0.90f));
+        ImGui::Text("Aspect");
+        ImGui::PopStyleColor();
+        ImGui::SetNextItemWidth(260);
+        ImGui::Combo("##AspectMenu", &m_streamAspect, aspectNames, 4);
+        ImGui::Separator();
+        bool hasKey = m_streamKeyBuf[0] != '\0';
+        ImGui::BeginDisabled(!hasKey);
+        if (ImGui::Button("Start streaming", ImVec2(-1, 0))) {
+            static const int aspectNums[] = { 16, 4, 16, 0 };
+            static const int aspectDens[] = { 9,  3, 10, 0 };
+            auto& z = activeZone();
+            m_rtmpOutput.start(m_streamKeyBuf,
+                               z.warpFBO.width(), z.warpFBO.height(),
+                               aspectNums[m_streamAspect],
+                               aspectDens[m_streamAspect], 30);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+        if (!hasKey) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.6f, 0.2f, 1.0f));
+            ImGui::TextWrapped("Paste a YouTube stream key to enable.");
+            ImGui::PopStyleColor();
+        }
+        ImGui::EndPopup();
+    }
+}
+#endif
+
+void Application::toggleEditorFullscreen() {
+    if (!m_editorFullscreen) {
+        glfwGetWindowPos(m_window, &m_savedWindowX, &m_savedWindowY);
+        glfwGetWindowSize(m_window, &m_savedWindowW, &m_savedWindowH);
+        int monCount = 0;
+        GLFWmonitor** monitors = glfwGetMonitors(&monCount);
+        GLFWmonitor* best = glfwGetPrimaryMonitor();
+        int wx, wy;
+        glfwGetWindowPos(m_window, &wx, &wy);
+        for (int mi = 0; mi < monCount; mi++) {
+            int mx, my;
+            glfwGetMonitorPos(monitors[mi], &mx, &my);
+            const GLFWvidmode* mode = glfwGetVideoMode(monitors[mi]);
+            if (wx >= mx && wx < mx + mode->width &&
+                wy >= my && wy < my + mode->height) {
+                best = monitors[mi];
+                break;
             }
         }
-
-        ImGui::EndMainMenuBar();
+        const GLFWvidmode* mode = glfwGetVideoMode(best);
+        glfwSetWindowMonitor(m_window, best, 0, 0,
+                             mode->width, mode->height, mode->refreshRate);
+        m_editorFullscreen = true;
+    } else {
+        glfwSetWindowMonitor(m_window, nullptr,
+                             m_savedWindowX, m_savedWindowY,
+                             m_savedWindowW, m_savedWindowH, 0);
+        m_editorFullscreen = false;
     }
 }
 
@@ -5543,12 +6590,32 @@ void Application::addParticles() {
     auto layer = std::make_shared<Layer>();
     layer->id = m_nextLayerId++;
     layer->source = src;
-    layer->name = "Particles 1M";
+    layer->name = "Particle System";
 
     m_layerStack.addLayer(layer);
     m_selectedLayer = m_layerStack.count() - 1;
     registerLayerWithZones(layer->id);
 }
+
+#ifdef HAS_OPENCV
+void Application::addWebcam(int cameraIndex) {
+    m_undoStack.pushState(m_layerStack, m_selectedLayer);
+    auto src = std::make_shared<WebcamSource>();
+    if (!src->open(cameraIndex)) {
+        std::cerr << "Failed to open webcam index " << cameraIndex << std::endl;
+        return;
+    }
+
+    auto layer = std::make_shared<Layer>();
+    layer->id = m_nextLayerId++;
+    layer->source = src;
+    layer->name = "Camera " + std::to_string(cameraIndex);
+
+    m_layerStack.addLayer(layer);
+    m_selectedLayer = m_layerStack.count() - 1;
+    registerLayerWithZones(layer->id);
+}
+#endif
 
 #ifdef _WIN32
 void Application::addWindowCapture(HWND hwnd, const std::string& title) {

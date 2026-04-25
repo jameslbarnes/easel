@@ -146,6 +146,10 @@ private:
     void renderReadbackFBO(OutputZone& zone);
     void renderUI();
     void renderMenuBar();
+    void toggleEditorFullscreen();
+#ifdef HAS_FFMPEG
+    void renderGoLiveButton();
+#endif
 
     // Inline (no Begin/End) section renderers — called from inside their host
     // tab so each control lives with the workflow step it belongs to.
@@ -161,6 +165,9 @@ private:
     void addScreenCapture(int monitorIndex);
 #endif
     void addParticles();
+#ifdef HAS_OPENCV
+    void addWebcam(int cameraIndex);
+#endif
 #ifdef _WIN32
     void addWindowCapture(HWND hwnd, const std::string& title);
 #elif defined(__APPLE__)
@@ -256,7 +263,10 @@ private:
     // When true, the timeline renders only its transport row and hides the
     // ruler / tracks / audio lane / clip inspector. The panel itself remains
     // docked — drag the dock splitter to shrink to just the transport.
-    bool   m_timelineMinimized = false;
+    // Default: minimized. The transport row is enough for a quick show of
+    // hands during setup, and the tracks pop up on demand (click the "+" on
+    // the timeline tab or press T). Keeps the canvas area maximized on launch.
+    bool   m_timelineMinimized = true;
 
     // Audio level meter (WASAPI IAudioMeterInformation)
     void* m_audioMeterInfo = nullptr;

@@ -2,8 +2,10 @@
 #include "compositing/LayerStack.h"
 #include "compositing/MaskPath.h"
 #include "sources/ShaderSource.h"
+#include "timeline/Timeline.h"
 #include <vector>
 #include <deque>
+#include <nlohmann/json.hpp>
 
 struct LayerSnapshot {
     std::string name;
@@ -34,12 +36,30 @@ struct LayerSnapshot {
 struct SceneSnapshot {
     std::vector<LayerSnapshot> layers;
     int selectedLayer = -1;
+    // Optional — captured when an undo is pushed alongside a Timeline ref.
+    // Restored via Timeline::fromJson on undo/redo so clip/transition edits
+    // (move, trim, add, delete) are reversible.
+    nlohmann::json timelineJson;
+    bool           hasTimeline = false;
 };
 
 class UndoStack {
 public:
     void pushState(const LayerStack& stack, int selectedLayer) {
         SceneSnapshot snap = capture(stack, selectedLayer);
+        m_undoStack.push_back(std::move(snap));
+        if ((int)m_undoStack.size() > m_maxEntries) {
+            m_undoStack.pop_front();
+        }
+        m_redoStack.clear();
+    }
+
+    // Timeline-aware push — snapshots both the layer stack AND the current
+    // timeline state so clip/transition drags, adds, and deletes are undoable.
+    void pushState(const LayerStack& stack, int selectedLayer, const Timeline& tl) {
+        SceneSnapshot snap = capture(stack, selectedLayer);
+        snap.timelineJson = tl.toJson();
+        snap.hasTimeline  = true;
         m_undoStack.push_back(std::move(snap));
         if ((int)m_undoStack.size() > m_maxEntries) {
             m_undoStack.pop_front();
@@ -71,10 +91,37 @@ public:
         m_undoStack.pop_back();
     }
 
+    // Timeline-aware undo — restores both layer stack and timeline state.
+    // Safe to call when the snapshot has no timeline data (falls back to
+    // layer-only undo).
+    void undo(LayerStack& stack, int& selectedLayer, Timeline& tl) {
+        if (m_undoStack.empty()) return;
+        SceneSnapshot cur = capture(stack, selectedLayer);
+        cur.timelineJson = tl.toJson();
+        cur.hasTimeline  = true;
+        m_redoStack.push_back(std::move(cur));
+        const auto& prev = m_undoStack.back();
+        restore(prev, stack, selectedLayer);
+        if (prev.hasTimeline) tl.fromJson(prev.timelineJson);
+        m_undoStack.pop_back();
+    }
+
     void redo(LayerStack& stack, int& selectedLayer) {
         if (m_redoStack.empty()) return;
         m_undoStack.push_back(capture(stack, selectedLayer));
         restore(m_redoStack.back(), stack, selectedLayer);
+        m_redoStack.pop_back();
+    }
+
+    void redo(LayerStack& stack, int& selectedLayer, Timeline& tl) {
+        if (m_redoStack.empty()) return;
+        SceneSnapshot cur = capture(stack, selectedLayer);
+        cur.timelineJson = tl.toJson();
+        cur.hasTimeline  = true;
+        m_undoStack.push_back(std::move(cur));
+        const auto& next = m_redoStack.back();
+        restore(next, stack, selectedLayer);
+        if (next.hasTimeline) tl.fromJson(next.timelineJson);
         m_redoStack.pop_back();
     }
 

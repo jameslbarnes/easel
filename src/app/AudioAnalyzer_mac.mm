@@ -215,7 +215,16 @@ void AudioAnalyzer::initCapture() {
         return;
     }
 
-    // Default: ScreenCaptureKit system audio loopback
+    // Default: ScreenCaptureKit system audio loopback. Gated behind an
+    // explicit opt-in so the macOS "Screen Recording" TCC prompt only fires
+    // when the user actually needs system-audio capture (picks System Audio
+    // in the dropdown, starts recording, etc.) — otherwise self-signed dev
+    // builds would prompt on every launch because the cdhash changes.
+    if (!m_wantsSystemAudio) {
+        cleanupCapture();
+        return;
+    }
+
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
     __block bool success = false;
 
