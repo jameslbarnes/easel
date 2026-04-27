@@ -62,10 +62,14 @@ bool UIManager::init(GLFWwindow* window) {
     const char* boldFontPath    = "C:/Windows/Fonts/seguisb.ttf";       // SemiBold
     const char* boldFallback    = "C:/Windows/Fonts/segoeuib.ttf";      // Bold
     const char* monoFontPath    = "C:/Windows/Fonts/CascadiaMono.ttf";
-    const char* macPrimaryPath  = "/System/Library/Fonts/Helvetica.ttc";
-    const char* macPrimaryFB    = "/System/Library/Fonts/Supplemental/Arial.ttf";
-    const char* macBoldPath     = "/System/Library/Fonts/Supplemental/Arial Bold.ttf";
-    const char* macMonoPath     = "/System/Library/Fonts/Menlo.ttc";
+    // Apple's actual UI typeface (SF Pro). Variable file shipped at this
+    // path on macOS 11+. Falls back to Helvetica/Arial if missing. SF Pro
+    // gives Easel the authentic native-Mac feel that Helvetica.ttc (1957)
+    // can't — same family Apple uses across Finder, Xcode, and Sonoma.
+    const char* macPrimaryPath  = "/System/Library/Fonts/SFNS.ttf";
+    const char* macPrimaryFB    = "/System/Library/Fonts/Helvetica.ttc";
+    const char* macBoldPath     = "/System/Library/Fonts/SFNS.ttf";
+    const char* macMonoPath     = "/System/Library/Fonts/SFNSMono.ttf";
 
     float fontSize = 15.0f * fontScale;  // denser feel; scaled for DPI
     ImFontConfig fontCfg;
@@ -274,14 +278,17 @@ void UIManager::applyTheme(float dpiScale) {
     s.SeparatorTextBorderSize = 1.0f;
     s.SeparatorTextPadding    = ImVec2(12, 6);
 
-    // Rounding — soft, airy radii (borrowed from floating-panel designs).
+    // Rounding — three principled tiers instead of four ad-hoc values.
+    // 6  → tactile elements (frames, buttons, tabs) — read as "interactive"
+    // 10 → containers (windows, popups, children) — read as "surface"
+    // 100 → pills (scrollbar grab, slider grab) — read as "drag handle"
     s.WindowRounding    = 10.0f;
-    s.ChildRounding     = 8.0f;
+    s.ChildRounding     = 10.0f;
     s.FrameRounding     = 6.0f;
     s.PopupRounding     = 10.0f;
-    s.ScrollbarRounding = 100.0f; // fully pill-rounded scrollbars
-    s.GrabRounding      = 100.0f; // circular grab handle
-    s.TabRounding       = 8.0f;
+    s.ScrollbarRounding = 100.0f;
+    s.GrabRounding      = 100.0f;
+    s.TabRounding       = 6.0f;
 
     // Borders — hairline semi-transparent whites, no solid dark borders
     s.WindowBorderSize  = 1.0f;
