@@ -235,11 +235,20 @@ add_executable(test_shaders
     src/render/FontAtlas.cpp
     src/app/MIDIManager.cpp
 )
+if(APPLE)
+    target_sources(test_shaders PRIVATE src/app/MIDIManager_mac.mm)
+endif()
 if(WIN32)
     target_compile_definitions(test_shaders PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 target_include_directories(test_shaders PRIVATE ${CMAKE_SOURCE_DIR}/src ${stb_SOURCE_DIR})
 target_link_libraries(test_shaders PRIVATE glfw glad glm::glm nlohmann_json::nlohmann_json OpenGL::GL)
+if(APPLE)
+    target_link_libraries(test_shaders PRIVATE
+        "-framework CoreMIDI"
+        "-framework CoreFoundation"
+    )
+endif()
 
 if(WIN32)
     target_compile_definitions(${PROJECT_NAME} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)

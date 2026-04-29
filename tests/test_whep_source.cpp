@@ -216,9 +216,9 @@ TEST_CASE("Concurrent onWebViewFrame writes are safe", "[whep][thread]") {
     std::vector<std::thread> writers;
 
     for (int t = 0; t < NUM_WRITERS; t++) {
-        writers.emplace_back([&src, t]() {
+        writers.emplace_back([&src, t, framesPerWriter = FRAMES_PER_WRITER]() {
             std::vector<uint8_t> buf(160 * 120 * 4, static_cast<uint8_t>(t));
-            for (int i = 0; i < FRAMES_PER_WRITER; i++) {
+            for (int i = 0; i < framesPerWriter; i++) {
                 src.onWebViewFrame(160, 120, buf.data(),
                                    static_cast<int>(buf.size()));
             }
