@@ -38,11 +38,13 @@ public:
     Workspace workspace() const { return m_workspace; }
     void setWorkspace(Workspace w);
 
-    // Current main-viewport workspace. Canvas vs Stage are rendered as
-    // alternatives (not as dock peers) — only one is submitted per frame.
-    // The pill switchers on both panels flip this flag, and the Begin()
-    // guards in Application::renderUI read it to decide which to draw.
-    static bool sShowStage;
+    // Current main-viewport workspace. Three modes — only one is rendered
+    // per frame, the pill switcher in the secondary nav flips this enum:
+    //   Canvas → 2D compositor + layers/properties/sources/timeline
+    //   Stage  → 3D stage view (projector preview)
+    //   Show   → live-performance focus: timeline + MIDI + audio
+    enum class WorkspaceMode { Canvas, Stage, Show };
+    static WorkspaceMode sMode;
 
     // True if a panel with this title should render in the current workspace.
     // Call sites that render panels (inline or via class.render()) should

@@ -204,6 +204,10 @@ public:
     // Import plus tab-focus buttons for Mapping and Masks. Rendered by the
     // host (Application) ABOVE the scrollable viewport child so it stays put.
     void renderToolbar();
+    // Floating vertical pill toolbar rendered as a separate ImGui window
+    // on the left edge of the canvas (where the Layers panel sits in
+    // Canvas mode). Positions itself via SetNextWindowPos.
+    void renderFloatingToolbar();
 private:
 
     // Stage environment — light floor + back wall so the 3D space has ground.
@@ -222,4 +226,13 @@ private:
 
     // Gizmo state
     int m_gizmoOp = 0; // 0=translate, 1=rotate, 2=scale
+
+    // Floating-toolbar sub-menu state. Replaces ImGui popups (which had
+    // ID-stack scoping quirks inside the borderless floating host
+    // window). Buttons set the flag; the toolbar then renders a small
+    // peer floating window listing the menu items.
+    bool m_envMenuOpen     = false;
+    bool m_surfaceMenuOpen = false;
+public:
+    int& gizmoOp() { return m_gizmoOp; }
 };

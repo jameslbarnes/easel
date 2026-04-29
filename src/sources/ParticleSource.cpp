@@ -48,30 +48,61 @@ const char* particleModuleTypeName(ParticleModuleType t) {
 // Instanced quad billboards. Each instance carries position (xyz) + size
 // + rotation + color (rgba) packed as two vec4s.
 
+// Vertex shader: velocity-aligned, velocity-stretched billboards.
+// Each instance now also carries velocity.xy (NDC-space). The quad is
+// rotated to align with the velocity direction (or falls back to the
+// per-particle rotation when speed is below a small threshold) and
+// stretched along that direction proportional to speed. This converts
+// "dots" into "streaks" — one of the highest-ROI upgrades from the
+// Niagara research.
 static const char* kParticleVert = R"GLSL(
 #version 330 core
 layout(location = 0) in vec2 aCorner;       // -0.5..0.5 quad corner
 layout(location = 1) in vec4 aPosSize;      // xyz = position, w = size
 layout(location = 2) in vec4 aRotColor;     // x = rotation (rad), yzw = rgb
-layout(location = 3) in float aAlpha;       // a
+layout(location = 3) in float aAlpha;       // particle alpha
+layout(location = 4) in vec2  aVelocity;    // xy in NDC/sec
 out vec2 vUV;
 out vec4 vColor;
 uniform float uAspect;
+uniform float uMotionBlur;  // 0..1, scales the speed-based stretch
+uniform float uMinStretch;  // 0..1, base stretch even at zero velocity
 
 void main() {
-    float c = cos(aRotColor.x);
-    float s = sin(aRotColor.x);
-    vec2 rotated = mat2(c, -s, s, c) * aCorner;
-    vec2 offset = rotated * aPosSize.w;
-    // Screen-space billboard: ignore Z for positioning but retain it for
-    // depth sort if we ever want it.
+    float speed = length(aVelocity);
+    // Motion-aligned rotation when moving fast enough; otherwise use the
+    // per-particle rotation parameter.
+    float c, s;
+    if (speed > 0.001) {
+        // Normalize and align the quad's local +X with velocity.
+        vec2 dir = aVelocity / speed;
+        c = dir.x;
+        s = dir.y;
+    } else {
+        c = cos(aRotColor.x);
+        s = sin(aRotColor.x);
+    }
+
+    // Stretch along motion: x grows with speed*motionBlur, y stays at 1.
+    // Min stretch keeps a baseline elongation even at low speed for
+    // a bit of "always streaking" character.
+    float stretchX = 1.0 + speed * uMotionBlur * 30.0 + uMinStretch;
+    vec2 stretched = aCorner * vec2(stretchX, 1.0);
+
+    vec2 rotated = mat2(c, -s, s, c) * stretched;
+    vec2 offset  = rotated * aPosSize.w;
+
+    // Aspect-correct y for screen-space billboard.
     vec2 pos2D = aPosSize.xy + offset * vec2(1.0, uAspect);
     gl_Position = vec4(pos2D, 0.0, 1.0);
-    vUV = aCorner + 0.5;
+    vUV    = aCorner + 0.5;
     vColor = vec4(aRotColor.yzw, aAlpha);
 }
 )GLSL";
 
+// Fragment shader: tighter falloff curve so stretched streaks have a
+// visible bright core that fades quickly to the edges. Adds a "core
+// boost" that intensifies the centre to give an HDR/glow feel.
 static const char* kParticleFrag = R"GLSL(
 #version 330 core
 in vec2 vUV;
@@ -90,8 +121,11 @@ void main() {
         alpha = 1.0 - abs(r - 0.75) * 4.0;
         alpha = clamp(alpha, 0.0, 1.0);
     } else {
-        // Soft sprite — gaussian-ish falloff
-        alpha = exp(-r * r * 3.0);
+        // Sprite: tighter gaussian + small bright core for an HDR-ish
+        // hot center. Reads as glowing streaks when stretched.
+        float body = exp(-r * r * 4.5);
+        float core = exp(-r * r * 18.0) * 0.5;
+        alpha = clamp(body + core, 0.0, 1.0);
     }
 
     vec3 rgb = vColor.rgb * vColor.a;
@@ -212,20 +246,26 @@ bool ParticleSource::init(int resolutionW, int resolutionH) {
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
 
-    // Instance VBO: per-particle {posSize(vec4), rotColor(vec4), alpha(float)}
-    // Laid out as 9 floats per instance, stride = 36 bytes.
+    // Instance VBO: per-particle {posSize(vec4), rotColor(vec4),
+    //                              alpha(float), velocity(vec2)}.
+    // 11 floats per instance, stride = 44 bytes. Velocity is consumed
+    // by the vertex shader for motion-aligned anisotropic stretch.
     glGenBuffers(1, &m_instanceVBO);
     glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
     glBufferData(GL_ARRAY_BUFFER, 0, nullptr, GL_DYNAMIC_DRAW);
+    const GLsizei kInstStride = 11 * sizeof(float);
     glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void*)0);
+    glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, kInstStride, (void*)0);
     glVertexAttribDivisor(1, 1);
     glEnableVertexAttribArray(2);
-    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void*)(4 * sizeof(float)));
+    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, kInstStride, (void*)(4 * sizeof(float)));
     glVertexAttribDivisor(2, 1);
     glEnableVertexAttribArray(3);
-    glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void*)(8 * sizeof(float)));
+    glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, kInstStride, (void*)(8 * sizeof(float)));
     glVertexAttribDivisor(3, 1);
+    glEnableVertexAttribArray(4);
+    glVertexAttribPointer(4, 2, GL_FLOAT, GL_FALSE, kInstStride, (void*)(9 * sizeof(float)));
+    glVertexAttribDivisor(4, 1);
 
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
@@ -296,9 +336,21 @@ void ParticleSource::moveModule(int index, int direction) {
 }
 
 void ParticleSource::spawnParticles(float dt) {
-    m_spawnAccumulator += m_emitter.spawnRate * dt;
+    // Audio-reactive spawn rate: bass amplifies the steady stream.
+    float effectiveRate = m_emitter.spawnRate
+                        * (1.0f + m_audioBass * m_emitter.audioSpawnRateMul);
+    m_spawnAccumulator += effectiveRate * dt;
     int toSpawn = (int)m_spawnAccumulator;
     m_spawnAccumulator -= toSpawn;
+
+    // Beat-onset burst: emit a clump of particles on the rising edge of
+    // the audio beat signal. Threshold + edge-detect prevents continuous
+    // emission while the beat plateaus high.
+    if (m_audioBeat > 0.5f && m_audioBeatPrev <= 0.5f
+        && m_emitter.audioBeatBurst > 0.0f) {
+        toSpawn += (int)m_emitter.audioBeatBurst;
+    }
+    m_audioBeatPrev = m_audioBeat;
 
     int room = m_emitter.maxParticles - (int)m_particles.size();
     if (toSpawn > room) toSpawn = room;
@@ -347,16 +399,18 @@ void ParticleSource::spawnParticles(float dt) {
         }
         p.position = m_emitter.spawnCenter + local * m_emitter.spawnExtents;
 
-        // Initial velocity
+        // Initial velocity (with treble-driven audio boost).
         glm::vec3 jitter = {frand_s(s, -1.0f, 1.0f),
                             frand_s(s, -1.0f, 1.0f),
                             frand_s(s, -1.0f, 1.0f)};
-        p.velocity = m_emitter.initialVelocity
-                   + jitter * m_emitter.velocityJitter;
+        float velAudio = 1.0f + m_audioTreble * m_emitter.audioVelocityMul;
+        p.velocity = (m_emitter.initialVelocity
+                   + jitter * m_emitter.velocityJitter) * velAudio;
 
-        // Initial size
+        // Initial size (with mid-band audio boost).
         float sizeScale = 1.0f + (frand(s) * 2.0f - 1.0f) * m_emitter.sizeJitter * 0.5f;
-        p.size      = m_emitter.initialSize * std::max(0.01f, sizeScale);
+        float sizeAudio = 1.0f + m_audioMid * m_emitter.audioSizeMul;
+        p.size      = m_emitter.initialSize * std::max(0.01f, sizeScale) * sizeAudio;
         p.sizeStart = p.size;
 
         // Lifetime
@@ -478,11 +532,12 @@ void ParticleSource::removeDead() {
 
 void ParticleSource::uploadInstances() {
     if (m_particles.empty()) return;
-    // Pack 9 floats/particle: posSize(4), rotColor(4), alpha(1).
-    // Note position uses .xy for screen-space; z retained for future depth.
+    // Pack 11 floats/particle: posSize(4), rotColor(4), alpha(1),
+    // velocity.xy(2). Velocity drives motion-aligned anisotropic
+    // stretching in the vertex shader.
     int n = (int)m_particles.size();
     std::vector<float> buf;
-    buf.reserve(n * 9);
+    buf.reserve(n * 11);
     for (const auto& p : m_particles) {
         buf.push_back(p.position.x);
         buf.push_back(p.position.y);
@@ -493,6 +548,8 @@ void ParticleSource::uploadInstances() {
         buf.push_back(p.color.g);
         buf.push_back(p.color.b);
         buf.push_back(p.color.a);
+        buf.push_back(p.velocity.x);
+        buf.push_back(p.velocity.y);
     }
     glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
     if (n > m_instanceCapacity) {
@@ -529,7 +586,9 @@ void ParticleSource::renderParticles() {
         m_renderShader.use();
         m_renderShader.setInt("uRenderMode", m_emitter.renderMode);
         float aspect = (m_h > 0) ? (float)m_w / (float)m_h : 1.0f;
-        m_renderShader.setFloat("uAspect", aspect);
+        m_renderShader.setFloat("uAspect",     aspect);
+        m_renderShader.setFloat("uMotionBlur", m_emitter.motionBlur);
+        m_renderShader.setFloat("uMinStretch", m_emitter.minStretch);
 
         glBindVertexArray(m_quadVAO);
         glDrawArraysInstanced(GL_TRIANGLE_FAN, 0, 4, (GLsizei)m_particles.size());

@@ -6,6 +6,8 @@
 #include <iostream>
 #include <cmath>
 #include <algorithm>
+#include <functional>
+#include <initializer_list>
 
 #define TINYOBJLOADER_IMPLEMENTATION
 // Already defined in ObjMeshWarp.cpp, so we use extern
@@ -459,55 +461,413 @@ void StageView::render(const std::vector<GLuint>& zoneTextures,
 }
 
 void StageView::renderToolbar() {
-    // Pinned toolbar — matched styling with the rest of the app's pill buttons.
-    // Left cluster: stage-edit actions. Right cluster: Mapping / Masks focus
-    // buttons that bring those docked panels forward in their tab group.
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.20f));
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 0.9f));
+    // Floating pill toolbar — long rounded container with circular icon
+    // buttons inside. Sits at the top of the Stage workspace as an
+    // overlay above the 3D viewport. Tools, left-to-right:
+    //   Floor (toggle) | Wall (toggle) | + Display | + Surface ▾ | Import
+    // The Projector button is hidden until that workflow is real.
+    // Mapping/Masks live in the right-rail Properties panel now,
+    // not in this toolbar.
+    const float kBtnSize  = 36.0f;        // diameter of each circular button
+    const float kBtnGap   = 6.0f;         // gap between buttons
+    const float kPillPad  = 6.0f;         // inner padding inside the pill
+    const float kPillH    = kBtnSize + kPillPad * 2.0f;
 
-    ImGui::Checkbox("Floor/Wall", &m_envVisible);
-    ImGui::SameLine();
-    if (ImGui::SmallButton("+ Display")) {
+    struct ToolBtn {
+        const char* id;
+        const char* tip;
+        char glyph;          // 0..3 = floor/wall/display/surface, 4 = import
+        int  kind;           // matches glyph
+        bool toggleOn;       // for stateful toggles (Floor/Wall)
+        bool isToggle;
+    };
+
+    bool floorOn = m_envVisible; // current Floor/Wall flag covers both
+    bool wallOn  = m_envVisible;
+    ToolBtn buttons[] = {
+        {"##Floor",   "Show floor",       0, 0, floorOn, true},
+        {"##Wall",    "Show wall",        0, 1, wallOn,  true},
+        {"##AddDisp", "Add display",      0, 2, false,   false},
+        {"##AddSurf", "Add surface",      0, 3, false,   false},
+        {"##Import",  "Import...",        0, 4, false,   false},
+    };
+    const int kBtnCount = (int)(sizeof(buttons) / sizeof(buttons[0]));
+
+    float pillW = kPillPad * 2.0f + kBtnSize * kBtnCount + kBtnGap * (kBtnCount - 1);
+
+    // Center the pill horizontally inside the Stage panel.
+    float availX = ImGui::GetContentRegionAvail().x;
+    float startX = ImGui::GetCursorPosX() + std::max(0.0f, (availX - pillW) * 0.5f);
+    ImVec2 pillPos = ImVec2(ImGui::GetWindowPos().x + startX,
+                            ImGui::GetCursorScreenPos().y);
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    // Pill background — same dark widget tint as other floating chrome
+    // (matches the CANVAS/STAGE/SHOW segmented control track).
+    dl->AddRectFilled(
+        pillPos,
+        ImVec2(pillPos.x + pillW, pillPos.y + kPillH),
+        IM_COL32(28, 30, 34, 235),
+        kPillH * 0.5f);
+    dl->AddRect(
+        pillPos,
+        ImVec2(pillPos.x + pillW, pillPos.y + kPillH),
+        IM_COL32(255, 255, 255, 24),
+        kPillH * 0.5f, 0, 1.0f);
+
+    // Per-button glyph drawing — minimal line art, scales with kBtnSize.
+    auto drawGlyph = [&](ImVec2 c, int kind, ImU32 col) {
+        const float r = kBtnSize * 0.32f;
+        switch (kind) {
+        case 0: { // Floor — horizontal slab in perspective
+            dl->AddLine(ImVec2(c.x - r, c.y + r * 0.3f),
+                        ImVec2(c.x + r, c.y + r * 0.3f), col, 1.6f);
+            dl->AddLine(ImVec2(c.x - r * 0.6f, c.y - r * 0.2f),
+                        ImVec2(c.x + r * 0.6f, c.y - r * 0.2f), col, 1.4f);
+            dl->AddLine(ImVec2(c.x - r, c.y + r * 0.3f),
+                        ImVec2(c.x - r * 0.6f, c.y - r * 0.2f), col, 1.4f);
+            dl->AddLine(ImVec2(c.x + r, c.y + r * 0.3f),
+                        ImVec2(c.x + r * 0.6f, c.y - r * 0.2f), col, 1.4f);
+            break; }
+        case 1: { // Wall — vertical rectangle
+            dl->AddRect(ImVec2(c.x - r * 0.7f, c.y - r),
+                        ImVec2(c.x + r * 0.7f, c.y + r), col, 0, 0, 1.5f);
+            break; }
+        case 2: { // Display — screen with stand
+            dl->AddRect(ImVec2(c.x - r, c.y - r * 0.7f),
+                        ImVec2(c.x + r, c.y + r * 0.4f), col, 2, 0, 1.5f);
+            dl->AddLine(ImVec2(c.x, c.y + r * 0.4f),
+                        ImVec2(c.x, c.y + r * 0.8f), col, 1.5f);
+            dl->AddLine(ImVec2(c.x - r * 0.4f, c.y + r * 0.8f),
+                        ImVec2(c.x + r * 0.4f, c.y + r * 0.8f), col, 1.5f);
+            break; }
+        case 3: { // Surface — generic flat plane (rotated rect)
+            dl->AddQuad(ImVec2(c.x - r, c.y - r * 0.4f),
+                        ImVec2(c.x, c.y - r),
+                        ImVec2(c.x + r, c.y - r * 0.4f),
+                        ImVec2(c.x, c.y + r * 0.2f), col, 1.5f);
+            break; }
+        case 4: { // Import — down arrow into tray
+            dl->AddLine(ImVec2(c.x, c.y - r * 0.8f),
+                        ImVec2(c.x, c.y + r * 0.3f), col, 1.6f);
+            dl->AddLine(ImVec2(c.x - r * 0.4f, c.y - r * 0.1f),
+                        ImVec2(c.x, c.y + r * 0.3f), col, 1.6f);
+            dl->AddLine(ImVec2(c.x + r * 0.4f, c.y - r * 0.1f),
+                        ImVec2(c.x, c.y + r * 0.3f), col, 1.6f);
+            dl->AddLine(ImVec2(c.x - r, c.y + r * 0.7f),
+                        ImVec2(c.x + r, c.y + r * 0.7f), col, 1.6f);
+            break; }
+        }
+    };
+
+    // Hit zones + circular fills.
+    float bx = pillPos.x + kPillPad;
+    float by = pillPos.y + kPillPad;
+    int clickedIdx = -1;
+
+    for (int i = 0; i < kBtnCount; i++) {
+        ImGui::SetCursorScreenPos(ImVec2(bx, by));
+        ImGui::PushID(buttons[i].id);
+        bool clicked = ImGui::InvisibleButton("##btn",
+                                              ImVec2(kBtnSize, kBtnSize));
+        bool hov     = ImGui::IsItemHovered();
+        ImGui::PopID();
+
+        bool active = buttons[i].isToggle && buttons[i].toggleOn;
+
+        ImVec2 center(bx + kBtnSize * 0.5f, by + kBtnSize * 0.5f);
+        ImU32 fill = active
+            ? IM_COL32(247, 248, 248, 255)             // active = white
+            : (hov
+                ? IM_COL32(255, 255, 255, 28)
+                : IM_COL32(255, 255, 255, 12));
+        dl->AddCircleFilled(center, kBtnSize * 0.5f - 1.0f, fill);
+
+        ImU32 fg = active
+            ? IM_COL32(13, 18, 26, 255)
+            : IM_COL32(220, 226, 235, 230);
+        drawGlyph(center, buttons[i].kind, fg);
+
+        if (hov) ImGui::SetTooltip("%s", buttons[i].tip);
+        if (clicked) clickedIdx = i;
+
+        bx += kBtnSize + kBtnGap;
+    }
+
+    // Advance the cursor past the pill so subsequent rows lay out below.
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + kPillH + 6.0f);
+
+    // Action dispatch.
+    if (clickedIdx == 0 || clickedIdx == 1) {
+        // Floor / Wall toggle — currently both share m_envVisible.
+        // (Independent toggles need a backend split that's pending.)
+        m_envVisible = !m_envVisible;
+    } else if (clickedIdx == 2) {
         char name[32];
         snprintf(name, sizeof(name), "Display %d", (int)m_displays.size() + 1);
         addDisplay(name, StageDisplay::Type::LED);
-    }
-    ImGui::SameLine();
-    if (ImGui::SmallButton("+ Projector")) {
-        char name[32];
-        snprintf(name, sizeof(name), "Proj %d", (int)m_projectors.size() + 1);
-        addProjector(name);
-    }
-    ImGui::SameLine();
-    if (ImGui::SmallButton("+ Surface") && !m_materials.empty()) {
-        char name[32];
-        snprintf(name, sizeof(name), "Screen %d", (int)m_surfaces.size() + 1);
-        addSurface(name, 0, m_projectors.empty() ? -1 : 0);
-    }
-    ImGui::SameLine();
-    if (ImGui::SmallButton("Import...")) {
+    } else if (clickedIdx == 3) {
+        // + Surface opens a shape picker popup so the user can choose
+        // a primitive (rect / circle / triangle / octagon).
+        ImGui::OpenPopup("##SurfaceShapePicker");
+    } else if (clickedIdx == 4) {
         m_wantsImport = true;
     }
 
-    // Right-side cluster: Mapping / Masks focus buttons. Clicking focuses the
-    // corresponding docked panel so users can jump to the related workflow
-    // without leaving the Stage tab.
-    ImGui::SameLine();
-    float rightBtnsW = ImGui::CalcTextSize("Mapping").x
-                     + ImGui::CalcTextSize("Masks").x
-                     + ImGui::GetStyle().FramePadding.x * 4.0f
-                     + ImGui::GetStyle().ItemSpacing.x
-                     + 16.0f;
-    float avail = ImGui::GetContentRegionAvail().x;
-    if (avail > rightBtnsW) {
-        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail - rightBtnsW);
+    if (ImGui::BeginPopup("##SurfaceShapePicker")) {
+        ImGui::TextDisabled("Add surface");
+        ImGui::Separator();
+        const char* shapes[] = {"Rectangle", "Circle", "Triangle", "Octagon"};
+        for (int s = 0; s < (int)(sizeof(shapes) / sizeof(shapes[0])); s++) {
+            if (ImGui::MenuItem(shapes[s])) {
+                char nm[32];
+                snprintf(nm, sizeof(nm), "%s %d", shapes[s], (int)m_surfaces.size() + 1);
+                int matIdx = m_materials.empty() ? -1 : 0;
+                int prjIdx = m_projectors.empty() ? -1 : 0;
+                addSurface(nm, matIdx, prjIdx);
+            }
+        }
+        ImGui::EndPopup();
     }
-    if (ImGui::SmallButton("Mapping")) ImGui::SetWindowFocus("\xE2\x96\xA2###Mapping");
-    ImGui::SameLine();
-    if (ImGui::SmallButton("Masks"))   ImGui::SetWindowFocus("Masks");
+}
 
-    ImGui::PopStyleColor(3);
+void StageView::renderFloatingToolbar() {
+    // Vertical pill at the left edge of the viewport, where the Layers
+    // panel sits in Canvas mode. Four circular icon buttons stacked
+    // top-to-bottom: Room (env preset dropdown), Add Display,
+    // Add Surface (shape picker), Import. Bigger buttons + more inner
+    // padding so each glyph reads cleanly with breathing room.
+    const float kBtnSize = 44.0f;
+    const float kBtnGap  = 8.0f;
+    const float kPillPad = 10.0f;
+    const float kPillW   = kBtnSize + kPillPad * 2.0f;
+    const int   kBtnCount = 4;
+    const float kPillH   = kPillPad * 2.0f
+                         + kBtnSize * kBtnCount
+                         + kBtnGap  * (kBtnCount - 1);
+
+    // Position: left edge, vertically CENTRED in the available canvas
+    // height (so the rounded ends never get clipped against the
+    // secondary nav above or the timeline below).
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    float headerReserve = ImGui::GetFrameHeight() + 22.0f;
+    float bandTop    = vp->WorkPos.y + headerReserve + 18.0f;
+    float bandHeight = vp->WorkSize.y - headerReserve - 18.0f - 80.0f; // -timeline strip
+    float topY       = bandTop + std::max(0.0f, (bandHeight - kPillH) * 0.5f);
+
+    ImGuiWindowFlags flags =
+        ImGuiWindowFlags_NoTitleBar |
+        ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoDocking |
+        ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_NoBackground |
+        ImGuiWindowFlags_NoScrollbar;
+
+    // Pad the host window so the pill's rounded ends fit inside its
+    // content rect without being clipped by the window's own rounding.
+    const float kHostExtra = 8.0f;
+    ImGui::SetNextWindowPos (ImVec2(vp->WorkPos.x + 12.0f, topY - kHostExtra),
+                             ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(kPillW + kHostExtra * 2.0f,
+                                    kPillH + kHostExtra * 2.0f),
+                             ImGuiCond_Always);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,  ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    if (!ImGui::Begin("##StageToolbarFloat", nullptr, flags)) {
+        ImGui::End();
+        ImGui::PopStyleVar(3);
+        return;
+    }
+    ImGui::PopStyleVar(3);
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    // Inset the pill from the host window so its rounded ends sit
+    // inside the host's content rect without being clipped.
+    ImVec2 pillPos(ImGui::GetWindowPos().x + kHostExtra,
+                   ImGui::GetWindowPos().y + kHostExtra);
+    dl->AddRectFilled(
+        pillPos,
+        ImVec2(pillPos.x + kPillW, pillPos.y + kPillH),
+        IM_COL32(28, 30, 34, 235),
+        kPillW * 0.5f);
+    dl->AddRect(
+        pillPos,
+        ImVec2(pillPos.x + kPillW, pillPos.y + kPillH),
+        IM_COL32(255, 255, 255, 24),
+        kPillW * 0.5f, 0, 1.0f);
+
+    auto drawGlyph = [&](ImVec2 c, int kind, ImU32 col) {
+        const float r = kBtnSize * 0.32f;
+        switch (kind) {
+        case 0: { // Room — isometric box (floor + back wall + side wall)
+            // Front-left rect (floor footprint)
+            dl->AddLine(ImVec2(c.x - r,           c.y + r * 0.5f),
+                        ImVec2(c.x + r * 0.4f,    c.y + r * 0.85f), col, 1.4f);
+            dl->AddLine(ImVec2(c.x + r * 0.4f,    c.y + r * 0.85f),
+                        ImVec2(c.x + r,           c.y + r * 0.5f),  col, 1.4f);
+            dl->AddLine(ImVec2(c.x + r,           c.y + r * 0.5f),
+                        ImVec2(c.x - r * 0.4f,    c.y + r * 0.15f), col, 1.4f);
+            dl->AddLine(ImVec2(c.x - r * 0.4f,    c.y + r * 0.15f),
+                        ImVec2(c.x - r,           c.y + r * 0.5f),  col, 1.4f);
+            // Vertical walls — back-left and back-right edges going up
+            dl->AddLine(ImVec2(c.x - r,           c.y + r * 0.5f),
+                        ImVec2(c.x - r,           c.y - r * 0.3f),  col, 1.4f);
+            dl->AddLine(ImVec2(c.x + r,           c.y + r * 0.5f),
+                        ImVec2(c.x + r,           c.y - r * 0.3f),  col, 1.4f);
+            dl->AddLine(ImVec2(c.x - r * 0.4f,    c.y + r * 0.15f),
+                        ImVec2(c.x - r * 0.4f,    c.y - r * 0.65f), col, 1.4f);
+            // Back wall top edge
+            dl->AddLine(ImVec2(c.x - r,           c.y - r * 0.3f),
+                        ImVec2(c.x - r * 0.4f,    c.y - r * 0.65f), col, 1.4f);
+            dl->AddLine(ImVec2(c.x - r * 0.4f,    c.y - r * 0.65f),
+                        ImVec2(c.x + r,           c.y - r * 0.3f),  col, 1.4f);
+            break; }
+        case 1: { // Display
+            dl->AddRect(ImVec2(c.x - r, c.y - r * 0.7f),
+                        ImVec2(c.x + r, c.y + r * 0.4f), col, 2, 0, 1.5f);
+            dl->AddLine(ImVec2(c.x, c.y + r * 0.4f),
+                        ImVec2(c.x, c.y + r * 0.8f), col, 1.5f);
+            dl->AddLine(ImVec2(c.x - r * 0.4f, c.y + r * 0.8f),
+                        ImVec2(c.x + r * 0.4f, c.y + r * 0.8f), col, 1.5f);
+            break; }
+        case 2: { // Surface (generic plane)
+            dl->AddQuad(ImVec2(c.x - r, c.y - r * 0.4f),
+                        ImVec2(c.x, c.y - r),
+                        ImVec2(c.x + r, c.y - r * 0.4f),
+                        ImVec2(c.x, c.y + r * 0.2f), col, 1.5f);
+            break; }
+        case 3: { // Import (down arrow into tray)
+            dl->AddLine(ImVec2(c.x, c.y - r * 0.8f),
+                        ImVec2(c.x, c.y + r * 0.3f), col, 1.6f);
+            dl->AddLine(ImVec2(c.x - r * 0.4f, c.y - r * 0.1f),
+                        ImVec2(c.x, c.y + r * 0.3f), col, 1.6f);
+            dl->AddLine(ImVec2(c.x + r * 0.4f, c.y - r * 0.1f),
+                        ImVec2(c.x, c.y + r * 0.3f), col, 1.6f);
+            dl->AddLine(ImVec2(c.x - r, c.y + r * 0.7f),
+                        ImVec2(c.x + r, c.y + r * 0.7f), col, 1.6f);
+            break; }
+        }
+    };
+
+    const char* tips[]     = {"Environment", "Add display", "Add surface", "Import..."};
+    const bool  isToggle[] = {false,         false,         false,         false};
+
+    float bx = pillPos.x + kPillPad;
+    float by = pillPos.y + kPillPad;
+    int clickedIdx = -1;
+    for (int i = 0; i < kBtnCount; i++) {
+        ImGui::SetCursorScreenPos(ImVec2(bx, by));
+        ImGui::PushID(i + 100);
+        bool clicked = ImGui::InvisibleButton("##fb", ImVec2(kBtnSize, kBtnSize));
+        bool hov     = ImGui::IsItemHovered();
+        ImGui::PopID();
+        bool active = isToggle[i] && m_envVisible;
+
+        ImVec2 center(bx + kBtnSize * 0.5f, by + kBtnSize * 0.5f);
+        ImU32 fill = active
+            ? IM_COL32(247, 248, 248, 255)
+            : (hov ? IM_COL32(255, 255, 255, 28) : IM_COL32(255, 255, 255, 12));
+        dl->AddCircleFilled(center, kBtnSize * 0.5f - 1.0f, fill);
+
+        ImU32 fg = active ? IM_COL32(13, 18, 26, 255)
+                          : IM_COL32(220, 226, 235, 230);
+        drawGlyph(center, i, fg);
+
+        if (hov) ImGui::SetTooltip("%s", tips[i]);
+        if (clicked) clickedIdx = i;
+
+        by += kBtnSize + kBtnGap;
+    }
+
+    // Toggle sub-menus on click. Mutually exclusive — opening one
+    // closes the other so we never stack two pickers on top of each
+    // other next to the toolbar.
+    if (clickedIdx == 0) {
+        m_envMenuOpen     = !m_envMenuOpen;
+        m_surfaceMenuOpen = false;
+    } else if (clickedIdx == 1) {
+        char name[32];
+        snprintf(name, sizeof(name), "Display %d", (int)m_displays.size() + 1);
+        addDisplay(name, StageDisplay::Type::LED);
+        m_envMenuOpen = m_surfaceMenuOpen = false;
+    } else if (clickedIdx == 2) {
+        m_surfaceMenuOpen = !m_surfaceMenuOpen;
+        m_envMenuOpen     = false;
+    } else if (clickedIdx == 3) {
+        m_wantsImport = true;
+        m_envMenuOpen = m_surfaceMenuOpen = false;
+    }
+
+    ImGui::End();
+
+    // ── Sub-menus rendered as separate peer floating windows ──
+    // Anchored to the right of the toolbar's button row at the
+    // appropriate Y for the button that opened them. Plain Begin
+    // windows (not ImGui popups) so they don't fight with the host
+    // window's borderless flags.
+    auto subMenu = [&](const char* id, int btnIndex,
+                       const char* title,
+                       const std::initializer_list<const char*>& items,
+                       bool& openFlag,
+                       std::function<void(int idx)> onPick)
+    {
+        if (!openFlag) return;
+        const float kMenuW = 200.0f;
+        float menuY = pillPos.y + kPillPad + btnIndex * (kBtnSize + kBtnGap);
+        float menuX = pillPos.x + kPillW + 8.0f;
+        ImGui::SetNextWindowPos (ImVec2(menuX, menuY), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(kMenuW, 0),    ImGuiCond_Always);
+        ImGuiWindowFlags mf = ImGuiWindowFlags_NoTitleBar
+                            | ImGuiWindowFlags_NoResize
+                            | ImGuiWindowFlags_NoMove
+                            | ImGuiWindowFlags_NoCollapse
+                            | ImGuiWindowFlags_NoDocking
+                            | ImGuiWindowFlags_NoSavedSettings
+                            | ImGuiWindowFlags_AlwaysAutoResize;
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,  ImVec2(8, 8));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f);
+        if (ImGui::Begin(id, &openFlag, mf)) {
+            ImGui::TextDisabled("%s", title);
+            ImGui::Separator();
+            int i = 0;
+            for (const char* it : items) {
+                if (ImGui::Selectable(it)) {
+                    onPick(i);
+                    openFlag = false;
+                }
+                i++;
+            }
+        }
+        ImGui::End();
+        ImGui::PopStyleVar(2);
+    };
+
+    subMenu("##StageEnvMenu", 0, "Environment",
+            {"Floor", "Wall", "3D Room", "Seamless backdrop", "Frame"},
+            m_envMenuOpen,
+            [this](int idx) {
+                // Every item toggles visibility for now so the click is
+                // visibly responsive. Floor/Wall/Room/Seamless/Frame
+                // presets will get distinct geometry when authoring lands.
+                (void)idx;
+                m_envVisible = !m_envVisible;
+            });
+
+    subMenu("##StageSurfaceMenu", 2, "Add surface",
+            {"Rectangle", "Circle", "Triangle", "Octagon"},
+            m_surfaceMenuOpen,
+            [this](int idx) {
+                static const char* names[] = {"Rectangle","Circle","Triangle","Octagon"};
+                char nm[32];
+                snprintf(nm, sizeof(nm), "%s %d", names[idx], (int)m_surfaces.size() + 1);
+                int matIdx = m_materials.empty() ? -1 : 0;
+                int prjIdx = m_projectors.empty() ? -1 : 0;
+                addSurface(nm, matIdx, prjIdx);
+            });
 }
 
 void StageView::renderUI(const std::vector<GLuint>& zoneTextures) {
@@ -581,27 +941,13 @@ void StageView::renderUI(const std::vector<GLuint>& zoneTextures) {
     // when the mouse happens to be over the "Scale" toolbar button.
     bool viewportHovered = ImGui::IsItemHovered();
 
-    // --- Gizmo mode toolbar ---
-    {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.25f));
-        auto gizBtn = [&](const char* label, int op) {
-            bool active = (m_gizmoOp == op);
-            if (active) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-            else ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.55f, 0.65f, 1.0f));
-            if (ImGui::SmallButton(label)) m_gizmoOp = op;
-            ImGui::PopStyleColor();
-        };
-        gizBtn("Move", 0); ImGui::SameLine();
-        gizBtn("Rotate", 1); ImGui::SameLine();
-        gizBtn("Scale", 2);
-        // Keyboard shortcuts: V=Move, R=Rotate, S=Scale (Spline-style)
-        if (!ImGui::GetIO().WantTextInput) {
-            if (ImGui::IsKeyPressed(ImGuiKey_V)) m_gizmoOp = 0;
-            if (ImGui::IsKeyPressed(ImGuiKey_R)) m_gizmoOp = 1;
-            if (ImGui::IsKeyPressed(ImGuiKey_S)) m_gizmoOp = 2;
-        }
-        ImGui::PopStyleColor(2);
+    // (Move / Rotate / Scale buttons moved to the Properties panel —
+    // see PropertyPanel::render Stage section. Keyboard shortcuts
+    // V/R/S still toggle m_gizmoOp from anywhere in the app.)
+    if (!ImGui::GetIO().WantTextInput) {
+        if (ImGui::IsKeyPressed(ImGuiKey_V)) m_gizmoOp = 0;
+        if (ImGui::IsKeyPressed(ImGuiKey_R)) m_gizmoOp = 1;
+        if (ImGui::IsKeyPressed(ImGuiKey_S)) m_gizmoOp = 2;
     }
 
     // --- 3D Gizmo overlay ---

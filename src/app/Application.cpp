@@ -324,6 +324,10 @@ bool Application::init() {
 
     // Init 3D stage view
     m_stageView.init();
+    // Wire the Stage Setup section into the Properties panel — surfaces
+    // displays/projectors/surfaces inspector under "Setup" only when
+    // sMode == Stage.
+    m_propertyPanel.setStageView(&m_stageView);
 
     // Auto-start OSC receiver on port 9000
     m_oscManager.startReceiver(9000);
@@ -845,6 +849,22 @@ void Application::updateSources() {
                         }
                     }
                 }
+            }
+
+            // Audio-reactive particle sources — feed bass/mid/treble +
+            // beat-onset pulse to the ParticleSource each frame so the
+            // emitter can scale spawn rate, particle size, velocity, and
+            // burst on beats. Mirrors the ShaderSource audio plumbing
+            // above.
+            if (layer->source->typeName() == "Particles") {
+                auto* ps = static_cast<ParticleSource*>(layer->source.get());
+                float midAvg = (m_audioAnalyzer.lowMid() + m_audioAnalyzer.highMid()) * 0.5f;
+                ps->setAudioState(
+                    m_audioAnalyzer.bass(),
+                    midAvg,
+                    m_audioAnalyzer.treble(),
+                    m_audioAnalyzer.beatDecay()
+                );
             }
 
             layer->source->update();
@@ -2107,6 +2127,12 @@ void Application::renderUI() {
     }
 
     if (m_ui.isPanelVisible("Properties")) {
+        // Build zoneTextures here so the Stage Setup section inside
+        // Properties has access to the current FBO ids each frame.
+        static std::vector<unsigned int> s_zoneTexs;
+        s_zoneTexs.clear();
+        for (auto& zp : m_zones) s_zoneTexs.push_back(zp->warpFBO.textureId());
+        m_propertyPanel.setZoneTextures(&s_zoneTexs);
         m_propertyPanel.render(selectedLayer, m_maskEditMode, &m_speechState, &mosaicAudio, (float)glfwGetTime(), &m_layerStack, &m_bpmSync, &m_sceneManager, &m_mosaicAudioDevice, &m_midiManager);
     }
 
@@ -2196,7 +2222,7 @@ void Application::renderUI() {
         // collapsible, (3) Scenes collapsible (merged in from the old Scenes
         // tab). Viewport gets the bulk of the panel; Setup and Scenes sit
         // below, each collapsible so the viewport breathes when closed.
-        if (m_ui.isPanelVisible("Stage") && UIManager::sShowStage) {
+        if (m_ui.isPanelVisible("Stage") && UIManager::sMode == UIManager::WorkspaceMode::Stage) {
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
             ImGui::Begin("Stage");
             ImGui::PopStyleVar();
@@ -2231,11 +2257,9 @@ void Application::renderUI() {
                 }
             }
 
-            // Pinned toolbar at the top of the Stage panel — drawn BEFORE the
-            // viewport child so it always stays visible as Setup / Scenes open
-            // or scroll below.
-            m_stageView.renderToolbar();
-            ImGui::Dummy(ImVec2(0, 4));
+            // (Stage toolbar is now rendered as a separate floating vertical
+            // pill on the left edge — see m_stageView.renderToolbarFloating()
+            // called after the Stage panel below.)
 
             float panelH = ImGui::GetContentRegionAvail().y;
             // Reserve space for the two collapsible sections. 40px covers the
@@ -2255,58 +2279,88 @@ void Application::renderUI() {
             }
             ImGui::EndChild();
 
-            // --- Setup (displays / projectors / surfaces) ---
-            if (ImGui::CollapsingHeader("Setup")) {
-                m_stageView.renderSceneInspector(zoneTextures);
-            }
-
-            // --- Scenes (layer-stack snapshots) — merged in from the old
-            // Scenes tab. Save a composition, click a name to recall it.
-            if (ImGui::CollapsingHeader("Scenes")) {
-                ImGui::TextDisabled("Snapshots of your layer stack.");
-                ImGui::Spacing();
-
-                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1.0f, 1.0f, 1.0f, 0.10f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.25f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.0f, 1.0f, 1.0f, 0.40f));
-                ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-                if (ImGui::Button("+ Save current composition", ImVec2(-1, 0))) {
-                    char nm[32];
-                    snprintf(nm, sizeof(nm), "Scene %d", m_sceneManager.count() + 1);
-                    m_sceneManager.saveScene(nm, m_layerStack);
-                }
-                ImGui::PopStyleColor(4);
-
-                ImGui::Spacing();
-                int removeIdx = -1;
-                for (int s = 0; s < m_sceneManager.count(); s++) {
-                    ImGui::PushID(30000 + s);
-                    auto& scene = m_sceneManager[s];
-                    float w = ImGui::GetContentRegionAvail().x - 24;
-                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.06f, 0.07f, 0.10f, 0.90f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 1.00f, 1.00f, 0.20f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.00f, 1.00f, 1.00f, 0.35f));
-                    if (ImGui::Button(scene.name.c_str(), ImVec2(w, 0))) {
-                        m_sceneManager.recallScene(s, m_layerStack);
-                    }
-                    ImGui::PopStyleColor(3);
-                    ImGui::SameLine();
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.3f, 0.3f, 0.7f));
-                    if (ImGui::SmallButton("x")) removeIdx = s;
-                    ImGui::PopStyleColor();
-                    ImGui::PopID();
-                }
-                if (removeIdx >= 0) m_sceneManager.removeScene(removeIdx);
-                if (m_sceneManager.count() == 0) {
-                    ImGui::Spacing();
-                    ImGui::TextDisabled("No scenes yet — save one to recall later.");
-                }
+            // (Setup + Scenes sections moved to the Properties panel —
+            // see PropertyPanel::render in Stage mode.)
+            if (false) {
             }
 
             ImGui::End();
         }
 
         // (Old separate Scenes panel removed — merged into Stage above.)
+
+        // Floating Stage toolbar — vertical pill of circular icon buttons
+        // sitting in the left-rail slot (where Layers lives in Canvas
+        // mode). Only rendered when Stage workspace is active.
+        if (UIManager::sMode == UIManager::WorkspaceMode::Stage) {
+            m_stageView.renderFloatingToolbar();
+        }
+
+        // SHOW workspace — live performance focus. Renders the secondary
+        // nav (so the top bar doesn't disappear when switching modes) and
+        // a centered live-output preview so the operator can see what's
+        // currently going to the projector while they drive Timeline +
+        // MIDI + Audio from the right rail.
+        if (m_ui.isPanelVisible("Show") && UIManager::sMode == UIManager::WorkspaceMode::Show) {
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+            ImGui::Begin("Show");
+            ImGui::PopStyleVar();
+
+            // Same shared nav so geometry doesn't shift between modes.
+            {
+                auto monitors = ProjectorOutput::enumerateMonitors();
+                bool ndiAvail = false;
+#ifdef HAS_NDI
+                ndiAvail = NDIRuntime::instance().isAvailable();
+#endif
+                int editorMon = -1;
+                {
+                    int wx, wy;
+                    glfwGetWindowPos(m_window, &wx, &wy);
+                    for (size_t mi = 0; mi < monitors.size(); mi++) {
+                        if (wx >= monitors[mi].x && wx < monitors[mi].x + monitors[mi].width &&
+                            wy >= monitors[mi].y && wy < monitors[mi].y + monitors[mi].height) {
+                            editorMon = (int)mi;
+                            break;
+                        }
+                    }
+                }
+                m_viewportPanel.setEditorFullscreen(m_editorFullscreen);
+                m_viewportPanel.renderNavBar(false, &m_zones, &m_activeZone,
+                                             &monitors, ndiAvail, editorMon);
+                if (m_viewportPanel.wantsFullscreenToggle()) {
+                    m_viewportPanel.clearFullscreenSignal();
+                    toggleEditorFullscreen();
+                }
+            }
+
+            // Live output preview — shows the active zone's composited
+            // output so the performer can see what the audience sees.
+            ImGui::Dummy(ImVec2(0, 8));
+            ImVec2 avail = ImGui::GetContentRegionAvail();
+            float aspect = 16.0f / 9.0f;
+            if (m_activeZone >= 0 && m_activeZone < (int)m_zones.size()) {
+                auto& z = m_zones[m_activeZone];
+                if (z->width > 0 && z->height > 0)
+                    aspect = (float)z->width / (float)z->height;
+            }
+            float previewH = std::min(avail.y - 16.0f, avail.x / aspect);
+            float previewW = previewH * aspect;
+            float padX = (avail.x - previewW) * 0.5f;
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + padX);
+            GLuint previewTex = 0;
+            if (m_activeZone >= 0 && m_activeZone < (int)m_zones.size())
+                previewTex = m_zones[m_activeZone]->warpFBO.textureId();
+            if (previewTex) {
+                ImGui::Image((ImTextureID)(intptr_t)previewTex,
+                             ImVec2(previewW, previewH),
+                             ImVec2(0, 1), ImVec2(1, 0));
+            } else {
+                ImGui::Dummy(ImVec2(previewW, previewH));
+            }
+
+            ImGui::End();
+        }
     }
 
     // Projector settings are now rendered inline inside the Canvas tab
@@ -2315,8 +2369,10 @@ void Application::renderUI() {
     // Sources panel — single window with tabs for each input source type.
     // Groups what used to be 5 separate panels (NDI / Spout / Capture /
     // ShaderClaw / Etherea) into one place so the right column isn't
-    // overwhelmed with tabs.
-    bool sourcesOpen = ImGui::Begin("Sources");
+    // overwhelmed with tabs. Hidden in Stage and Show modes via the
+    // mode-aware UIManager::isPanelVisible.
+    bool sourcesVisible = m_ui.isPanelVisible("Sources");
+    bool sourcesOpen = sourcesVisible && ImGui::Begin("Sources");
     ImGuiTabBarFlags sourcesTabFlags = ImGuiTabBarFlags_Reorderable
                                      | ImGuiTabBarFlags_FittingPolicyScroll;
     bool sourcesTabsOpen = sourcesOpen && ImGui::BeginTabBar("##SourcesTabs", sourcesTabFlags);
@@ -2634,6 +2690,35 @@ void Application::renderUI() {
                 }
             }
 
+            // ─── Sub-tabs: VFX vs Text ──────────────────────────────────
+            // Split the shader library by intent: text-based shaders go
+            // under "Text" (anything tagged Text in the manifest), the
+            // rest under "VFX". Keeps the grid scannable when there are
+            // 70+ shaders by separating the two main creative modes.
+            static int s_scSubTab = 0; // 0 = VFX, 1 = Text
+            {
+                auto subTabBtn = [&](const char* label, int idx) {
+                    bool active = (s_scSubTab == idx);
+                    if (active) {
+                        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.96f, 0.97f, 1.00f, 1.00f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
+                        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.05f, 0.07f, 0.10f, 1.00f));
+                    } else {
+                        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 0.06f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.14f));
+                        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.78f, 0.80f, 0.85f, 1.0f));
+                    }
+                    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
+                    if (ImGui::Button(label, ImVec2(0, 0))) s_scSubTab = idx;
+                    ImGui::PopStyleVar();
+                    ImGui::PopStyleColor(3);
+                };
+                subTabBtn("VFX",  0);
+                ImGui::SameLine(0, 6);
+                subTabBtn("Text", 1);
+                ImGui::Dummy(ImVec2(0, 6));
+            }
+
             // ─── Gallery grid ───────────────────────────────────────────
             // Big thumbnail tiles laid out in a responsive grid (auto-sizes
             // columns to panel width). Each tile = thumbnail + title. Click a
@@ -2653,12 +2738,32 @@ void Application::renderUI() {
             float cellH = thumbSize + labelH;
 
             const auto& shaders = m_shaderClaw.shaders();
+            // Build the visible-index list once per frame so column
+            // wrapping ignores hidden entries cleanly. A shader counts
+            // as Text iff its categories include "Text" (or its
+            // filename starts with "text_" as a fallback for entries
+            // that haven't been re-tagged yet).
+            std::vector<int> visibleIdx;
+            visibleIdx.reserve(shaders.size());
             for (int i = 0; i < (int)shaders.size(); i++) {
+                const auto& sh = shaders[i];
+                bool isText = false;
+                for (const auto& c : sh.categories) {
+                    if (c == "Text") { isText = true; break; }
+                }
+                if (!isText && sh.file.rfind("text_", 0) == 0) isText = true;
+                bool keep = (s_scSubTab == 1) ? isText : !isText;
+                if (keep) visibleIdx.push_back(i);
+            }
+            for (int vi = 0; vi < (int)visibleIdx.size(); vi++) {
+                int i = visibleIdx[vi];
                 const auto& shader = shaders[i];
                 ImGui::PushID(2000 + i);
 
-                // Layout: new row every `cols` items
-                if (i % cols != 0) ImGui::SameLine(0, cellPad);
+                // Layout: new row every `cols` items (using the
+                // VISIBLE index so wrapping is unaffected by hidden
+                // entries from the other sub-tab).
+                if (vi % cols != 0) ImGui::SameLine(0, cellPad);
                 ImVec2 cellPos = ImGui::GetCursorScreenPos();
 
                 bool isHoveredShader = (shader.fullPath == m_scPreviewPath);
@@ -2772,11 +2877,13 @@ void Application::renderUI() {
             ImGui::SetNextItemWidth(-1);
             ImGui::InputText("##EtUrl", etUrl, sizeof(etUrl));
 
-            // Fetch sessions button
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.12f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.25f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.45f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+            // Fetch sessions button — secondary pill (light fill).
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 0.08f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.16f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1, 1, 1, 0.24f));
+            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.85f, 0.87f, 0.92f, 1.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14, 10));
             if (ImGui::Button("Refresh Sessions", ImVec2(-1, 0))) {
                 sessions = EthereaClient::fetchSessions(etUrl);
                 // Sort: active with transcript first, then by idle time
@@ -2790,6 +2897,7 @@ void Application::renderUI() {
                 selectedSession = sessions.empty() ? -1 : 0;
             }
             ImGui::PopStyleColor(4);
+            ImGui::PopStyleVar(2);
 
             // Session list — only show active/interesting sessions
             if (!sessions.empty()) {
@@ -2819,55 +2927,65 @@ void Application::renderUI() {
                 }
             }
 
-            ImGui::Dummy(ImVec2(0, 4));
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+            ImGui::Dummy(ImVec2(0, 6));
+            // Connect — primary pill action, near-black fill on the dark
+            // panel (mirrors the reference's "Update" button).
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.06f, 0.07f, 0.09f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.12f, 0.13f, 0.16f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.18f, 0.20f, 0.24f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.97f, 0.98f, 0.98f, 1.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14, 12));
             if (ImGui::Button("Connect", ImVec2(-1, 0))) {
                 std::string sid = (selectedSession >= 0 && selectedSession < (int)sessions.size())
                     ? sessions[selectedSession].id : "";
                 m_ethereaClient.connect(etUrl, sid);
             }
+            ImGui::PopStyleVar(2);
             ImGui::PopStyleColor(4);
         } else {
-            // Connected state — show WS + SSE status
+            // Connected state — compact: status dot + Disconnect pill on
+            // a single row, then transcript/hints/prompt below.
             {
-                bool ws = m_ethereaClient.wsConnected();
+                bool ws  = m_ethereaClient.wsConnected();
                 bool sse = m_ethereaClient.sseConnected();
-                if (ws && sse) {
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
-                    ImGui::Text("WS + SSE");
-                } else if (ws || sse) {
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.65f, 0.13f, 1.0f));
-                    ImGui::Text("%s only", ws ? "WS" : "SSE");
-                } else {
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.65f, 0.13f, 1.0f));
-                    ImGui::Text("Connecting...");
-                }
+                bool fullyConnected = ws && sse;
+                ImU32 dotCol = fullyConnected
+                    ? IM_COL32(34, 210, 130, 255)        // green
+                    : (ws || sse)
+                        ? IM_COL32(220, 180, 60, 255)    // amber — partial
+                        : IM_COL32(220, 70, 70, 255);    // red — not connected
+                ImVec2 cp = ImGui::GetCursorScreenPos();
+                float h = ImGui::GetFrameHeight();
+                ImGui::GetWindowDrawList()->AddCircleFilled(
+                    ImVec2(cp.x + 6, cp.y + h * 0.5f), 4.0f, dotCol);
+                ImGui::Dummy(ImVec2(16, h));
+                ImGui::SameLine();
+                ImGui::AlignTextToFramePadding();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.78f, 0.80f, 0.85f, 0.9f));
+                ImGui::TextUnformatted(fullyConnected ? "Connected"
+                                                       : (ws || sse) ? "Partial" : "Connecting…");
                 ImGui::PopStyleColor();
             }
 
-            ImGui::SameLine(ImGui::GetContentRegionAvail().x - 50);
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.15f, 0.15f, 0.20f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.2f, 0.2f, 0.40f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 0.25f, 0.25f, 0.60f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
-            if (ImGui::SmallButton("Disconnect")) {
+            // Right-aligned Disconnect — neutral pill, not red.
+            float discW = ImGui::CalcTextSize("Disconnect").x + 24.0f;
+            ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - discW);
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 0.06f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.14f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1, 1, 1, 0.22f));
+            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.78f, 0.80f, 0.85f, 1.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
+            if (ImGui::Button("Disconnect", ImVec2(discW, 0))) {
                 m_ethereaClient.disconnect();
             }
+            ImGui::PopStyleVar();
             ImGui::PopStyleColor(4);
 
-            // Transcript
-            ImGui::Dummy(ImVec2(0, 4));
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            ImVec2 p = ImGui::GetCursorScreenPos();
-            float w = ImGui::GetContentRegionAvail().x;
-            dl->AddLine(ImVec2(p.x, p.y), ImVec2(p.x + w, p.y), IM_COL32(255, 255, 255, 40));
-            ImGui::Dummy(ImVec2(0, 6));
+            ImGui::Dummy(ImVec2(0, 8));
 
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-            ImGui::Text("Transcript");
+            ImGui::TextUnformatted("TRANSCRIPT");
             ImGui::PopStyleColor();
 
             std::string transcript = m_ethereaClient.fullTranscript();
@@ -2911,15 +3029,10 @@ void Application::renderUI() {
         }
 
 #ifdef HAS_WHEP
-        // Scope Stream — auto-detect live pods via etherea health API
-        ImGui::Dummy(ImVec2(0, 6));
-        {
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            ImVec2 p = ImGui::GetCursorScreenPos();
-            float w = ImGui::GetContentRegionAvail().x;
-            dl->AddLine(ImVec2(p.x, p.y), ImVec2(p.x + w, p.y), IM_COL32(100, 0, 255, 60));
-            ImGui::Dummy(ImVec2(0, 6));
-        }
+        // Scope Stream — auto-detect live pods via etherea health API.
+        // (Divider line removed per UI cleanup pass — the collapsing
+        // header below is enough visual separation.)
+        ImGui::Dummy(ImVec2(0, 12));
 
         if (ImGui::CollapsingHeader("Scope Stream", ImGuiTreeNodeFlags_DefaultOpen)) {
             // Auto-refresh scope pods every 5 seconds
@@ -3159,8 +3272,9 @@ void Application::renderUI() {
 #endif
 
     // Close the Sources tab bar + window (opened before the Capture tab).
+    // Match the conditional Begin() above — only End() if we Begin'd.
     if (sourcesTabsOpen) ImGui::EndTabBar();
-    ImGui::End();
+    if (sourcesVisible) ImGui::End();
 
 // (Stream panel removed — stream key + aspect now live in the GO LIVE
 //  popup on the timeline transport bar.)

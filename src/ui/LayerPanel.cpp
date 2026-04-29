@@ -300,17 +300,11 @@ static void drawLayerRow(ImDrawList* draw, const std::shared_ptr<Layer>& layer,
 // zones are easy to tell apart at a glance. Avoids cyan (project-wide ban)
 // but uses a distinct rainbow set for clarity.
 static ImU32 zoneColor(int idx) {
-    static const ImU32 colors[] = {
-        IM_COL32(255, 100, 180, 230),  // pink
-        IM_COL32(255, 150, 60,  230),  // orange
-        IM_COL32(110, 220, 130, 230),  // green
-        IM_COL32(200, 120, 255, 230),  // purple
-        IM_COL32(255, 220, 80,  230),  // yellow
-        IM_COL32(255, 110, 110, 230),  // red
-        IM_COL32(120, 200, 255, 230),  // soft sky (non-cyan)
-        IM_COL32(190, 190, 190, 230),  // neutral
-    };
-    return colors[idx % 8];
+    // Currently monochrome — single near-white tint for every zone.
+    // Re-introduce distinct hues here later when an accent palette is
+    // chosen.
+    (void)idx;
+    return IM_COL32(235, 238, 244, 230);
 }
 
 void LayerPanel::render(LayerStack& stack, int& selectedLayer,

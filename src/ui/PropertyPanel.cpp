@@ -1,4 +1,6 @@
 #include "ui/PropertyPanel.h"
+#include "ui/UIManager.h"
+#include "stage/StageView.h"
 #include "app/BPMSync.h"
 #include "app/SceneManager.h"
 #include "app/MIDIManager.h"
@@ -328,8 +330,11 @@ static bool paramColorRow(const char* id, const char* label, glm::vec4* c) {
     dl->AddText(ImVec2(rowStart.x, rowStart.y + (rowH - labelH) * 0.5f),
                 IM_COL32(150, 158, 172, 230), label);
 
-    // Reserve the whole row so the invisible button / swatch live on one line.
-    ImGui::InvisibleButton("##row", ImVec2(w, rowH));
+    // Reserve the row's vertical space WITHOUT swallowing clicks (Dummy
+    // doesn't capture input). The previous InvisibleButton here was
+    // intercepting clicks meant for the swatch hit-target below, so the
+    // swatch never received the click event needed to open the picker.
+    ImGui::Dummy(ImVec2(w, rowH));
 
     // Circular swatch, right-aligned.
     float cx = rowStart.x + w - swatchR - 2.0f;
@@ -456,6 +461,50 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
     // an icon. The "###ID" half keeps the internal window name stable
     // for dock/focus lookups.
     ImGui::Begin("        ###Properties");
+
+    // Stage Setup section — only when the workspace is Stage mode and
+    // we have a StageView reference. Hosts the gizmo Tool selector
+    // (Move/Rotate/Scale) and the displays/projectors/surfaces
+    // inspector that previously lived inside the Stage panel body.
+    if (m_stageView && UIManager::sMode == UIManager::WorkspaceMode::Stage) {
+        // Tool — segmented Move/Rotate/Scale toggle for the gizmo.
+        // Drives StageView::gizmoOp() which the 3D viewport reads each
+        // frame to pick the matching ImGuizmo operation.
+        int& tool = m_stageView->gizmoOp();
+        const char* toolLabels[] = {"Move", "Rotate", "Scale"};
+        ImGui::TextDisabled("TOOL");
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,   ImVec2(4, 4));
+        for (int i = 0; i < 3; i++) {
+            if (i > 0) ImGui::SameLine();
+            bool active = (tool == i);
+            if (active) {
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.96f, 0.97f, 1.00f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.05f, 0.07f, 0.10f, 1.00f));
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 0.06f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.14f));
+                ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.78f, 0.80f, 0.85f, 1.0f));
+            }
+            float w = (ImGui::GetContentRegionAvail().x - 8.0f) / (3 - i);
+            if (ImGui::Button(toolLabels[i], ImVec2(w, 0))) tool = i;
+            ImGui::PopStyleColor(3);
+        }
+        ImGui::PopStyleVar(2);
+        ImGui::Spacing();
+
+        ImGui::PushStyleColor(ImGuiCol_Header,        ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
+        ImGui::PushStyleColor(ImGuiCol_HeaderActive,  ImVec4(1.0f, 1.0f, 1.0f, 0.22f));
+        bool setupOpen = ImGui::CollapsingHeader("Setup", ImGuiTreeNodeFlags_DefaultOpen);
+        ImGui::PopStyleColor(3);
+        if (setupOpen) {
+            static const std::vector<unsigned int> kEmpty;
+            const std::vector<unsigned int>& zts = m_zoneTexs ? *m_zoneTexs : kEmpty;
+            m_stageView->renderSceneInspector(zts);
+        }
+    }
 
     // BPM/Audio controls now live in the Audio panel.
     // Scene management now lives in the Scenes panel.

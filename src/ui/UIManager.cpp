@@ -10,7 +10,7 @@
 #include <GLFW/glfw3.h>
 #include "stb_image.h"
 
-bool UIManager::sShowStage = false;
+UIManager::WorkspaceMode UIManager::sMode = UIManager::WorkspaceMode::Canvas;
 
 bool UIManager::init(GLFWwindow* window) {
     m_window = window;
@@ -538,7 +538,16 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         }
     }
 
-    if (m_firstFrame || sizeChanged) {
+    // Trigger a full dock-layout rebuild whenever the workspace mode
+    // changes — Canvas / Stage / Show each have a different right-rail
+    // composition (Properties+Sources vs Mapping vs MIDI+Audio), and we
+    // want hidden panels to vacate their dock slot so visible ones grow
+    // into the freed space rather than leaving an empty rectangle.
+    static WorkspaceMode s_lastMode = sMode;
+    bool modeChanged = (s_lastMode != sMode);
+    s_lastMode = sMode;
+
+    if (m_firstFrame || sizeChanged || modeChanged) {
         m_firstFrame = false;
         m_lastDockW = dockSize.x;
         m_lastDockH = dockSize.y;
@@ -561,104 +570,64 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         // m_timelineMinimized = true in Application), so the initial dock
         // split targets that collapsed height directly. This keeps the floating
         // panels from reserving space for a tall timeline that never appears.
+        // Layout: full-bleed central dockspace (Canvas/Stage/Show fill
+        // the whole viewport) + Timeline at the bottom + two FLOATING
+        // overlay nodes (Layers/Sources on the left, Properties/Mapping/
+        // Audio/MIDI on the right). The floating nodes are positioned
+        // every frame via DockBuilderSetNodePos in the per-frame reflow
+        // block below — that's required because standalone floating dock
+        // roots don't otherwise persist their position.
         ImGuiID mainId, timelineDockId;
-        // Target ~60px — matches the minimised transport-only height in
-        // Application::renderTimelinePanel so there's no first-frame flash.
         float timelineSplit = (dockSize.y > 0) ? (60.0f / dockSize.y) : 0.05f;
         if (timelineSplit < 0.03f) timelineSplit = 0.03f;
         if (timelineSplit > 0.20f) timelineSplit = 0.20f;
-        ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Down, timelineSplit, &timelineDockId, &mainId);
+        ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Down, timelineSplit,
+                                    &timelineDockId, &mainId);
 
-        auto dockIfVisible = [this](const char* name, ImGuiID node) {
-            if (isPanelVisible(name)) ImGui::DockBuilderDockWindow(name, node);
+        auto dockAlways = [](const char* name, ImGuiID node) {
+            ImGui::DockBuilderDockWindow(name, node);
         };
 
-        // Center: Canvas + Stage as peer tabs, full width. Mapping moved to
-        // the right floating group (paired with Properties on top). The
-        // dock tab bar itself is hidden — Canvas/Stage switcher buttons
-        // get rendered inline at the left of each panel's toolbar row,
-        // collapsing the two-row nav into one.
-        dockIfVisible("Canvas", mainId);
-        dockIfVisible("Stage",  mainId);
-        // Hide the native dock tab bar — the Canvas/Stage switcher pill
-        // in the menu bar is the primary (and only) way to flip between
-        // the two workspaces. HiddenTabBar (not NoTabBar) keeps ImGui's
-        // tab bookkeeping alive so NextSelectedTabId from the pill can
-        // actually swap the visible window.
+        // Center peer tabs — one submits Begin() per frame (gated by sMode).
+        dockAlways("Canvas", mainId);
+        dockAlways("Stage",  mainId);
+        dockAlways("Show",   mainId);
         if (ImGuiDockNode* mn = ImGui::DockBuilderGetNode(mainId)) {
             mn->LocalFlags |= ImGuiDockNodeFlags_HiddenTabBar
                             | ImGuiDockNodeFlags_NoWindowMenuButton;
         }
-
-        // Bottom strip: the Timeline, spanning full width. NoTabBar hides
-        // the "Timeline" tab label + minimise/expand chevron entirely —
-        // the timeline's own transport row is the visual anchor.
-        dockIfVisible("Timeline", timelineDockId);
+        dockAlways("Timeline", timelineDockId);
         if (ImGuiDockNode* tln = ImGui::DockBuilderGetNode(timelineDockId)) {
             tln->LocalFlags |= ImGuiDockNodeFlags_NoWindowMenuButton
                              | ImGuiDockNodeFlags_NoTabBar;
         }
 
-        // ── Floating overlays — stretch to fill the mid-band between the
-        // Canvas panel's zone tab row (top) and the timeline (bottom), with
-        // small margins to keep the "floating" feel. headerReserve covers
-        // exactly one frame height (the Canvas/Stage/Main/Zone2 tab row plus
-        // window padding) — anything taller leaves a dead gap below the
-        // zone tabs before the panels start.
-        float leftW  = std::min(360.0f, dockSize.x * 0.22f);
-        float rightW = std::min(340.0f, dockSize.x * 0.22f);
-        float headerReserve  = ImGui::GetFrameHeight() + 22.0f;
-        float timelineH      = dockSize.y * timelineSplit;
-        const float kFloatMarginTop    = 6.0f;
-        const float kFloatMarginBottom = 10.0f;
-        ImVec2 vpPos         = viewport->WorkPos;
-        float  leftY         = vpPos.y + headerReserve + kFloatMarginTop;
-        float  rightY        = leftY;
-        float  leftFloatH    = std::max(120.0f,
-            dockSize.y - headerReserve - timelineH - kFloatMarginTop - kFloatMarginBottom);
-        float  rightFloatH   = leftFloatH;
+        // Floating overlay panels — docked into TWO host windows
+        // rendered below in renderFloatPanelHosts() with positions
+        // forced via SetNextWindowPos every frame. The DockSpace IDs
+        // are hardcoded constants so the IDs we dock into here match
+        // the IDs used in the host-window DockSpace() calls — using
+        // ImGui::GetID() would salt by current window stack and the
+        // IDs wouldn't match.
+        const ImGuiID leftFloatId  = 0xE45E1FF7;
+        const ImGuiID rightFloatId = 0xE45E2008;
 
-        // Left-side floating group: Layers + Sources tabs.
-        ImGuiID leftFloatId = ImGui::DockBuilderAddNode(0, ImGuiDockNodeFlags_None);
-        ImGui::DockBuilderSetNodePos (leftFloatId, ImVec2(vpPos.x + 12.0f, leftY));
-        ImGui::DockBuilderSetNodeSize(leftFloatId, ImVec2(leftW, leftFloatH));
-        dockIfVisible("Layers",  leftFloatId);
-        dockIfVisible("Sources", leftFloatId);
-
-        // Right-side floating group: all inspectors as peer tabs in one
-        // unified node — Properties first, then Audio, MIDI, Mapping.
-        // Keeps the panel tall and single-column instead of splitting
-        // vertically into two stacked halves.
-        ImGuiID rightFloatId = ImGui::DockBuilderAddNode(0, ImGuiDockNodeFlags_None);
-        ImGui::DockBuilderSetNodePos (rightFloatId,
-            ImVec2(vpPos.x + dockSize.x - rightW - 12.0f, rightY));
-        ImGui::DockBuilderSetNodeSize(rightFloatId, ImVec2(rightW, rightFloatH));
-        // Tab order: Properties, Mapping, Audio, MIDI. The "display###ID"
-        // syntax keeps the internal window names stable for focus/dock
-        // lookups while giving each tab a short text label that renders
-        // reliably in the system font (Helvetica has no geometric-shape
-        // glyphs, which rendered as "?" before).
-        dockIfVisible("Properties###Properties", rightFloatId);
-        dockIfVisible("Mapping###Mapping",       rightFloatId);
-        dockIfVisible("Audio###Audio",           rightFloatId);
-        dockIfVisible("MIDI###MIDI",             rightFloatId);
-
-        // Scene Scanner — dock with the inspector group so it doesn't spawn
-        // floating in the middle of the canvas on first run.
-        if (isPanelVisible("Scene Scanner")) {
-            ImGui::DockBuilderDockWindow("Scene Scanner", rightFloatId);
-        }
+        dockAlways("Layers",  leftFloatId);
+        dockAlways("Sources", leftFloatId);
+        dockAlways("        ###Properties", rightFloatId);
+        dockAlways("        ###Mapping",    rightFloatId);
+        dockAlways("        ###Audio",      rightFloatId);
+        dockAlways("        ###MIDI",       rightFloatId);
+        ImGui::DockBuilderDockWindow("Scene Scanner", rightFloatId);
 
         ImGui::DockBuilderFinish(dockspaceId);
 
-        // Cache ids + widths so the per-frame reflow below can reposition
-        // the floating groups when the user drags the timeline splitter.
         m_timelineDockId = timelineDockId;
         m_leftFloatId    = leftFloatId;
         m_rightFloatId   = rightFloatId;
-        m_leftFloatW     = leftW;
-        m_rightFloatW    = rightW;
-        m_lastTimelineH  = timelineH;
+        m_leftFloatW     = 320.0f;
+        m_rightFloatW    = 320.0f;
+        m_lastTimelineH  = dockSize.y * timelineSplit;
 
         // Two deferred focus passes: Canvas in the big left slot, Layers as
         // the active tab in the top-right. SetWindowFocus is called every
@@ -671,43 +640,86 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         m_lastDockH = dockSize.y;
     }
 
-    // ── Per-frame reflow ──
-    // When the user drags the native dock splitter to resize the timeline,
-    // the timeline node's actual height changes but the floating left/right
-    // groups stay pinned to their original geometry and end up overlapping
-    // the timeline. Each frame we read the timeline dock node's current
-    // size and, if it differs from last frame, recompute the float groups'
-    // position + height to occupy only the remaining mid-band.
-    if (m_timelineDockId != 0 && m_leftFloatId != 0 && m_rightFloatId != 0) {
-        if (ImGuiDockNode* tln = ImGui::DockBuilderGetNode(m_timelineDockId)) {
-            float actualTimelineH = tln->Size.y;
-            if (actualTimelineH > 0.0f &&
-                fabsf(actualTimelineH - m_lastTimelineH) > 0.5f) {
-                m_lastTimelineH = actualTimelineH;
+    ImGui::End();
 
-                float headerReserve = ImGui::GetFrameHeight() + 22.0f;
-                const float kFloatMarginTop    = 6.0f;
-                const float kFloatMarginBottom = 10.0f;
-                float floatH = std::max(120.0f,
-                    dockSize.y - headerReserve - actualTimelineH - kFloatMarginTop - kFloatMarginBottom);
-                ImVec2 vpPos = viewport->WorkPos;
-                float floatY = vpPos.y + headerReserve + kFloatMarginTop;
+    // ── Floating overlay host windows ──
+    // Two regular ImGui windows (LeftFloat, RightFloat) with positions
+    // forced via SetNextWindowPos every frame. Each contains a DockSpace
+    // with a hardcoded ID — Layers/Sources are docked into the left
+    // dockspace, Properties/Mapping/Audio/MIDI into the right. The
+    // hardcoded IDs MUST match the ones used in the layout-rebuild
+    // dockAlways() calls above; since GetID() is salted by the current
+    // window stack, we can't compute the same hash from two different
+    // stack contexts.
+    {
+        const ImGuiID kLeftFloatId  = 0xE45E1FF7;
+        const ImGuiID kRightFloatId = 0xE45E2008;
+        const float kFloatTopReserve = 6.0f;
+        const float kFloatMargin     = 12.0f;
 
-                ImGui::DockBuilderSetNodePos(
-                    m_leftFloatId, ImVec2(vpPos.x + 12.0f, floatY));
-                ImGui::DockBuilderSetNodeSize(
-                    m_leftFloatId, ImVec2(m_leftFloatW, floatH));
-                ImGui::DockBuilderSetNodePos(
-                    m_rightFloatId,
-                    ImVec2(vpPos.x + dockSize.x - m_rightFloatW - 12.0f,
-                           floatY));
-                ImGui::DockBuilderSetNodeSize(
-                    m_rightFloatId, ImVec2(m_rightFloatW, floatH));
+        // Vertical band: from below the menu/secondary-nav row, to just
+        // above the timeline. Use the timeline dock node's actual height
+        // (so the float panels follow the timeline splitter live).
+        float headerReserve = ImGui::GetFrameHeight() + 22.0f;
+        float timelineH = 60.0f;
+        if (m_timelineDockId != 0) {
+            if (ImGuiDockNode* tln = ImGui::DockBuilderGetNode(m_timelineDockId))
+                timelineH = tln->Size.y;
+        }
+        float floatY = viewport->WorkPos.y + headerReserve + kFloatTopReserve;
+        float floatH = std::max(120.0f,
+            dockSize.y - headerReserve - timelineH - kFloatTopReserve - kFloatMargin);
+
+        float leftW  = std::min(360.0f, dockSize.x * 0.22f);
+        float rightW = std::min(340.0f, dockSize.x * 0.22f);
+
+        ImGuiWindowFlags hostFlags =
+            ImGuiWindowFlags_NoTitleBar |
+            ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoCollapse |
+            ImGuiWindowFlags_NoDocking |
+            ImGuiWindowFlags_NoSavedSettings;
+
+        // Skip the entire host window when no panel docked into it is
+        // visible in the current mode — otherwise an empty dock chrome
+        // sits over the canvas (e.g. blank Layers/Sources strip in
+        // Stage mode where both panels are hidden).
+        bool leftHasContent  = isPanelVisible("Layers")  || isPanelVisible("Sources");
+        bool rightHasContent = isPanelVisible("Properties") || isPanelVisible("Mapping")
+                            || isPanelVisible("Audio")      || isPanelVisible("MIDI");
+
+        // Left host
+        if (leftHasContent) {
+            ImGui::SetNextWindowPos (ImVec2(viewport->WorkPos.x + kFloatMargin, floatY),
+                                     ImGuiCond_Always);
+            ImGui::SetNextWindowSize(ImVec2(leftW, floatH), ImGuiCond_Always);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+            if (ImGui::Begin("##LeftFloatHost", nullptr, hostFlags)) {
+                ImGui::DockSpace(kLeftFloatId, ImVec2(0, 0),
+                                 ImGuiDockNodeFlags_NoDockingSplit |
+                                 ImGuiDockNodeFlags_NoUndocking);
             }
+            ImGui::End();
+            ImGui::PopStyleVar();
+        }
+
+        // Right host
+        if (rightHasContent) {
+            ImGui::SetNextWindowPos (
+                ImVec2(viewport->WorkPos.x + dockSize.x - rightW - kFloatMargin, floatY),
+                ImGuiCond_Always);
+            ImGui::SetNextWindowSize(ImVec2(rightW, floatH), ImGuiCond_Always);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+            if (ImGui::Begin("##RightFloatHost", nullptr, hostFlags)) {
+                ImGui::DockSpace(kRightFloatId, ImVec2(0, 0),
+                                 ImGuiDockNodeFlags_NoDockingSplit |
+                                 ImGuiDockNodeFlags_NoUndocking);
+            }
+            ImGui::End();
+            ImGui::PopStyleVar();
         }
     }
-
-    ImGui::End();
 
     // Apply deferred focus. SetWindowFocus only works if the named window
     // has been Begin()-ed at least once in a previous frame, so we may need
@@ -735,11 +747,40 @@ void UIManager::setWorkspace(Workspace w) {
 }
 
 bool UIManager::isPanelVisible(const char* title) const {
-    // Single unified layout — every tracked panel renders + docks. The
-    // workspace concept is retired for now (Canvas/Show switcher removed
-    // from the menu bar). Kept as a no-op so future curated views can
-    // plug back in if we bring modes back.
-    (void)title;
+    // Per-mode panel curation. Three workspaces, three different right-
+    // rail compositions. Bottom dock (Timeline) stays in every mode.
+    if (!title) return true;
+    auto eq = [&](const char* x) { return std::strcmp(title, x) == 0; };
+
+    switch (sMode) {
+    case WorkspaceMode::Canvas:
+        // Editing the comp: Layers, Sources, Properties on the right;
+        // Timeline at the bottom. Mapping/Audio/MIDI live in other modes.
+        if (eq("Layers"))     return true;
+        if (eq("Sources"))    return true;
+        if (eq("Properties")) return true;
+        if (eq("Timeline"))   return true;
+        if (eq("Canvas"))     return true;
+        return false;
+
+    case WorkspaceMode::Stage:
+        // Calibrating the projector: Mapping + Properties only.
+        // Sources/Audio/MIDI/Layers are out of scope.
+        if (eq("Stage"))      return true;
+        if (eq("Mapping"))    return true;
+        if (eq("Properties")) return true;
+        if (eq("Timeline"))   return true;
+        return false;
+
+    case WorkspaceMode::Show:
+        // Live performance: MIDI + Audio on the right, Timeline at the
+        // bottom. No layer editing surfaces.
+        if (eq("Show"))       return true;
+        if (eq("MIDI"))       return true;
+        if (eq("Audio"))      return true;
+        if (eq("Timeline"))   return true;
+        return false;
+    }
     return true;
 }
 

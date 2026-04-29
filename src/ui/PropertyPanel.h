@@ -38,6 +38,8 @@ struct MosaicAudioState {
     float beatDecay = 0;
 };
 
+class StageView;
+
 class PropertyPanel {
 public:
     void render(std::shared_ptr<Layer> layer, bool& maskEditMode,
@@ -46,6 +48,15 @@ public:
                 BPMSync* bpmSync = nullptr, SceneManager* sceneManager = nullptr,
                 int* audioDeviceIdx = nullptr, MIDIManager* midi = nullptr);
 
+    // Stage hookups — when set, the panel renders a Stage Setup section
+    // (displays / projectors / surfaces) at the top of the Properties
+    // window when the workspace mode is Stage.
+    void setStageView(StageView* sv) { m_stageView = sv; }
+    void setZoneTextures(const std::vector<unsigned int>* z) { m_zoneTexs = z; }
+
     // Set to true when a property widget is first activated (signals Application to push undo state)
     bool undoNeeded = false;
+private:
+    StageView* m_stageView = nullptr;
+    const std::vector<unsigned int>* m_zoneTexs = nullptr;
 };

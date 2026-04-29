@@ -80,6 +80,24 @@ struct ParticleEmitter {
     bool      billboard = true;                  // always face camera (currently only mode)
     int       renderMode = 0;                    // 0 = soft sprite, 1 = textured, 2 = ring
 
+    // Motion-aligned anisotropic stretching. Velocity-stretched sprites
+    // turn dots into streaks — the second-biggest visual upgrade per
+    // the Niagara research pass. motionBlur scales how aggressively the
+    // particle stretches with speed; minStretch keeps a baseline
+    // elongation even at zero speed.
+    float     motionBlur = 0.5f;                  // 0 = static disc, 1+ = aggressive streak
+    float     minStretch = 0.0f;                  // baseline elongation, 0..1
+
+    // ── Audio reactivity ──
+    // Modulates spawn rate, particle size, and emits beat bursts when
+    // an onset crosses the threshold. Set via ParticleSource::setAudioState
+    // each frame (called from Application after the AudioAnalyzer ticks).
+    // Each *Mul value is "0 = no influence, 1 = doubles on full bass".
+    float     audioSpawnRateMul = 0.0f;            // bass amplifies spawnRate
+    float     audioSizeMul      = 0.0f;            // mid amplifies initialSize
+    float     audioVelocityMul  = 0.0f;            // treble amplifies initial velocity
+    float     audioBeatBurst    = 0.0f;            // particles emitted per beat onset (0 = off)
+
     // Modules (stackable behaviors) — execute in order each frame
     std::vector<ParticleModule> modules;
 };
@@ -116,6 +134,17 @@ public:
 
     // Live stats (for debug overlay / UI)
     int liveParticleCount() const { return (int)m_particles.size(); }
+
+    // Audio reactivity input — call each frame from Application after the
+    // AudioAnalyzer updates. Bands are 0..1 normalised energies, beat is
+    // a one-frame onset pulse (1.0 on the frame a beat is detected, then
+    // decays back to 0).
+    void setAudioState(float bass, float mid, float treble, float beat) {
+        m_audioBass = bass;
+        m_audioMid = mid;
+        m_audioTreble = treble;
+        m_audioBeat = beat;
+    }
 
 private:
     struct Particle {
@@ -172,5 +201,12 @@ private:
     double m_colorCacheInterval  = 0.15;
     GLuint m_colorCacheFBO       = 0;       // used to downsample the bound tex
     GLuint m_colorCacheTex       = 0;       // attachment for the downsample FBO
+
+    // Audio reactivity inputs — fed by setAudioState() each frame.
+    float m_audioBass   = 0.0f;
+    float m_audioMid    = 0.0f;
+    float m_audioTreble = 0.0f;
+    float m_audioBeat   = 0.0f;
+    float m_audioBeatPrev = 0.0f;            // detect beat-onset edge
     void refreshColorCache();
 };
