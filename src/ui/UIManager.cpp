@@ -13,6 +13,17 @@
 
 UIManager::WorkspaceMode UIManager::sMode = UIManager::WorkspaceMode::Canvas;
 
+static ImFont* addFirstAvailableFont(ImGuiIO& io, const char* const* paths,
+                                     float size, const ImFontConfig* cfg,
+                                     const ImWchar* glyphRanges) {
+    for (const char* const* path = paths; *path; ++path) {
+        if (ImFont* font = io.Fonts->AddFontFromFileTTF(*path, size, cfg, glyphRanges)) {
+            return font;
+        }
+    }
+    return nullptr;
+}
+
 bool UIManager::init(GLFWwindow* window) {
     m_window = window;
 
@@ -35,11 +46,15 @@ bool UIManager::init(GLFWwindow* window) {
     float dpiScale = xscale;
     // On macOS Retina, fonts are loaded at 2x for crispness, then
     // FontGlobalScale is set to 1/dpiScale so they render at logical size.
-    // On Windows, fonts and UI are both scaled by dpiScale.
+    // On Windows/Linux, fonts and UI are both scaled by dpiScale.
     float fontScale = dpiScale;   // font texture resolution
 #ifdef __APPLE__
     float uiScale = 1.0f;        // widget sizes — already in logical coords on mac
     m_baseFontGlobalScale = 1.0f / dpiScale;
+#elif defined(__linux__)
+    fontScale = std::max(fontScale, 1.15f);
+    float uiScale = std::max(dpiScale, 1.10f);
+    m_baseFontGlobalScale = 1.0f;
 #else
     float uiScale = dpiScale;
     m_baseFontGlobalScale = 1.0f;
@@ -71,6 +86,25 @@ bool UIManager::init(GLFWwindow* window) {
     const char* macPrimaryFB    = "/System/Library/Fonts/Helvetica.ttc";
     const char* macBoldPath     = "/System/Library/Fonts/SFNS.ttf";
     const char* macMonoPath     = "/System/Library/Fonts/SFNSMono.ttf";
+    const char* linuxPrimaryPaths[] = {
+        "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        nullptr,
+    };
+    const char* linuxBoldPaths[] = {
+        "/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+        nullptr,
+    };
+    const char* linuxMonoPaths[] = {
+        "/usr/share/fonts/truetype/ubuntu/UbuntuMono-R.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationMono-Regular.ttf",
+        nullptr,
+    };
 
     float fontSize = 15.0f * fontScale;  // denser feel; scaled for DPI
     ImFontConfig fontCfg;
@@ -84,6 +118,8 @@ bool UIManager::init(GLFWwindow* window) {
 #elif defined(__APPLE__)
     mainFont = io.Fonts->AddFontFromFileTTF(macPrimaryPath, fontSize, &fontCfg, glyphRanges);
     if (!mainFont) mainFont = io.Fonts->AddFontFromFileTTF(macPrimaryFB, fontSize, &fontCfg, glyphRanges);
+#elif defined(__linux__)
+    mainFont = addFirstAvailableFont(io, linuxPrimaryPaths, fontSize, &fontCfg, glyphRanges);
 #endif
     if (!mainFont) {
         ImFontConfig defCfg;
@@ -103,6 +139,8 @@ bool UIManager::init(GLFWwindow* window) {
 #elif defined(__APPLE__)
     m_smallFont = io.Fonts->AddFontFromFileTTF(macPrimaryPath, smallSize, &smallCfg, glyphRanges);
     if (!m_smallFont) m_smallFont = io.Fonts->AddFontFromFileTTF(macPrimaryFB, smallSize, &smallCfg, glyphRanges);
+#elif defined(__linux__)
+    m_smallFont = addFirstAvailableFont(io, linuxPrimaryPaths, smallSize, &smallCfg, glyphRanges);
 #endif
     if (!m_smallFont) {
         ImFontConfig defCfg;
@@ -120,6 +158,8 @@ bool UIManager::init(GLFWwindow* window) {
     if (!m_boldFont) m_boldFont = io.Fonts->AddFontFromFileTTF(boldFallback, fontSize, &boldCfg, glyphRanges);
 #elif defined(__APPLE__)
     m_boldFont = io.Fonts->AddFontFromFileTTF(macBoldPath, fontSize, &boldCfg, glyphRanges);
+#elif defined(__linux__)
+    m_boldFont = addFirstAvailableFont(io, linuxBoldPaths, fontSize, &boldCfg, glyphRanges);
 #endif
     if (!m_boldFont) m_boldFont = mainFont ? mainFont : io.Fonts->Fonts[0];
 
@@ -133,6 +173,8 @@ bool UIManager::init(GLFWwindow* window) {
     m_monoFont = io.Fonts->AddFontFromFileTTF(monoFontPath, monoSize, &monoCfg, glyphRanges);
 #elif defined(__APPLE__)
     m_monoFont = io.Fonts->AddFontFromFileTTF(macMonoPath, monoSize, &monoCfg, glyphRanges);
+#elif defined(__linux__)
+    m_monoFont = addFirstAvailableFont(io, linuxMonoPaths, monoSize, &monoCfg, glyphRanges);
 #endif
     if (!m_monoFont) m_monoFont = m_smallFont;
 
