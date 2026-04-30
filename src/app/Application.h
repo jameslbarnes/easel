@@ -18,6 +18,7 @@
 #include "ui/PropertyPanel.h"
 #include "ui/WarpEditor.h"
 #include <unordered_map>
+#include <unordered_set>
 
 #ifdef _WIN32
 #include "sources/WindowCaptureSource.h"
@@ -237,7 +238,8 @@ private:
     char m_whepUrlBuf[512] = {};
     std::shared_ptr<WHEPSource> m_whepConnecting; // tracks in-progress connection
     std::string m_whepStatus;
-    void addWHEPSource(const std::string& whepUrl);
+    std::unordered_set<std::string> m_cueAddedSourceUrls;
+    bool addWHEPSource(const std::string& whepUrl, const std::string& label = "");
     void addScopeRTMP();
 #endif
 

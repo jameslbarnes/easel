@@ -704,6 +704,16 @@ void Application::run() {
             for (const auto& kv : metadata) {
                 m_dataBus.set(kv.first, kv.second);
             }
+
+#ifdef HAS_WHEP
+            for (const auto& source : m_cueClient.sources()) {
+                if (source.kind != "video" || source.transport != "whep" || source.url.empty()) continue;
+                if (m_cueAddedSourceUrls.count(source.url) == 0 &&
+                    addWHEPSource(source.url, source.label.empty() ? "Cue Video" : source.label)) {
+                    m_cueAddedSourceUrls.insert(source.url);
+                }
+            }
+#endif
         }
 
         // Voice decay: fade layers with DataBus text bindings after speech stops
@@ -2842,7 +2852,7 @@ void Application::renderUI() {
             static char cueSession[128] = "demo";
 
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-            ImGui::TextWrapped("Subscribe to Cue for live transcript, prompt actions, vision, and signal metadata.");
+            ImGui::TextWrapped("Subscribe to Cue for live transcript, prompt actions, output sources, vision, and signal metadata.");
             ImGui::PopStyleColor();
             ImGui::Dummy(ImVec2(0, 4));
 
@@ -2911,6 +2921,19 @@ void Application::renderUI() {
                     ? (m_cueClient.transcriptionConnected() ? "PCM connected" : "opening PCM stream")
                     : "off");
             ImGui::PopStyleColor();
+
+            auto cueSources = m_cueClient.sources();
+            if (!cueSources.empty()) {
+                ImGui::Dummy(ImVec2(0, 4));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+                ImGui::TextUnformatted("OUTPUTS");
+                ImGui::PopStyleColor();
+                for (const auto& source : cueSources) {
+                    std::string label = source.label.empty() ? source.id : source.label;
+                    std::string transport = source.transport.empty() ? "source" : source.transport;
+                    ImGui::TextWrapped("%s (%s)", label.c_str(), transport.c_str());
+                }
+            }
 
             ImGui::Dummy(ImVec2(0, 4));
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
@@ -6901,7 +6924,7 @@ void Application::addNDISource(const std::string& senderName) {
 #endif
 
 #ifdef HAS_WHEP
-void Application::addWHEPSource(const std::string& whepUrl) {
+bool Application::addWHEPSource(const std::string& whepUrl, const std::string& label) {
     m_undoStack.pushState(m_layerStack, m_selectedLayer);
     auto source = std::make_shared<WHEPSource>();
     m_whepConnecting = source;
@@ -6910,7 +6933,7 @@ void Application::addWHEPSource(const std::string& whepUrl) {
     if (!source->connect(whepUrl)) {
         m_whepStatus = "signaling failed";
         std::cerr << "[WHEP] Connection failed for: " << whepUrl << std::endl;
-        return;
+        return false;
     }
 
     m_whepStatus = "ICE connecting";
@@ -6918,11 +6941,12 @@ void Application::addWHEPSource(const std::string& whepUrl) {
     auto layer = std::make_shared<Layer>();
     layer->id = m_nextLayerId++;
     layer->source = source;
-    layer->name = "WHEP: " + whepUrl.substr(whepUrl.rfind('/') + 1);
+    layer->name = label.empty() ? "WHEP: " + whepUrl.substr(whepUrl.rfind('/') + 1) : label;
 
     m_layerStack.addLayer(layer);
     m_selectedLayer = m_layerStack.count() - 1;
     registerLayerWithZones(layer->id);
+    return true;
 }
 
 void Application::addScopeRTMP() {

@@ -245,6 +245,7 @@ bool CueClient::connect(const std::string& baseUrl, const std::string& sessionId
         m_prompt.clear();
         m_latestVisionDescription.clear();
         m_metadata.clear();
+        m_sources.clear();
         m_metadata["cue.session"] = m_sessionId;
     }
     {
@@ -695,6 +696,39 @@ void CueClient::handleMessage(const std::string& payload) {
         m_metadata["cue.prompt.reset"] = reset ? "true" : "false";
         std::string actionType = fieldString(message, "actionType");
         if (!actionType.empty()) m_metadata["cue.prompt.action_type"] = actionType;
+        return;
+    }
+
+    if (type == "source.available") {
+        SourceOutput source;
+        source.id = fieldString(message, "sourceId");
+        source.kind = fieldString(message, "kind");
+        source.label = fieldString(message, "label");
+        source.provider = fieldString(message, "provider");
+        source.transport = fieldString(message, "transport");
+        source.url = fieldString(message, "url");
+        if (source.id.empty()) source.id = source.url;
+        if (source.label.empty()) source.label = source.id;
+        if (source.kind.empty()) source.kind = "video";
+        if (source.transport.empty()) source.transport = "whep";
+        if (source.id.empty() || source.url.empty()) return;
+
+        std::lock_guard<std::mutex> lk(m_dataMutex);
+        m_sources[source.id] = source;
+        m_metadata["cue.source." + source.id + ".url"] = source.url;
+        m_metadata["cue.source." + source.id + ".transport"] = source.transport;
+        m_metadata["cue.source." + source.id + ".provider"] = source.provider;
+        return;
+    }
+
+    if (type == "output.status") {
+        std::string outputId = fieldString(message, "outputId");
+        std::string status = fieldString(message, "status");
+        std::string detail = fieldString(message, "detail");
+        if (outputId.empty()) return;
+        std::lock_guard<std::mutex> lk(m_dataMutex);
+        if (!status.empty()) m_metadata["cue.output." + outputId + ".status"] = status;
+        if (!detail.empty()) m_metadata["cue.output." + outputId + ".detail"] = detail;
         return;
     }
 
