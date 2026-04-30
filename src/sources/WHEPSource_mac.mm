@@ -120,9 +120,7 @@ async function connect() {
     });
     S('ice-gathered');
 
-    // Step 8: Connect to local mediamtx WHEP
-    // Etherea's browser relays the received Scope video to local mediamtx via WHIP
-    // so we read it locally — no second remote WebRTC session, zero jitter
+    // Step 8: Prefer local mediamtx WHEP when Etherea is relaying Scope video.
     const localUrl = 'http://localhost:8889/easel_scope/whep';
     S('trying-local: ' + localUrl);
     let answer = null;
@@ -148,9 +146,30 @@ async function connect() {
         }
     }
 
-    // Fallback: Scope WebRTC (creates a second session — causes jitter)
+    // Fallback: connect directly to the WHEP URL provided by the source.
+    // Cue-published Scope outputs use this path without requiring Etherea.
+    if (!answer && whepUrl) {
+        S('trying-direct: ' + whepUrl);
+        try {
+            const resp = await fetch(whepUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/sdp' },
+                body: pc.localDescription.sdp
+            });
+            if (resp.ok) {
+                answer = await resp.text();
+                S('direct-whep-ok: ' + answer.length + ' bytes');
+            } else {
+                S('direct-whep-failed: ' + resp.status);
+            }
+        } catch(e) {
+            S('direct-whep-error: ' + e.message);
+        }
+    }
+
+    // Final fallback: Etherea Scope WebRTC proxy.
     if (!answer) {
-        S('fallback-scope');
+        S('fallback-etherea-scope');
         try {
             const resp = await fetch('http://localhost:7860/api/scope/webrtc/offer', {
                 method: 'POST',
