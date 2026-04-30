@@ -274,7 +274,7 @@ bool Application::init() {
     m_audioAnalyzer.setSampleTap([this](const float* mono, int count, int sampleRate) {
         m_cueClient.feedAudioSamples(mono, count, sampleRate);
     });
-    m_cueClient.connect("http://localhost:8792", "demo");
+    m_cueClient.connect("http://localhost:8792", "current");
 
     // Record initial monitor count and auto-connect if secondary exists
     m_lastMonitorCount = (int)ProjectorOutput::enumerateMonitors().size();
@@ -708,8 +708,13 @@ void Application::run() {
 #ifdef HAS_WHEP
             for (const auto& source : m_cueClient.sources()) {
                 if (source.kind != "video" || source.transport != "whep" || source.url.empty()) continue;
-                if (m_cueAddedSourceUrls.count(source.url) == 0 &&
-                    addWHEPSource(source.url, source.label.empty() ? "Cue Video" : source.label)) {
+                std::string label = source.label.empty() ? "Cue Video" : source.label;
+                if (m_cueAddedSourceUrls.count(source.url) > 0) continue;
+                if (hasWHEPSource(source.url, label)) {
+                    m_cueAddedSourceUrls.insert(source.url);
+                    continue;
+                }
+                if (addWHEPSource(source.url, label)) {
                     m_cueAddedSourceUrls.insert(source.url);
                 }
             }
@@ -2849,7 +2854,7 @@ void Application::renderUI() {
     {
         if (!m_cueClient.isRunning()) {
             static char cueUrl[256] = "http://localhost:8792";
-            static char cueSession[128] = "demo";
+            static char cueSession[128] = "current";
 
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
             ImGui::TextWrapped("Subscribe to Cue for live transcript, prompt actions, output sources, vision, and signal metadata.");
@@ -6924,7 +6929,21 @@ void Application::addNDISource(const std::string& senderName) {
 #endif
 
 #ifdef HAS_WHEP
+bool Application::hasWHEPSource(const std::string& whepUrl, const std::string& label) const {
+    for (const auto& layer : m_layerStack.layers()) {
+        if (!layer || !layer->source || layer->source->typeName() != "WHEP") continue;
+        if (layer->source->sourcePath() == whepUrl) return true;
+        if (!label.empty() && layer->name == label) return true;
+    }
+    return false;
+}
+
 bool Application::addWHEPSource(const std::string& whepUrl, const std::string& label) {
+    if (hasWHEPSource(whepUrl, label)) {
+        m_whepStatus = "already connected";
+        return false;
+    }
+
     m_undoStack.pushState(m_layerStack, m_selectedLayer);
     auto source = std::make_shared<WHEPSource>();
     m_whepConnecting = source;

@@ -200,13 +200,20 @@ async function connect() {
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d', { willReadFrequently: true });
 const video = document.getElementById('v');
+const captureIntervalMs = 125;
+let lastCaptureMs = 0;
 
 // Fast base64: prefers Uint8Array.toBase64() (Safari 18+) which avoids the
 // huge intermediate `binary` string and skips the chunked apply(). Falls
 // back to the chunked path on older WebKit. Output is byte-identical.
 const hasFastB64 = typeof Uint8Array.prototype.toBase64 === 'function';
 function bytesToBase64(bytes) {
-    if (hasFastB64) return bytes.toBase64();
+    if (hasFastB64) {
+        const view = bytes instanceof Uint8Array
+            ? bytes
+            : new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        return view.toBase64();
+    }
     let binary = '';
     const len = bytes.byteLength;
     for (let i = 0; i < len; i += 8192) {
@@ -216,6 +223,13 @@ function bytesToBase64(bytes) {
 }
 
 function captureFrame() {
+    const now = performance.now();
+    if (now - lastCaptureMs < captureIntervalMs) {
+        scheduleNextFrame();
+        return;
+    }
+    lastCaptureMs = now;
+
     if (video.videoWidth > 0 && video.videoHeight > 0) {
         if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
             canvas.width = video.videoWidth;
@@ -257,6 +271,7 @@ connect().catch(e => S('error: ' + e.message));
 
 @implementation WHEPFrameHandler
 - (void)userContentController:(WKUserContentController *)uc didReceiveScriptMessage:(WKScriptMessage *)message {
+    @autoreleasepool {
     if (!_source) return; // guard against stale handler after disconnect
     if ([message.name isEqualToString:@"frame"]) {
         NSString* payload = message.body;
@@ -270,10 +285,12 @@ connect().catch(e => S('error: ' + e.message));
             if (data && w > 0 && h > 0) {
                 _source->onWebViewFrame(w, h, (const uint8_t*)data.bytes, (int)data.length);
             }
+            [data release];
         }
     } else if ([message.name isEqualToString:@"status"]) {
         NSString* status = message.body;
         _source->onWebViewStatus([status UTF8String]);
+    }
     }
 }
 @end
@@ -286,16 +303,17 @@ void WHEPSource::startWebView(const std::string& whepUrl, const std::string& ice
     dispatch_async(dispatch_get_main_queue(), ^{
         // Clean up any existing WebView first (inline, already on main thread)
         if (m_webView) {
-            WKWebView* oldWv = (__bridge_transfer WKWebView*)m_webView;
+            WKWebView* oldWv = (WKWebView*)m_webView;
             [oldWv stopLoading];
             [oldWv.configuration.userContentController removeAllScriptMessageHandlers];
             [oldWv removeFromSuperview];
+            [oldWv release];
             m_webView = nullptr;
         }
         if (m_webViewHandler) {
-            WHEPFrameHandler* oldHandler = (__bridge_transfer WHEPFrameHandler*)m_webViewHandler;
+            WHEPFrameHandler* oldHandler = (WHEPFrameHandler*)m_webViewHandler;
             oldHandler.source = nullptr;
-            oldHandler = nil;
+            [oldHandler release];
             m_webViewHandler = nullptr;
         }
 
@@ -310,10 +328,11 @@ void WHEPSource::startWebView(const std::string& whepUrl, const std::string& ice
         [config.userContentController addScriptMessageHandler:handler name:@"frame"];
         [config.userContentController addScriptMessageHandler:handler name:@"status"];
 
-        m_webViewHandler = (__bridge_retained void*)handler;
+        m_webViewHandler = (void*)handler;
 
         WKWebView* webView = [[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, 320, 240) configuration:config];
-        m_webView = (__bridge_retained void*)webView;
+        m_webView = (void*)webView;
+        [config release];
 
         // Attach to main app window as a 1x1 subview behind everything
         NSWindow* mainWindow = [NSApp mainWindow];
@@ -337,20 +356,21 @@ void WHEPSource::stopWebView() {
     // Always async — avoids deadlocks. The cleanup block nulls the source pointer
     // first to prevent any callbacks from firing on the old object.
     if (m_webViewHandler) {
-        WHEPFrameHandler* handler = (__bridge WHEPFrameHandler*)m_webViewHandler;
+        WHEPFrameHandler* handler = (WHEPFrameHandler*)m_webViewHandler;
         handler.source = nullptr; // immediate, thread-safe (prevents stale access)
     }
     dispatch_async(dispatch_get_main_queue(), ^{
         if (m_webView) {
-            WKWebView* wv = (__bridge_transfer WKWebView*)m_webView;
+            WKWebView* wv = (WKWebView*)m_webView;
             [wv stopLoading];
             [wv.configuration.userContentController removeAllScriptMessageHandlers];
             [wv removeFromSuperview];
+            [wv release];
             m_webView = nullptr;
         }
         if (m_webViewHandler) {
-            WHEPFrameHandler* handler = (__bridge_transfer WHEPFrameHandler*)m_webViewHandler;
-            handler = nil;
+            WHEPFrameHandler* handler = (WHEPFrameHandler*)m_webViewHandler;
+            [handler release];
             m_webViewHandler = nullptr;
         }
         whepLog("[WHEP-WebView] stopWebView complete (RSS: " +
@@ -360,6 +380,7 @@ void WHEPSource::stopWebView() {
 
 void WHEPSource::onWebViewFrame(int w, int h, const uint8_t* rgba, int dataLen) {
     if (dataLen != w * h * 4) return;
+    bool firstFrame = m_width <= 0 || m_height <= 0;
 
     int writeIdx = (m_writeIndex.load() + 1) % 3;
     auto& buf = m_buffers[writeIdx];
@@ -372,6 +393,9 @@ void WHEPSource::onWebViewFrame(int w, int h, const uint8_t* rgba, int dataLen) 
     m_width = w;
     m_height = h;
     m_connected.store(true);
+    if (firstFrame) {
+        whepLog("[WHEP-WebView] first-frame: " + std::to_string(w) + "x" + std::to_string(h));
+    }
 }
 
 void WHEPSource::onWebViewStatus(const std::string& status) {

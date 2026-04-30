@@ -239,6 +239,7 @@ private:
     std::shared_ptr<WHEPSource> m_whepConnecting; // tracks in-progress connection
     std::string m_whepStatus;
     std::unordered_set<std::string> m_cueAddedSourceUrls;
+    bool hasWHEPSource(const std::string& whepUrl, const std::string& label = "") const;
     bool addWHEPSource(const std::string& whepUrl, const std::string& label = "");
     void addScopeRTMP();
 #endif
