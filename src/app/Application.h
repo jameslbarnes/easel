@@ -39,6 +39,7 @@
 #endif
 
 #include "speech/EthereaClient.h"
+#include "speech/CueClient.h"
 #include "app/AudioAnalyzer.h"
 #include "app/AudioMixer.h"
 #include "app/BPMSync.h"
@@ -204,7 +205,9 @@ private:
 
     SpeechState m_speechState;
     EthereaClient m_ethereaClient;
+    CueClient m_cueClient;
     DataBus m_dataBus;
+    bool m_cueTranscriptionEnabled = false;
     std::string m_prevTranscript;       // Last full_transcript for diffing
 
     // Voice decay: fade text layers after speech stops (matches Shader-Claw 3)

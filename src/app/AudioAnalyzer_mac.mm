@@ -330,5 +330,8 @@ void AudioAnalyzer::drainPackets() {
         m_ringPos = (m_ringPos + 1) % kFFTSize;
         m_samplesAccumulated++;
     }
+    if (m_sampleTap && !samples.empty()) {
+        m_sampleTap(samples.data(), (int)samples.size(), m_sampleRate);
+    }
 }
 #endif

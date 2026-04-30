@@ -3,6 +3,7 @@
 #include <vector>
 #include <string>
 #include <cmath>
+#include <functional>
 
 #ifdef _WIN32
 // Forward declare WASAPI types to avoid Windows.h in header
@@ -69,6 +70,9 @@ public:
 
     // Feed samples externally (bypasses WASAPI) — used by AudioMixer and tests
     void feedSamples(const float* mono, int count);
+    void setSampleTap(std::function<void(const float*, int, int)> cb) {
+        m_sampleTap = std::move(cb);
+    }
 
     // Expose raw values for testing
     float rawBass() const { return m_rawBass; }
@@ -105,6 +109,7 @@ private:
     bool m_externalFeed = false;
     bool m_captureFailed = false;  // true after permission denied — don't retry
     bool m_wantsSystemAudio = false; // opt-in gate for ScreenCaptureKit (see header)
+    std::function<void(const float*, int, int)> m_sampleTap;
 
     void initCapture();
     void cleanupCapture();

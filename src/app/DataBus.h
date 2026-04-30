@@ -55,6 +55,12 @@ public:
             {"etherea.hint.1",       "Hint 2"},
             {"etherea.hint.2",       "Hint 3"},
             {"etherea.prompt",       "Prompt"},
+            {"cue.transcript",       "Cue Transcript"},
+            {"cue.latest",           "Cue Latest Words"},
+            {"cue.prompt",           "Cue Prompt"},
+            {"cue.prompt.reset",     "Cue Prompt Reset"},
+            {"cue.vision.description", "Cue Vision Description"},
+            {"cue.session",          "Cue Session"},
         };
     }
 

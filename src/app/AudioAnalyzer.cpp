@@ -219,6 +219,7 @@ void AudioAnalyzer::drainPackets() {
 #ifdef _WIN32
     if (!m_captureClient) return;
 
+    std::vector<float> tappedSamples;
     UINT32 packetLength = 0;
     while (SUCCEEDED(m_captureClient->GetNextPacketSize(&packetLength)) && packetLength > 0) {
         BYTE* data = nullptr;
@@ -240,10 +241,14 @@ void AudioAnalyzer::drainPackets() {
                 m_ringBuf[m_ringPos] = mono;
                 m_ringPos = (m_ringPos + 1) % kFFTSize;
                 m_samplesAccumulated++;
+                if (m_sampleTap) tappedSamples.push_back(mono);
             }
         }
 
         m_captureClient->ReleaseBuffer(numFrames);
+    }
+    if (m_sampleTap && !tappedSamples.empty()) {
+        m_sampleTap(tappedSamples.data(), (int)tappedSamples.size(), m_sampleRate);
     }
 #endif
 }
@@ -253,6 +258,9 @@ void AudioAnalyzer::drainPackets() {
 
 void AudioAnalyzer::feedSamples(const float* mono, int count) {
     initHannWindow();
+    if (m_sampleTap && mono && count > 0) {
+        m_sampleTap(mono, count, m_sampleRate);
+    }
     for (int i = 0; i < count; i++) {
         m_ringBuf[m_ringPos] = mono[i];
         m_ringPos = (m_ringPos + 1) % kFFTSize;
