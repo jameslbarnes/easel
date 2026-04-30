@@ -11,6 +11,15 @@
 
 class CueClient {
 public:
+    struct SourceOutput {
+        std::string id;
+        std::string kind;
+        std::string label;
+        std::string provider;
+        std::string transport;
+        std::string url;
+    };
+
     ~CueClient();
 
     bool connect(const std::string& baseUrl = "http://localhost:8792",
@@ -43,6 +52,13 @@ public:
         std::lock_guard<std::mutex> lk(m_dataMutex);
         return m_metadata;
     }
+    std::vector<SourceOutput> sources() const {
+        std::lock_guard<std::mutex> lk(m_dataMutex);
+        std::vector<SourceOutput> out;
+        out.reserve(m_sources.size());
+        for (const auto& kv : m_sources) out.push_back(kv.second);
+        return out;
+    }
 
 private:
     struct TranscriptEvent {
@@ -72,6 +88,7 @@ private:
     std::string m_prompt;
     std::string m_latestVisionDescription;
     std::unordered_map<std::string, std::string> m_metadata;
+    std::unordered_map<std::string, SourceOutput> m_sources;
 
     std::mutex m_eventMutex;
     std::vector<TranscriptEvent> m_pendingTranscriptEvents;
