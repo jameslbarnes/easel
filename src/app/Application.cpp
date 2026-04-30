@@ -297,34 +297,15 @@ bool Application::init() {
     }
 #endif
 
-    // Auto-connect to ShaderClaw shaders directory
-    {
-#ifdef _WIN32
-        const char* home = getenv("USERPROFILE");
-#else
-        const char* home = getenv("HOME");
-#endif
-        if (home) {
-            std::string candidates[] = {
-#ifdef _WIN32
-                std::string(home) + "\\ShaderClaw3\\shaders",
-                std::string(home) + "\\Documents\\ShaderClaw3\\shaders",
-                std::string(home) + "\\Documents\\ShaderClaw\\shaders",
-#else
-                std::string(home) + "/ShaderClaw3/shaders",
-                std::string(home) + "/Documents/ShaderClaw3/shaders",
-                std::string(home) + "/Documents/ShaderClaw/shaders",
-                std::string(home) + "/conductor/workspaces/macbook-migration/doha/ShaderClaw3/shaders",
-#endif
-            };
-            for (const auto& path : candidates) {
-                if (std::filesystem::exists(path)) {
-                    m_shaderClaw.connect(path);
-                    std::cout << "[ShaderClaw] Auto-connected to: " << path << std::endl;
-                    break;
-                }
-            }
-        }
+    // Easel-owned shader library. ShaderClaw can publish/import into this
+    // repository, but runtime browsing loads from Easel's local cloud cache.
+    m_shaderLibrary.open(ShaderLibrary::defaultCacheDir(),
+                         ShaderLibrary::defaultEndpointUrl());
+    if (m_shaderLibrary.syncEnabled()) {
+        std::cout << "[ShaderLibrary] Sync endpoint: "
+                  << m_shaderLibrary.endpointUrl() << std::endl;
+    } else {
+        std::cout << "[ShaderLibrary] Cloud sync disabled; set EASEL_SHADER_LIBRARY_URL" << std::endl;
     }
 
     // Auto-load default project if it exists, otherwise blank
@@ -826,8 +807,17 @@ void Application::shutdown() {
 }
 
 void Application::updateSources() {
-    // Hot-reload any changed Shader-Claw shaders
-    m_shaderClaw.update();
+    // Sync and hot-reload Easel-owned shader library assets.
+    m_shaderLibrary.update();
+
+    if (m_shaderLibrary.revision() != m_shaderLibraryRevisionSeen) {
+        m_shaderLibraryRevisionSeen = m_shaderLibrary.revision();
+        m_scThumbnails.clear();
+        m_scThumbRenderer.reset();
+        m_scThumbRenderPath.clear();
+        m_scPreview.reset();
+        m_scPreviewPath.clear();
+    }
 
     // Get mouse state for interactive shaders (normalized 0-1)
     double mx, my;
@@ -2413,8 +2403,8 @@ void Application::renderUI() {
     // via renderCompositionInlinePanel(). The standalone "Projector" window is gone.
 
     // Sources panel — single window with tabs for each input source type.
-    // Groups what used to be 5 separate panels (NDI / Spout / Capture /
-    // ShaderClaw / Etherea) into one place so the right column isn't
+    // Groups what used to be separate panels (NDI / Spout / Capture /
+    // Shaders / Etherea) into one place so the right column isn't
     // overwhelmed with tabs. Hidden in Stage and Show modes via the
     // mode-aware UIManager::isPanelVisible.
     bool sourcesVisible = m_ui.isPanelVisible("Sources");
@@ -2554,25 +2544,58 @@ void Application::renderUI() {
     }
 #endif
 
-    // ShaderClaw tab
-    if (sourcesTabsOpen && ImGui::BeginTabItem("ShaderClaw")) {
+    // Easel shader library tab
+    if (sourcesTabsOpen && ImGui::BeginTabItem("Shaders")) {
     {
-        if (!m_shaderClaw.isConnected()) {
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-            ImGui::TextWrapped("Connect to a Shader-Claw shaders directory to browse and hot-reload ISF shaders.");
-            ImGui::PopStyleColor();
-            ImGui::Dummy(ImVec2(0, 4));
+        const auto& shaders = m_shaderLibrary.shaders();
 
-            // Auto-detect common locations
-            static char scPath[512] = "";
-            if (scPath[0] == '\0') {
+        ImGui::PushStyleColor(ImGuiCol_Text,
+            m_shaderLibrary.syncEnabled()
+                ? ImVec4(0.35f, 0.78f, 0.52f, 1.0f)
+                : ImVec4(0.72f, 0.76f, 0.82f, 1.0f));
+        ImGui::Text("Easel Library");
+        ImGui::PopStyleColor();
+
+        ImGui::SameLine();
+        ImGui::TextDisabled("%d", (int)shaders.size());
+
+        const float kSyncW = ImGui::CalcTextSize("Sync Now").x
+                           + ImGui::GetStyle().FramePadding.x * 2.0f + 8.0f;
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x - kSyncW);
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 0.08f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.18f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1, 1, 1, 0.28f));
+        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.86f, 0.88f, 0.92f, 1.0f));
+        if (ImGui::SmallButton(m_shaderLibrary.isSyncing() ? "Syncing" : "Sync Now")) {
+            m_shaderLibrary.requestSync();
+        }
+        ImGui::PopStyleColor(4);
+
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.60f, 0.68f, 1.0f));
+        ImGui::TextWrapped("%s", m_shaderLibrary.statusText().c_str());
+        ImGui::PopStyleColor();
+
+        static char libraryUrl[1024] = "";
+        static bool libraryUrlInit = false;
+        if (!libraryUrlInit) {
+            strncpy(libraryUrl, m_shaderLibrary.endpointUrl().c_str(), sizeof(libraryUrl) - 1);
+            libraryUrlInit = true;
+        }
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputTextWithHint("##ShaderLibraryUrl", "EASEL_SHADER_LIBRARY_URL", libraryUrl, sizeof(libraryUrl));
+        if (ImGui::Button("Use Endpoint", ImVec2(-1, 0))) {
+            m_shaderLibrary.setEndpointUrl(libraryUrl);
+        }
+
+        if (ImGui::CollapsingHeader("ShaderClaw Import")) {
+            static char importPath[512] = "";
+            if (importPath[0] == '\0') {
 #ifdef _WIN32
                 const char* home = getenv("USERPROFILE");
 #else
                 const char* home = getenv("HOME");
 #endif
                 if (home) {
-                    // Try known ShaderClaw locations
                     std::string candidates[] = {
 #ifdef _WIN32
                         std::string(home) + "\\ShaderClaw3\\shaders",
@@ -2582,12 +2605,14 @@ void Application::renderUI() {
 #else
                         std::string(home) + "/ShaderClaw3/shaders",
                         std::string(home) + "/Documents/ShaderClaw3/shaders",
+                        std::string(home) + "/Documents/ShaderClaw/shaders",
+                        std::string(home) + "/shader-claw3/shaders",
                         std::string(home) + "/conductor/workspaces/macbook-migration/doha/ShaderClaw3/shaders",
 #endif
                     };
                     for (const auto& tryPath : candidates) {
                         if (std::filesystem::exists(tryPath)) {
-                            strncpy(scPath, tryPath.c_str(), sizeof(scPath) - 1);
+                            strncpy(importPath, tryPath.c_str(), sizeof(importPath) - 1);
                             break;
                         }
                     }
@@ -2595,316 +2620,219 @@ void Application::renderUI() {
             }
 
             ImGui::SetNextItemWidth(-1);
-            ImGui::InputText("##SCPath", scPath, sizeof(scPath));
-
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-            if (ImGui::Button("Connect", ImVec2(-1, 0))) {
-                m_shaderClaw.connect(scPath);
-            }
-            ImGui::PopStyleColor(4);
-        } else {
-            // Connected — show shader browser. Color language: green means
-            // "connected" (a healthy state, not an alert). Disconnect is a
-            // calm muted pill — no red, since disconnecting is a normal user
-            // action, not an error. Refresh lives as a small icon right next
-            // to Disconnect to keep the row compact.
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.35f, 0.78f, 0.52f, 1.0f));
-            ImGui::Text("Connected");
-            ImGui::PopStyleColor();
-            // (Shader count removed — the tile gallery below makes the number
-            //  obvious from scanning; a bare integer added noise.)
-
-            // Right-aligned cluster: [⟳] Disconnect. Refresh icon sizes to
-            // the actual text-line height so it matches SmallButton's vertical
-            // footprint — previously `GetFrameHeight()` made it ~2x too tall.
-            const float kDiscW = ImGui::CalcTextSize("Disconnect").x
-                               + ImGui::GetStyle().FramePadding.x * 2.0f + 6.0f;
-            const float kIconH = ImGui::GetTextLineHeight();
-            float rightClusterW = kIconH + 6.0f + kDiscW;
-            ImGui::SameLine(ImGui::GetContentRegionAvail().x - rightClusterW);
-
-            // Refresh — small circular-arrow glyph, sized to match text row.
-            {
-                ImVec2 p0 = ImGui::GetCursorScreenPos();
-                bool clicked = ImGui::InvisibleButton("##SCRefresh", ImVec2(kIconH, kIconH));
-                bool hov = ImGui::IsItemHovered();
-                ImDrawList* d = ImGui::GetWindowDrawList();
-                ImU32 bg = hov ? IM_COL32(255, 255, 255, 28)
-                               : IM_COL32(255, 255, 255, 10);
-                d->AddRectFilled(p0, ImVec2(p0.x + kIconH, p0.y + kIconH), bg, 4.0f);
-
-                float cx = p0.x + kIconH * 0.5f;
-                float cy = p0.y + kIconH * 0.5f;
-                float r  = kIconH * 0.30f;
-                ImU32 fg = IM_COL32(235, 240, 250, 230);
-                const int seg = 20;
-                for (int s = 0; s < seg; s++) {
-                    float a0 = -0.35f * 3.14159f + (s    / (float)seg) * 5.2f;
-                    float a1 = -0.35f * 3.14159f + ((s+1)/ (float)seg) * 5.2f;
-                    d->AddLine(ImVec2(cx + cosf(a0)*r, cy + sinf(a0)*r),
-                               ImVec2(cx + cosf(a1)*r, cy + sinf(a1)*r),
-                               fg, 1.2f);
-                }
-                float ae = -0.35f * 3.14159f + 5.2f;
-                float ax = cx + cosf(ae) * r;
-                float ay = cy + sinf(ae) * r;
-                d->AddTriangleFilled(ImVec2(ax - 2.5f, ay - 2.5f),
-                                     ImVec2(ax + 2.5f, ay - 2.5f),
-                                     ImVec2(ax,        ay + 2.5f), fg);
-                if (hov) ImGui::SetTooltip("Refresh shader list");
-                if (clicked) m_shaderClaw.refreshManifest();
-            }
-
-            ImGui::SameLine(0, 6);
-
-            // Disconnect — neutral ghost pill (no alarming red).
-            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.20f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.0f, 1.0f, 1.0f, 0.35f));
-            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.72f, 0.76f, 0.82f, 1.0f));
-            if (ImGui::SmallButton("Disconnect")) {
-                m_shaderClaw.disconnect();
-                m_scThumbnails.clear();
-                m_scThumbRenderer.reset();
-                m_scPreview.reset();
-                m_scPreviewPath.clear();
-            }
-            ImGui::PopStyleColor(4);
-
-            // (Old wide Refresh button + hairline divider removed — they added
-            // clutter without structural value.)
-            ImGui::Dummy(ImVec2(0, 6));
-
-            // Update animated preview shader (for hovered item)
-            bool previewValid = false;
-            if (m_scPreview) {
-                m_scPreview->setResolution(64, 64);
-                m_scPreview->update();
-                m_scPreviewFrame++;
-                previewValid = (m_scPreviewFrame > 2);
-            }
-
-            // Generate static thumbnails (one shader per frame to avoid lag).
-            // Rendered at 160x160 for the gallery grid — bigger than the old
-            // 48x48 list cell so thumbnails read even at 2x DPI.
-            const int kThumbRes = 160;
-            if (m_scThumbRenderer) {
-                m_scThumbRenderer->setResolution(kThumbRes, kThumbRes);
-                m_scThumbRenderer->update();
-                m_scThumbRenderFrame++;
-                if (m_scThumbRenderFrame > 3) {
-                    auto& entry = m_scThumbnails[m_scThumbRenderPath];
-                    if (!entry.texture) entry.texture = std::make_shared<Texture>();
-                    std::vector<uint8_t> pixels(kThumbRes * kThumbRes * 4);
-                    GLint prevFBO;
-                    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
-                    GLuint thumbTex = m_scThumbRenderer->textureId();
-                    if (thumbTex != 0) {
-                        GLuint tempFBO;
-                        glGenFramebuffers(1, &tempFBO);
-                        glBindFramebuffer(GL_FRAMEBUFFER, tempFBO);
-                        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, thumbTex, 0);
-                        glReadPixels(0, 0, kThumbRes, kThumbRes, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-                        glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
-                        glDeleteFramebuffers(1, &tempFBO);
-                        entry.texture->createEmpty(kThumbRes, kThumbRes);
-                        entry.texture->updateData(pixels.data(), kThumbRes, kThumbRes);
-                        entry.ready = true;
-                    }
+            ImGui::InputText("##SCImportPath", importPath, sizeof(importPath));
+            if (ImGui::Button("Import To Cache", ImVec2(-1, 0))) {
+                if (m_shaderLibrary.importFromDirectory(importPath)) {
+                    m_scThumbnails.clear();
                     m_scThumbRenderer.reset();
-                    m_scThumbRenderPath.clear();
-                }
-            } else {
-                // Find next shader that needs a thumbnail
-                for (const auto& shader : m_shaderClaw.shaders()) {
-                    auto it = m_scThumbnails.find(shader.fullPath);
-                    if (it == m_scThumbnails.end() || !it->second.ready) {
-                        m_scThumbRenderer = std::make_shared<ShaderSource>();
-                        if (m_scThumbRenderer->loadFromFile(shader.fullPath)) {
-                            m_scThumbRenderPath = shader.fullPath;
-                            m_scThumbRenderFrame = 0;
-                        } else {
-                            m_scThumbRenderer.reset();
-                            // Mark as failed so we don't retry
-                            m_scThumbnails[shader.fullPath].ready = true;
-                        }
-                        break;
-                    }
-                }
-            }
-
-            // ─── Sub-tabs: VFX vs Text ──────────────────────────────────
-            // Split the shader library by intent: text-based shaders go
-            // under "Text" (anything tagged Text in the manifest), the
-            // rest under "VFX". Keeps the grid scannable when there are
-            // 70+ shaders by separating the two main creative modes.
-            static int s_scSubTab = 0; // 0 = VFX, 1 = Text
-            {
-                auto subTabBtn = [&](const char* label, int idx) {
-                    bool active = (s_scSubTab == idx);
-                    if (active) {
-                        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.96f, 0.97f, 1.00f, 1.00f));
-                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
-                        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.05f, 0.07f, 0.10f, 1.00f));
-                    } else {
-                        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 0.06f));
-                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.14f));
-                        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.78f, 0.80f, 0.85f, 1.0f));
-                    }
-                    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
-                    if (ImGui::Button(label, ImVec2(0, 0))) s_scSubTab = idx;
-                    ImGui::PopStyleVar();
-                    ImGui::PopStyleColor(3);
-                };
-                subTabBtn("VFX",  0);
-                ImGui::SameLine(0, 6);
-                subTabBtn("Text", 1);
-                ImGui::Dummy(ImVec2(0, 6));
-            }
-
-            // ─── Gallery grid ───────────────────────────────────────────
-            // Big thumbnail tiles laid out in a responsive grid (auto-sizes
-            // columns to panel width). Each tile = thumbnail + title. Click a
-            // thumbnail to add that shader as a layer; hover to see it
-            // animated. Works like a shader-picker gallery.
-            std::string hoveredPath;
-            const float cellPad     = 8.0f;
-            const float labelH      = 22.0f;
-            const float minCellW    = 132.0f;
-            const float maxCellW    = 200.0f;
-            float availW = ImGui::GetContentRegionAvail().x;
-            // Figure out how many columns fit.
-            int cols = std::max(1, (int)((availW + cellPad) / (minCellW + cellPad)));
-            float cellW = (availW - cellPad * (cols - 1)) / (float)cols;
-            if (cellW > maxCellW) cellW = maxCellW;
-            float thumbSize = cellW;           // square thumbs, full cell width
-            float cellH = thumbSize + labelH;
-
-            const auto& shaders = m_shaderClaw.shaders();
-            // Build the visible-index list once per frame so column
-            // wrapping ignores hidden entries cleanly. A shader counts
-            // as Text iff its categories include "Text" (or its
-            // filename starts with "text_" as a fallback for entries
-            // that haven't been re-tagged yet).
-            std::vector<int> visibleIdx;
-            visibleIdx.reserve(shaders.size());
-            for (int i = 0; i < (int)shaders.size(); i++) {
-                const auto& sh = shaders[i];
-                bool isText = false;
-                for (const auto& c : sh.categories) {
-                    if (c == "Text") { isText = true; break; }
-                }
-                if (!isText && sh.file.rfind("text_", 0) == 0) isText = true;
-                bool keep = (s_scSubTab == 1) ? isText : !isText;
-                if (keep) visibleIdx.push_back(i);
-            }
-            for (int vi = 0; vi < (int)visibleIdx.size(); vi++) {
-                int i = visibleIdx[vi];
-                const auto& shader = shaders[i];
-                ImGui::PushID(2000 + i);
-
-                // Layout: new row every `cols` items (using the
-                // VISIBLE index so wrapping is unaffected by hidden
-                // entries from the other sub-tab).
-                if (vi % cols != 0) ImGui::SameLine(0, cellPad);
-                ImVec2 cellPos = ImGui::GetCursorScreenPos();
-
-                bool isHoveredShader = (shader.fullPath == m_scPreviewPath);
-                GLuint thumbTex = 0;
-                if (isHoveredShader && previewValid && m_scPreview) {
-                    thumbTex = m_scPreview->textureId();
-                } else {
-                    auto it = m_scThumbnails.find(shader.fullPath);
-                    if (it != m_scThumbnails.end() && it->second.ready && it->second.texture)
-                        thumbTex = it->second.texture->id();
-                }
-
-                // Invisible hit button covering the whole cell — click = add, hover = preview.
-                bool clicked = ImGui::InvisibleButton("##tile", ImVec2(thumbSize, cellH));
-                bool hov = ImGui::IsItemHovered();
-                ImDrawList* d = ImGui::GetWindowDrawList();
-
-                // Tile background + subtle border (brightens on hover).
-                ImU32 tileBg   = hov ? IM_COL32(255, 255, 255, 22) : IM_COL32(255, 255, 255, 10);
-                ImU32 tileEdge = hov ? IM_COL32(255, 255, 255, 140) : IM_COL32(255, 255, 255, 50);
-                d->AddRectFilled(cellPos,
-                                 ImVec2(cellPos.x + thumbSize, cellPos.y + cellH),
-                                 tileBg, 6.0f);
-                d->AddRect(cellPos,
-                           ImVec2(cellPos.x + thumbSize, cellPos.y + cellH),
-                           tileEdge, 6.0f, 0, 1.0f);
-
-                // Thumbnail — clipped square at top of cell.
-                ImVec2 thumbMin(cellPos.x + 4, cellPos.y + 4);
-                ImVec2 thumbMax(cellPos.x + thumbSize - 4, cellPos.y + thumbSize - 4);
-                if (thumbTex) {
-                    d->AddImageRounded((ImTextureID)(intptr_t)thumbTex,
-                                       thumbMin, thumbMax,
-                                       ImVec2(0, 1), ImVec2(1, 0),
-                                       IM_COL32(255, 255, 255, 255), 4.0f);
-                } else {
-                    d->AddRectFilled(thumbMin, thumbMax,
-                                     IM_COL32(25, 28, 38, 255), 4.0f);
-                    // Centered ellipsis to hint that a thumbnail is still cooking.
-                    const char* wait = "...";
-                    ImVec2 ws = ImGui::CalcTextSize(wait);
-                    d->AddText(ImVec2(thumbMin.x + (thumbMax.x - thumbMin.x - ws.x) * 0.5f,
-                                      thumbMin.y + (thumbMax.y - thumbMin.y - ws.y) * 0.5f),
-                               IM_COL32(120, 130, 150, 200), wait);
-                }
-
-                // Title — truncated to fit the cell width.
-                std::string title = shader.title.empty() ? "(untitled)" : shader.title;
-                float titleMaxW = thumbSize - 16.0f;
-                ImVec2 ts = ImGui::CalcTextSize(title.c_str());
-                if (ts.x > titleMaxW) {
-                    // Naive truncation — trim until it fits + ellipsis.
-                    while (title.size() > 1 && ImGui::CalcTextSize((title + "...").c_str()).x > titleMaxW) {
-                        title.pop_back();
-                    }
-                    title += "...";
-                    ts = ImGui::CalcTextSize(title.c_str());
-                }
-                d->AddText(ImVec2(cellPos.x + (thumbSize - ts.x) * 0.5f,
-                                  cellPos.y + thumbSize - 2),
-                           isHoveredShader ? IM_COL32(255, 255, 255, 255)
-                                           : IM_COL32(220, 226, 235, 220),
-                           title.c_str());
-
-                if (hov) {
-                    hoveredPath = shader.fullPath;
-                    if (!shader.description.empty()) {
-                        ImGui::SetTooltip("%s\n\n%s", shader.title.c_str(), shader.description.c_str());
-                    } else {
-                        ImGui::SetTooltip("%s", shader.title.c_str());
-                    }
-                }
-                if (clicked) loadShader(shader.fullPath);
-
-                ImGui::PopID();
-            }
-
-            // Load/switch animated preview shader on hover
-            if (!hoveredPath.empty() && hoveredPath != m_scPreviewPath) {
-                m_scPreview = std::make_shared<ShaderSource>();
-                if (m_scPreview->loadFromFile(hoveredPath)) {
-                    m_scPreviewPath = hoveredPath;
-                    m_scPreviewFrame = 0;
-                } else {
                     m_scPreview.reset();
                     m_scPreviewPath.clear();
                 }
-            } else if (hoveredPath.empty()) {
+            }
+        }
+
+        ImGui::Dummy(ImVec2(0, 6));
+
+        bool previewValid = false;
+        if (m_scPreview) {
+            m_scPreview->setResolution(64, 64);
+            m_scPreview->update();
+            m_scPreviewFrame++;
+            previewValid = (m_scPreviewFrame > 2);
+        }
+
+        const int kThumbRes = 160;
+        if (m_scThumbRenderer) {
+            m_scThumbRenderer->setResolution(kThumbRes, kThumbRes);
+            m_scThumbRenderer->update();
+            m_scThumbRenderFrame++;
+            if (m_scThumbRenderFrame > 3) {
+                auto& entry = m_scThumbnails[m_scThumbRenderPath];
+                if (!entry.texture) entry.texture = std::make_shared<Texture>();
+                std::vector<uint8_t> pixels(kThumbRes * kThumbRes * 4);
+                GLint prevFBO;
+                glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+                GLuint thumbTex = m_scThumbRenderer->textureId();
+                if (thumbTex != 0) {
+                    GLuint tempFBO;
+                    glGenFramebuffers(1, &tempFBO);
+                    glBindFramebuffer(GL_FRAMEBUFFER, tempFBO);
+                    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, thumbTex, 0);
+                    glReadPixels(0, 0, kThumbRes, kThumbRes, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+                    glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
+                    glDeleteFramebuffers(1, &tempFBO);
+                    entry.texture->createEmpty(kThumbRes, kThumbRes);
+                    entry.texture->updateData(pixels.data(), kThumbRes, kThumbRes);
+                    entry.ready = true;
+                }
+                m_scThumbRenderer.reset();
+                m_scThumbRenderPath.clear();
+            }
+        } else {
+            for (const auto& shader : shaders) {
+                auto it = m_scThumbnails.find(shader.fullPath);
+                if (it == m_scThumbnails.end() || !it->second.ready) {
+                    m_scThumbRenderer = std::make_shared<ShaderSource>();
+                    if (m_scThumbRenderer->loadFromFile(shader.fullPath)) {
+                        m_scThumbRenderPath = shader.fullPath;
+                        m_scThumbRenderFrame = 0;
+                    } else {
+                        m_scThumbRenderer.reset();
+                        m_scThumbnails[shader.fullPath].ready = true;
+                    }
+                    break;
+                }
+            }
+        }
+
+        static int s_scSubTab = 0; // 0 = VFX, 1 = Text
+        {
+            auto subTabBtn = [&](const char* label, int idx) {
+                bool active = (s_scSubTab == idx);
+                if (active) {
+                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.96f, 0.97f, 1.00f, 1.00f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
+                    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.05f, 0.07f, 0.10f, 1.00f));
+                } else {
+                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 0.06f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.14f));
+                    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.78f, 0.80f, 0.85f, 1.0f));
+                }
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
+                if (ImGui::Button(label, ImVec2(0, 0))) s_scSubTab = idx;
+                ImGui::PopStyleVar();
+                ImGui::PopStyleColor(3);
+            };
+            subTabBtn("VFX",  0);
+            ImGui::SameLine(0, 6);
+            subTabBtn("Text", 1);
+            ImGui::Dummy(ImVec2(0, 6));
+        }
+
+        std::string hoveredPath;
+        const float cellPad     = 8.0f;
+        const float labelH      = 22.0f;
+        const float minCellW    = 132.0f;
+        const float maxCellW    = 200.0f;
+        float availW = ImGui::GetContentRegionAvail().x;
+        int cols = std::max(1, (int)((availW + cellPad) / (minCellW + cellPad)));
+        float cellW = (availW - cellPad * (cols - 1)) / (float)cols;
+        if (cellW > maxCellW) cellW = maxCellW;
+        float thumbSize = cellW;
+        float cellH = thumbSize + labelH;
+
+        std::vector<int> visibleIdx;
+        visibleIdx.reserve(shaders.size());
+        for (int i = 0; i < (int)shaders.size(); i++) {
+            const auto& sh = shaders[i];
+            bool isText = false;
+            for (const auto& c : sh.categories) {
+                if (c == "Text" || c == "text") { isText = true; break; }
+            }
+            if (!isText && sh.file.rfind("text_", 0) == 0) isText = true;
+            bool keep = (s_scSubTab == 1) ? isText : !isText;
+            if (keep) visibleIdx.push_back(i);
+        }
+
+        if (visibleIdx.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+            ImGui::TextWrapped("No shaders in this view.");
+            ImGui::PopStyleColor();
+        }
+
+        for (int vi = 0; vi < (int)visibleIdx.size(); vi++) {
+            int i = visibleIdx[vi];
+            const auto& shader = shaders[i];
+            ImGui::PushID(2000 + i);
+
+            if (vi % cols != 0) ImGui::SameLine(0, cellPad);
+            ImVec2 cellPos = ImGui::GetCursorScreenPos();
+
+            bool isHoveredShader = (shader.fullPath == m_scPreviewPath);
+            GLuint thumbTex = 0;
+            if (isHoveredShader && previewValid && m_scPreview) {
+                thumbTex = m_scPreview->textureId();
+            } else {
+                auto it = m_scThumbnails.find(shader.fullPath);
+                if (it != m_scThumbnails.end() && it->second.ready && it->second.texture)
+                    thumbTex = it->second.texture->id();
+            }
+
+            bool clicked = ImGui::InvisibleButton("##tile", ImVec2(thumbSize, cellH));
+            bool hov = ImGui::IsItemHovered();
+            ImDrawList* d = ImGui::GetWindowDrawList();
+
+            ImU32 tileBg   = hov ? IM_COL32(255, 255, 255, 22) : IM_COL32(255, 255, 255, 10);
+            ImU32 tileEdge = hov ? IM_COL32(255, 255, 255, 140) : IM_COL32(255, 255, 255, 50);
+            d->AddRectFilled(cellPos,
+                             ImVec2(cellPos.x + thumbSize, cellPos.y + cellH),
+                             tileBg, 6.0f);
+            d->AddRect(cellPos,
+                       ImVec2(cellPos.x + thumbSize, cellPos.y + cellH),
+                       tileEdge, 6.0f, 0, 1.0f);
+
+            ImVec2 thumbMin(cellPos.x + 4, cellPos.y + 4);
+            ImVec2 thumbMax(cellPos.x + thumbSize - 4, cellPos.y + thumbSize - 4);
+            if (thumbTex) {
+                d->AddImageRounded((ImTextureID)(intptr_t)thumbTex,
+                                   thumbMin, thumbMax,
+                                   ImVec2(0, 1), ImVec2(1, 0),
+                                   IM_COL32(255, 255, 255, 255), 4.0f);
+            } else {
+                d->AddRectFilled(thumbMin, thumbMax,
+                                 IM_COL32(25, 28, 38, 255), 4.0f);
+                const char* wait = "...";
+                ImVec2 ws = ImGui::CalcTextSize(wait);
+                d->AddText(ImVec2(thumbMin.x + (thumbMax.x - thumbMin.x - ws.x) * 0.5f,
+                                  thumbMin.y + (thumbMax.y - thumbMin.y - ws.y) * 0.5f),
+                           IM_COL32(120, 130, 150, 200), wait);
+            }
+
+            std::string title = shader.title.empty() ? "(untitled)" : shader.title;
+            float titleMaxW = thumbSize - 16.0f;
+            ImVec2 ts = ImGui::CalcTextSize(title.c_str());
+            if (ts.x > titleMaxW) {
+                while (title.size() > 1 && ImGui::CalcTextSize((title + "...").c_str()).x > titleMaxW) {
+                    title.pop_back();
+                }
+                title += "...";
+                ts = ImGui::CalcTextSize(title.c_str());
+            }
+            d->AddText(ImVec2(cellPos.x + (thumbSize - ts.x) * 0.5f,
+                              cellPos.y + thumbSize - 2),
+                       isHoveredShader ? IM_COL32(255, 255, 255, 255)
+                                       : IM_COL32(220, 226, 235, 220),
+                       title.c_str());
+
+            if (hov) {
+                hoveredPath = shader.fullPath;
+                if (!shader.description.empty()) {
+                    ImGui::SetTooltip("%s\n\n%s", shader.title.c_str(), shader.description.c_str());
+                } else {
+                    ImGui::SetTooltip("%s", shader.title.c_str());
+                }
+            }
+            if (clicked) loadShader(shader.fullPath);
+
+            ImGui::PopID();
+        }
+
+        if (!hoveredPath.empty() && hoveredPath != m_scPreviewPath) {
+            m_scPreview = std::make_shared<ShaderSource>();
+            if (m_scPreview->loadFromFile(hoveredPath)) {
+                m_scPreviewPath = hoveredPath;
+                m_scPreviewFrame = 0;
+            } else {
                 m_scPreview.reset();
                 m_scPreviewPath.clear();
             }
+        } else if (hoveredPath.empty()) {
+            m_scPreview.reset();
+            m_scPreviewPath.clear();
         }
     }
     ImGui::EndTabItem();
-    }  // end ShaderClaw tab
+    }  // end Shaders tab
 
     // Cue tab
     if (sourcesTabsOpen && ImGui::BeginTabItem("Cue")) {
@@ -5846,26 +5774,23 @@ void Application::renderTimelinePanel() {
                     ImGui::PopStyleColor();
                 }
 
-                // Quick-pick from the ShaderClaw library when connected so
-                // users don't have to browse to their shaders folder for
-                // every transition. Picking sets shaderPath and clears the
-                // built-in `name` so the ISF path takes precedence.
-                if (m_shaderClaw.isConnected()) {
-                    const auto& scList = m_shaderClaw.shaders();
-                    if (!scList.empty()) {
-                        ImGui::SetNextItemWidth(180);
-                        if (ImGui::BeginCombo("##XitionSCPick", "From ShaderClaw...")) {
-                            for (const auto& s : scList) {
-                                const char* label = s.title.empty()
-                                                    ? s.file.c_str()
-                                                    : s.title.c_str();
-                                if (ImGui::Selectable(label)) {
-                                    tr->shaderPath = s.fullPath;
-                                    tr->name.clear();
-                                }
+                // Quick-pick from the Easel shader library. Picking sets
+                // shaderPath and clears the built-in `name` so the ISF path
+                // takes precedence.
+                const auto& scList = m_shaderLibrary.shaders();
+                if (!scList.empty()) {
+                    ImGui::SetNextItemWidth(180);
+                    if (ImGui::BeginCombo("##XitionSCPick", "From Easel Library...")) {
+                        for (const auto& s : scList) {
+                            const char* label = s.title.empty()
+                                                ? s.file.c_str()
+                                                : s.title.c_str();
+                            if (ImGui::Selectable(label)) {
+                                tr->shaderPath = s.fullPath;
+                                tr->name.clear();
                             }
-                            ImGui::EndCombo();
                         }
+                        ImGui::EndCombo();
                     }
                 }
 
@@ -6948,10 +6873,9 @@ void Application::loadShader(const std::string& path) {
     m_selectedLayer = m_layerStack.count() - 1;
     registerLayerWithZones(layer->id);
 
-    // Register with ShaderClaw bridge for hot-reload
-    if (m_shaderClaw.isConnected()) {
-        m_shaderClaw.watchSource(path, source);
-    }
+    // Register with the Easel shader cache for hot-reload when cloud sync
+    // refreshes an already-loaded shader file.
+    m_shaderLibrary.watchSource(path, source);
 }
 
 #ifdef HAS_NDI
@@ -7240,6 +7164,11 @@ void Application::saveProject(const std::string& path) {
             // Save shader parameters
             if (layer->source->isShader()) {
                 auto* shaderSrc = static_cast<ShaderSource*>(layer->source.get());
+                std::string shaderLibraryId = m_shaderLibrary.idForPath(shaderSrc->sourcePath());
+                if (!shaderLibraryId.empty()) {
+                    layerJson["shaderLibraryId"] = shaderLibraryId;
+                }
+
                 json params = json::array();
                 for (const auto& input : shaderSrc->inputs()) {
                     json p;
@@ -7663,9 +7592,22 @@ void Application::loadProject(const std::string& path) {
                     layer->source = src;
                 }
 #endif
-            } else if (sourceType == "Shader" && !sourcePath.empty()) {
+            } else if (sourceType == "Shader" && (!sourcePath.empty() || layerJson.contains("shaderLibraryId"))) {
+                std::string shaderPath = sourcePath;
+                std::string shaderLibraryId = layerJson.value("shaderLibraryId", "");
+                if (!shaderLibraryId.empty()) {
+                    std::string libraryPath = m_shaderLibrary.pathForId(shaderLibraryId);
+                    if (!libraryPath.empty()) shaderPath = libraryPath;
+                } else {
+                    const std::string scheme = "easel-shader://";
+                    if (sourcePath.rfind(scheme, 0) == 0) {
+                        std::string libraryPath = m_shaderLibrary.pathForId(sourcePath.substr(scheme.size()));
+                        if (!libraryPath.empty()) shaderPath = libraryPath;
+                    }
+                }
+
                 auto src = std::make_shared<ShaderSource>();
-                if (src->loadFromFile(sourcePath)) {
+                if (src->loadFromFile(shaderPath)) {
                     // Restore saved parameter values
                     if (layerJson.contains("shaderParams")) {
                         for (const auto& p : layerJson["shaderParams"]) {
@@ -7705,6 +7647,7 @@ void Application::loadProject(const std::string& path) {
                         }
                     }
                     layer->source = src;
+                    m_shaderLibrary.watchSource(shaderPath, src);
                 }
 #ifdef HAS_NDI
             } else if (sourceType == "NDI" && !sourcePath.empty()) {

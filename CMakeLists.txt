@@ -98,6 +98,15 @@ else()
     message(STATUS "NDI SDK headers not found - NDI support disabled")
 endif()
 
+if(NOT WIN32)
+    find_package(CURL QUIET)
+    if(CURL_FOUND)
+        message(STATUS "libcurl found - cloud shader sync enabled")
+    else()
+        message(STATUS "libcurl not found - cloud shader sync disabled")
+    endif()
+endif()
+
 # Collect source files
 file(GLOB_RECURSE SOURCES
     src/*.cpp
@@ -126,8 +135,9 @@ if(NOT HAS_NDI)
     list(FILTER SOURCES EXCLUDE REGEX ".*NDI.*")
 endif()
 
-# WHEP (WebRTC-HTTP Egress Protocol) - requires libdatachannel + FFmpeg
-if(FFMPEG_FOUND)
+# WHEP (WebRTC-HTTP Egress Protocol) - requires libdatachannel + FFmpeg.
+# Non-Windows builds also need libcurl for HTTPS signaling.
+if(FFMPEG_FOUND AND (WIN32 OR CURL_FOUND))
     FetchContent_MakeAvailable(libdatachannel)
     set(HAS_WHEP TRUE)
     message(STATUS "WHEP source enabled (libdatachannel + FFmpeg)")
@@ -348,13 +358,18 @@ if(HAS_NDI)
     endif()
 endif()
 
+if(WIN32)
+    target_link_libraries(${PROJECT_NAME} PRIVATE winhttp)
+else()
+    if(CURL_FOUND)
+        target_compile_definitions(${PROJECT_NAME} PRIVATE HAS_CURL=1)
+        target_link_libraries(${PROJECT_NAME} PRIVATE CURL::libcurl)
+    endif()
+endif()
+
 if(HAS_WHEP)
     target_link_libraries(${PROJECT_NAME} PRIVATE LibDataChannel::LibDataChannel)
     target_compile_definitions(${PROJECT_NAME} PRIVATE HAS_WHEP=1)
-    if(NOT WIN32)
-        find_package(CURL REQUIRED)
-        target_link_libraries(${PROJECT_NAME} PRIVATE CURL::libcurl)
-    endif()
     if(APPLE)
         target_link_libraries(${PROJECT_NAME} PRIVATE "-framework WebKit")
     endif()

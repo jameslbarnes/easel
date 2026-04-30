@@ -25,7 +25,7 @@
 #include "sources/WindowCaptureSource_mac.h"
 #endif
 #include "sources/ShaderSource.h"
-#include "sources/ShaderClawBridge.h"
+#include "sources/ShaderLibrary.h"
 #include "sources/ParticleSource.h"
 
 #ifdef HAS_OPENCV
@@ -180,14 +180,14 @@ private:
 #if defined(_WIN32) || defined(__APPLE__)
     std::vector<WindowInfo> m_windowList;
 #endif
-    ShaderClawBridge m_shaderClaw;
+    ShaderLibrary m_shaderLibrary;
 
-    // ShaderClaw thumbnail preview (animated on hover)
+    // Shader library thumbnail preview (animated on hover)
     std::shared_ptr<ShaderSource> m_scPreview;
     std::string m_scPreviewPath;
     int m_scPreviewFrame = 0;
 
-    // ShaderClaw static thumbnail cache (one per shader)
+    // Shader library static thumbnail cache (one per shader)
     struct SCThumbEntry {
         std::shared_ptr<Texture> texture;
         bool ready = false;
@@ -196,6 +196,7 @@ private:
     std::shared_ptr<ShaderSource> m_scThumbRenderer; // temp shader for generating thumbnails
     std::string m_scThumbRenderPath; // currently rendering thumbnail for this shader
     int m_scThumbRenderFrame = 0;
+    int m_shaderLibraryRevisionSeen = 0;
 
 #ifdef HAS_OPENCV
     SceneScanner m_scanner;
