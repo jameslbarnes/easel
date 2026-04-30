@@ -260,6 +260,22 @@ bool Application::init() {
     // Auto-connect to Etherea (no session ID — server gives us the active session)
     m_ethereaClient.connect("http://localhost:7860");
 
+    // Cue event client — WebSocket subscriber for transcript, prompt, and metadata.
+    m_cueClient.setTranscriptCallback([this](const std::string& text, bool isFinal) {
+        m_dataBus.set("cue.latest", text);
+        if (isFinal && !text.empty()) {
+            std::string prev = m_dataBus.get("cue.transcript");
+            if (!prev.empty()) prev += " ";
+            prev += text;
+            m_dataBus.set("cue.transcript", prev);
+        }
+        m_voiceLastInputTime = glfwGetTime();
+    });
+    m_audioAnalyzer.setSampleTap([this](const float* mono, int count, int sampleRate) {
+        m_cueClient.feedAudioSamples(mono, count, sampleRate);
+    });
+    m_cueClient.connect("http://localhost:8792", "demo");
+
     // Record initial monitor count and auto-connect if secondary exists
     m_lastMonitorCount = (int)ProjectorOutput::enumerateMonitors().size();
     if (m_projectorAutoConnect && m_lastMonitorCount > 1) {
@@ -669,6 +685,7 @@ void Application::run() {
 
         // Dispatch Etherea events on main thread
         m_ethereaClient.poll();
+        m_cueClient.poll();
 
         // Push hints and prompt from Etherea into data bus
         {
@@ -678,6 +695,44 @@ void Application::run() {
             std::string prompt = m_ethereaClient.prompt();
             if (!prompt.empty())
                 m_dataBus.set("etherea.prompt", prompt);
+        }
+
+        // Push Cue transcript, prompt, and metadata into the data bus. Mirror
+        // core values into etherea.* keys so existing shader bindings keep
+        // working while Cue-specific bindings are added.
+        {
+            std::string transcript = m_cueClient.fullTranscript();
+            if (!transcript.empty()) {
+                m_dataBus.set("cue.transcript", transcript);
+                m_dataBus.set("etherea.transcript", transcript);
+            }
+            std::string latest = m_cueClient.latestWords();
+            if (!latest.empty()) {
+                m_dataBus.set("cue.latest", latest);
+                m_dataBus.set("etherea.latest", latest);
+            }
+            std::string prompt = m_cueClient.prompt();
+            if (!prompt.empty()) {
+                m_dataBus.set("cue.prompt", prompt);
+                m_dataBus.set("etherea.prompt", prompt);
+            }
+            m_dataBus.set("cue.prompt.reset", m_cueClient.promptReset() ? "true" : "false");
+            std::string vision = m_cueClient.latestVisionDescription();
+            if (!vision.empty()) m_dataBus.set("cue.vision.description", vision);
+            auto metadata = m_cueClient.metadata();
+            for (const auto& kv : metadata) {
+                m_dataBus.set(kv.first, kv.second);
+            }
+
+#ifdef HAS_WHEP
+            for (const auto& source : m_cueClient.sources()) {
+                if (source.kind != "video" || source.transport != "whep" || source.url.empty()) continue;
+                if (m_cueAddedSourceUrls.count(source.url) == 0 &&
+                    addWHEPSource(source.url, source.label.empty() ? "Cue Video" : source.label)) {
+                    m_cueAddedSourceUrls.insert(source.url);
+                }
+            }
+#endif
         }
 
         // Voice decay: fade layers with DataBus text bindings after speech stops
@@ -768,6 +823,7 @@ void Application::shutdown() {
     m_spoutOutput.destroy();
 #endif
     m_ethereaClient.disconnect();
+    m_cueClient.disconnect();
 #ifdef HAS_OPENCV
     m_scanner.cancelScan();
     m_webcam.close();
@@ -2859,6 +2915,135 @@ void Application::renderUI() {
     }
     ImGui::EndTabItem();
     }  // end ShaderClaw tab
+
+    // Cue tab
+    if (sourcesTabsOpen && ImGui::BeginTabItem("Cue")) {
+    {
+        if (!m_cueClient.isRunning()) {
+            static char cueUrl[256] = "http://localhost:8792";
+            static char cueSession[128] = "demo";
+
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+            ImGui::TextWrapped("Subscribe to Cue for live transcript, prompt actions, output sources, vision, and signal metadata.");
+            ImGui::PopStyleColor();
+            ImGui::Dummy(ImVec2(0, 4));
+
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputText("##CueUrl", cueUrl, sizeof(cueUrl));
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputText("##CueSession", cueSession, sizeof(cueSession));
+
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.06f, 0.07f, 0.09f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.12f, 0.13f, 0.16f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.18f, 0.20f, 0.24f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.97f, 0.98f, 0.98f, 1.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14, 12));
+            if (ImGui::Button("Connect", ImVec2(-1, 0))) {
+                m_cueClient.connect(cueUrl, cueSession);
+            }
+            ImGui::PopStyleVar(2);
+            ImGui::PopStyleColor(4);
+        } else {
+            bool connected = m_cueClient.isConnected();
+            ImU32 dotCol = connected
+                ? IM_COL32(34, 210, 130, 255)
+                : IM_COL32(220, 180, 60, 255);
+            ImVec2 cp = ImGui::GetCursorScreenPos();
+            float h = ImGui::GetFrameHeight();
+            ImGui::GetWindowDrawList()->AddCircleFilled(
+                ImVec2(cp.x + 6, cp.y + h * 0.5f), 4.0f, dotCol);
+            ImGui::Dummy(ImVec2(16, h));
+            ImGui::SameLine();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(connected ? "Connected" : "Connecting...");
+
+            float discW = ImGui::CalcTextSize("Disconnect").x + 24.0f;
+            ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - discW);
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 0.06f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.14f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1, 1, 1, 0.22f));
+            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.78f, 0.80f, 0.85f, 1.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
+            if (ImGui::Button("Disconnect", ImVec2(discW, 0))) {
+                m_cueClient.disconnect();
+            }
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor(4);
+
+            ImGui::Dummy(ImVec2(0, 8));
+
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+            ImGui::TextUnformatted("SESSION");
+            ImGui::PopStyleColor();
+            ImGui::TextWrapped("%s", m_cueClient.sessionId().c_str());
+
+            ImGui::Dummy(ImVec2(0, 4));
+            if (ImGui::Checkbox("Stream Audio to Cue", &m_cueTranscriptionEnabled)) {
+                m_cueClient.setTranscriptionEnabled(m_cueTranscriptionEnabled);
+            }
+            ImGui::SameLine();
+            ImGui::PushStyleColor(
+                ImGuiCol_Text,
+                m_cueClient.transcriptionConnected()
+                    ? ImVec4(0.35f, 0.78f, 0.52f, 1.0f)
+                    : ImVec4(0.55f, 0.60f, 0.68f, 1.0f));
+            ImGui::TextUnformatted(
+                m_cueTranscriptionEnabled
+                    ? (m_cueClient.transcriptionConnected() ? "PCM connected" : "opening PCM stream")
+                    : "off");
+            ImGui::PopStyleColor();
+
+            auto cueSources = m_cueClient.sources();
+            if (!cueSources.empty()) {
+                ImGui::Dummy(ImVec2(0, 4));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+                ImGui::TextUnformatted("OUTPUTS");
+                ImGui::PopStyleColor();
+                for (const auto& source : cueSources) {
+                    std::string label = source.label.empty() ? source.id : source.label;
+                    std::string transport = source.transport.empty() ? "source" : source.transport;
+                    ImGui::TextWrapped("%s (%s)", label.c_str(), transport.c_str());
+                }
+            }
+
+            ImGui::Dummy(ImVec2(0, 4));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+            ImGui::TextUnformatted("TRANSCRIPT");
+            ImGui::PopStyleColor();
+            std::string transcript = m_cueClient.fullTranscript();
+            if (!transcript.empty()) {
+                if (transcript.size() > 200) transcript = "..." + transcript.substr(transcript.size() - 197);
+                ImGui::TextWrapped("%s", transcript.c_str());
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.5f));
+                ImGui::TextWrapped("Waiting for Cue transcript...");
+                ImGui::PopStyleColor();
+            }
+
+            std::string prompt = m_cueClient.prompt();
+            if (!prompt.empty()) {
+                ImGui::Dummy(ImVec2(0, 4));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+                ImGui::Text("Prompt%s", m_cueClient.promptReset() ? " (reset)" : "");
+                ImGui::PopStyleColor();
+                if (prompt.size() > 160) prompt = prompt.substr(0, 157) + "...";
+                ImGui::TextWrapped("%s", prompt.c_str());
+            }
+
+            std::string vision = m_cueClient.latestVisionDescription();
+            if (!vision.empty()) {
+                ImGui::Dummy(ImVec2(0, 4));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+                ImGui::TextUnformatted("VISION");
+                ImGui::PopStyleColor();
+                if (vision.size() > 160) vision = vision.substr(0, 157) + "...";
+                ImGui::TextWrapped("%s", vision.c_str());
+            }
+        }
+    }
+    ImGui::EndTabItem();
+    }
 
     // Etherea tab
     if (sourcesTabsOpen && ImGui::BeginTabItem("Etherea")) {
@@ -6815,7 +7000,7 @@ void Application::addNDISource(const std::string& senderName) {
 #endif
 
 #ifdef HAS_WHEP
-void Application::addWHEPSource(const std::string& whepUrl) {
+bool Application::addWHEPSource(const std::string& whepUrl, const std::string& label) {
     m_undoStack.pushState(m_layerStack, m_selectedLayer);
     auto source = std::make_shared<WHEPSource>();
     m_whepConnecting = source;
@@ -6824,7 +7009,7 @@ void Application::addWHEPSource(const std::string& whepUrl) {
     if (!source->connect(whepUrl)) {
         m_whepStatus = "signaling failed";
         std::cerr << "[WHEP] Connection failed for: " << whepUrl << std::endl;
-        return;
+        return false;
     }
 
     m_whepStatus = "ICE connecting";
@@ -6832,11 +7017,12 @@ void Application::addWHEPSource(const std::string& whepUrl) {
     auto layer = std::make_shared<Layer>();
     layer->id = m_nextLayerId++;
     layer->source = source;
-    layer->name = "WHEP: " + whepUrl.substr(whepUrl.rfind('/') + 1);
+    layer->name = label.empty() ? "WHEP: " + whepUrl.substr(whepUrl.rfind('/') + 1) : label;
 
     m_layerStack.addLayer(layer);
     m_selectedLayer = m_layerStack.count() - 1;
     registerLayerWithZones(layer->id);
+    return true;
 }
 
 void Application::addScopeRTMP() {

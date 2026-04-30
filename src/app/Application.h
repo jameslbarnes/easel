@@ -18,6 +18,7 @@
 #include "ui/PropertyPanel.h"
 #include "ui/WarpEditor.h"
 #include <unordered_map>
+#include <unordered_set>
 
 #ifdef _WIN32
 #include "sources/WindowCaptureSource.h"
@@ -39,6 +40,7 @@
 #endif
 
 #include "speech/EthereaClient.h"
+#include "speech/CueClient.h"
 #include "app/AudioAnalyzer.h"
 #include "app/AudioMixer.h"
 #include "app/BPMSync.h"
@@ -204,7 +206,9 @@ private:
 
     SpeechState m_speechState;
     EthereaClient m_ethereaClient;
+    CueClient m_cueClient;
     DataBus m_dataBus;
+    bool m_cueTranscriptionEnabled = false;
     std::string m_prevTranscript;       // Last full_transcript for diffing
 
     // Voice decay: fade text layers after speech stops (matches Shader-Claw 3)
@@ -233,7 +237,8 @@ private:
     char m_whepUrlBuf[512] = {};
     std::shared_ptr<WHEPSource> m_whepConnecting; // tracks in-progress connection
     std::string m_whepStatus;
-    void addWHEPSource(const std::string& whepUrl);
+    std::unordered_set<std::string> m_cueAddedSourceUrls;
+    bool addWHEPSource(const std::string& whepUrl, const std::string& label = "");
     void addScopeRTMP();
 #endif
 
