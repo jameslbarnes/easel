@@ -9,9 +9,12 @@
 
 #import <Cocoa/Cocoa.h>
 #include <initializer_list>
+#import <objc/runtime.h>
 #define GLFW_EXPOSE_NATIVE_COCOA
 #include <GLFW/glfw3.h>
 #include <GLFW/glfw3native.h>
+
+static const void* EaselTitlebarDragMonitorKey = &EaselTitlebarDragMonitorKey;
 
 extern "C" void EaselMac_UnifyTitleBar(GLFWwindow* window) {
     if (!window) return;
@@ -21,6 +24,36 @@ extern "C" void EaselMac_UnifyTitleBar(GLFWwindow* window) {
     ns.titlebarAppearsTransparent = YES;
     ns.titleVisibility = NSWindowTitleHidden;
     ns.styleMask |= NSWindowStyleMaskFullSizeContentView;
+    ns.movableByWindowBackground = YES;
+
+    id oldMonitor = objc_getAssociatedObject(ns, EaselTitlebarDragMonitorKey);
+    if (oldMonitor) {
+        [NSEvent removeMonitor:oldMonitor];
+        objc_setAssociatedObject(ns, EaselTitlebarDragMonitorKey, nil, OBJC_ASSOCIATION_ASSIGN);
+    }
+
+    __unsafe_unretained NSWindow* observedWindow = ns;
+    id dragMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown
+                                                           handler:^NSEvent* _Nullable(NSEvent* event) {
+        NSWindow* window = observedWindow;
+        if (!window || event.window != window || !window.isKeyWindow) return event;
+
+        NSPoint p = event.locationInWindow;
+        NSRect frame = window.frame;
+        const CGFloat chromeHeight = 34.0;
+        const CGFloat trafficLightWidth = 78.0;
+        const CGFloat menuWidth = 322.0;
+
+        bool inTopChrome = p.y >= frame.size.height - chromeHeight;
+        bool overTrafficLights = p.x < trafficLightWidth;
+        bool overMenus = p.x < menuWidth;
+        if (!inTopChrome || overTrafficLights || overMenus) return event;
+
+        [window performWindowDragWithEvent:event];
+        return nil;
+    }];
+    objc_setAssociatedObject(ns, EaselTitlebarDragMonitorKey, dragMonitor, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
     // Move the standard buttons down so they sit on the same vertical
     // centerline as the ImGui menu row (which starts at y=0 of the content
     // view). Default AppKit position is ~3px from the window top edge; a
