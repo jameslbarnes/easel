@@ -45,7 +45,12 @@ private:
     GLuint m_pbo[kReadbackSlots] = {0, 0, 0};
     GLsync m_fence[kReadbackSlots] = {nullptr, nullptr, nullptr};
     GLuint m_readFBO = 0;
-    std::vector<uint8_t> m_pixelBuffer;
+    // Double-buffered: send_send_video_async_v2 keeps reading the submitted
+    // buffer until the NEXT async send on this sender, so we alternate and
+    // only ever overwrite the buffer the SDK has already released.
+    std::vector<uint8_t> m_pixelBuffer[2];
+    int m_sendBuf = 0;
+    bool m_asyncInFlight = false;
     int m_readIndex = 0;
     int m_pendingReadbacks = 0;
     int m_lastW = 0, m_lastH = 0;

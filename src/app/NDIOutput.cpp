@@ -46,10 +46,16 @@ void NDIOutput::destroy() {
     if (m_send) {
         auto& rt = NDIRuntime::instance();
         if (rt.isAvailable()) {
+            // Release the pixel buffer the async encoder may still be reading
+            // before the sender (and then the buffer) goes away.
+            if (m_asyncInFlight && rt.api()->send_send_video_async_v2) {
+                rt.api()->send_send_video_async_v2(m_send, nullptr);
+            }
             rt.api()->send_destroy(m_send);
         }
         m_send = nullptr;
     }
+    m_asyncInFlight = false;
     for (int i = 0; i < kReadbackSlots; ++i) {
         if (m_fence[i]) {
             glDeleteSync(m_fence[i]);
@@ -64,7 +70,9 @@ void NDIOutput::destroy() {
         glDeleteFramebuffers(1, &m_readFBO);
         m_readFBO = 0;
     }
-    m_pixelBuffer.clear();
+    m_pixelBuffer[0].clear();
+    m_pixelBuffer[1].clear();
+    m_sendBuf = 0;
     m_readIndex = 0;
     m_pendingReadbacks = 0;
     m_lastW = 0;
@@ -88,6 +96,12 @@ void NDIOutput::send(GLuint texture, int w, int h) {
     size_t bytes = (size_t)w * h * 4;
 
     if (w != m_lastW || h != m_lastH || !m_pbo[0]) {
+        // Resizing may reallocate the pixel buffers; make sure the async
+        // encoder is not still reading the old storage.
+        if (m_asyncInFlight && rt.api()->send_send_video_async_v2) {
+            rt.api()->send_send_video_async_v2(m_send, nullptr);
+        }
+        m_asyncInFlight = false;
         for (int i = 0; i < kReadbackSlots; ++i) {
             if (m_fence[i]) {
                 glDeleteSync(m_fence[i]);
@@ -101,7 +115,9 @@ void NDIOutput::send(GLuint texture, int w, int h) {
             glBufferData(GL_PIXEL_PACK_BUFFER, bytes, nullptr, GL_STREAM_READ);
         }
         glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-        m_pixelBuffer.resize(bytes);
+        m_pixelBuffer[0].resize(bytes);
+        m_pixelBuffer[1].resize(bytes);
+        m_sendBuf = 0;
         m_readIndex = 0;
         m_pendingReadbacks = 0;
         m_lastW = w;
@@ -124,7 +140,7 @@ void NDIOutput::send(GLuint texture, int w, int h) {
             glBindBuffer(GL_PIXEL_PACK_BUFFER, m_pbo[mapPBO]);
             void* ptr = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, bytes, GL_MAP_READ_BIT);
             if (ptr) {
-                std::memcpy(m_pixelBuffer.data(), ptr, bytes);
+                std::memcpy(m_pixelBuffer[m_sendBuf].data(), ptr, bytes);
                 hasFrame = true;
                 glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
             }
@@ -145,13 +161,22 @@ void NDIOutput::send(GLuint texture, int w, int h) {
         frame.frame_rate_D = 1000;
         frame.picture_aspect_ratio = (float)w / (float)h;
         frame.frame_format_type = NDIlib_frame_format_type_progressive;
-        frame.p_data = m_pixelBuffer.data();
+        frame.p_data = m_pixelBuffer[m_sendBuf].data();
         frame.line_stride_in_bytes = w * 4;
 
-        // Guard the func ptr — older/partially-loaded NDI runtimes can leave
-        // this null (the audio path already guards send_send_audio_v2).
-        if (rt.api()->send_send_video_v2)
+        // Async: SpeedHQ encode happens on the NDI SDK's thread instead of
+        // stalling the render loop (sync sends were costing ~3-5ms per
+        // active sender per frame — enough to vsync-halve to 30fps with
+        // several zones subscribed). Guard the func ptrs — older/partially-
+        // loaded NDI runtimes can leave them null (the audio path already
+        // guards send_send_audio_v2).
+        if (rt.api()->send_send_video_async_v2) {
+            rt.api()->send_send_video_async_v2(m_send, &frame);
+            m_asyncInFlight = true;
+            m_sendBuf ^= 1;
+        } else if (rt.api()->send_send_video_v2) {
             rt.api()->send_send_video_v2(m_send, &frame);
+        }
     }
 
     // Settings-driven wall-clock throttle (default 60fps; <= 0 = uncapped,
