@@ -20,9 +20,30 @@ void BPMSync::update(float dt) {
         }
     }
 
+    // ── Detection-born tempo expiry ─────────────────────────────────────
+    // Free-run through short confidence dips (a breakdown, a quiet bridge)
+    // but come to rest when the music actually stopped: sustained low
+    // confidence expires a tempo the analyzer locked, so a paused source
+    // doesn't keep beat-driven visuals kicking at the last tempo forever.
+    // Manual tempos (tap/OSC) are the user's word and never expire; a
+    // confident re-detection re-locks instantly via the drive block above.
+    if (m_source != Source::Manual && m_bpm > 0.0f) {
+        if (m_detConf < 0.15f) {
+            m_lowConfTime += dt;
+            if (m_lowConfTime >= kDetectedExpirySeconds) {
+                m_bpm = 0.0f;
+                m_source = Source::Free;
+            }
+        } else {
+            m_lowConfTime = 0.0f;
+        }
+    }
+
     if (m_bpm <= 0.0f) {
-        // Clock inactive — keep eased outputs decaying toward rest
+        // Clock inactive — ease every beat output to rest (the pulse used
+        // to freeze at its last value here, leaving a phantom kick).
         m_onBeat = 0.0f;
+        m_pulse *= expf(-m_pulseDecayRate * dt);
         return;
     }
 

@@ -72,6 +72,13 @@ private:
     Source m_source = Source::Free;
     float m_detBpm = 0.0f;
     float m_detConf = 0.0f;
+    // Detection-born tempo expiry: a clock the analyzer locked keeps
+    // free-running through short confidence dips (breakdowns), but expires
+    // to rest after this long without confidence — otherwise a paused
+    // radio keeps every audioKick()/audioBeatPulse shader kicking at the
+    // last (often junk) tempo forever. Manual tempos never expire.
+    float m_lowConfTime = 0.0f;
+    static constexpr float kDetectedExpirySeconds = 3.0f;
 
     // Beat-eased outputs
     float m_timeSinceBeat = 1e9f;
