@@ -443,8 +443,12 @@ void AudioAnalyzer::computeTemperaments(float dt) {
     m_timeClock[3] += dt * m_smoothRMS;
 
     // Tempo: autocorrelation over the onset-strength envelope (normalized
-    // spectral flux from the previous frame's spectral pass).
-    m_tempo.feed(m_fluxNorm, dt);
+    // spectral flux from the previous frame's spectral pass). Gate the feed
+    // on real signal: flux normalization amplifies the noise floor, so in
+    // silence the tracker hears phantom rhythms and locks the beat clock
+    // to junk tempos. Raw RMS is pre-AGC — digital silence reads ~0 there,
+    // no real program material does.
+    m_tempo.feed(m_rawRMS > 1e-4f ? m_fluxNorm : 0.0f, dt);
 }
 
 // --- EaselAudio v1: tier-1 pseudo-stems ----------------------------------
