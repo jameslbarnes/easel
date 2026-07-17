@@ -2,6 +2,8 @@
 #include <iostream>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
+#include <ctime>
 
 #ifdef __APPLE__
 extern void makeWindowTrulyBorderless(GLFWwindow* window);
@@ -16,6 +18,17 @@ static bool forcedProjectorRect(int& x, int& y, int& w, int& h) {
     const char* env = getenv("EASEL_PROJECTOR_RECT");
     if (!env) return false;
     return sscanf(env, "%d,%d,%d,%d", &x, &y, &w, &h) == 4 && w > 0 && h > 0;
+}
+
+void ProjectorOutput::logEvent(const std::string& msg) {
+    std::cerr << msg << std::endl;
+    std::ofstream log("projector_events.log", std::ios::app);
+    if (log.is_open()) {
+        std::time_t now = std::time(nullptr);
+        char stamp[32];
+        std::strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
+        log << "[" << stamp << "] " << msg << "\n";
+    }
 }
 
 ProjectorOutput::~ProjectorOutput() {
@@ -84,7 +97,8 @@ bool ProjectorOutput::create(GLFWwindow* mainWindow, int monitorIndex) {
     } else {
         auto monitors = enumerateMonitors();
         if (monitorIndex < 0 || monitorIndex >= (int)monitors.size()) {
-            std::cerr << "Invalid monitor index " << monitorIndex << std::endl;
+            logEvent("projector FAILED: monitor index " + std::to_string(monitorIndex) +
+                     " outside the " + std::to_string(monitors.size()) + "-monitor list");
             return false;
         }
 
@@ -94,12 +108,14 @@ bool ProjectorOutput::create(GLFWwindow* mainWindow, int monitorIndex) {
         const auto& target = monitors[monitorIndex];
         if (mainX >= target.x && mainX < target.x + target.width &&
             mainY >= target.y && mainY < target.y + target.height) {
-            std::cerr << "Refusing to open projector on the same monitor as the editor" << std::endl;
+            logEvent("projector REFUSED: monitor " + std::to_string(monitorIndex) +
+                     " holds the editor (same-monitor safety); trying a secondary");
 
             // Try to find a different monitor instead
             int alt = findSecondaryMonitor(mainWindow);
             if (alt < 0) {
-                std::cerr << "No secondary monitor available" << std::endl;
+                logEvent("projector FAILED: no secondary monitor available — window will "
+                         "not exist (single-display box? set EASEL_PROJECTOR_RECT)");
                 return false;
             }
             monitorIndex = alt;
@@ -126,7 +142,7 @@ bool ProjectorOutput::create(GLFWwindow* mainWindow, int monitorIndex) {
     glfwWindowHint(GLFW_FOCUS_ON_SHOW, GLFW_TRUE);
 
     if (!m_window) {
-        std::cerr << "Failed to create projector window" << std::endl;
+        logEvent("projector FAILED: glfwCreateWindow returned null");
         return false;
     }
 

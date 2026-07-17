@@ -20,6 +20,12 @@ public:
     // Find a monitor that isn't the one the main window is on. Returns -1 if none.
     static int findSecondaryMonitor(GLFWwindow* mainWindow);
 
+    // Append a timestamped line to projector_events.log (cwd) and stderr.
+    // Every silent projector failure goes through this: launched from the
+    // watchdog, stderr lands nowhere, and the unlogged same-monitor refusal
+    // cost an all-night outage (2026-07-16/17). Grep this file first.
+    static void logEvent(const std::string& msg);
+
     // Create fullscreen window on specified monitor, sharing context with mainWindow.
     // Will refuse to open on the same monitor as mainWindow.
     bool create(GLFWwindow* mainWindow, int monitorIndex);

@@ -2728,6 +2728,11 @@ void Application::presentOutputs() {
             zone.outputDest == OutputDest::Fullscreen && zone.outputMonitor >= 0) {
             // Verify monitor still exists before using it.
             auto monitors = ProjectorOutput::enumerateMonitors();
+            // Latched per zone: the skip below is per-frame and must stay
+            // quiet, but a PERSISTENT out-of-range route is the desktop-on-
+            // the-projector failure (2026-07-15, again 2026-07-16/17) and
+            // deserves exactly one line per episode.
+            static std::set<std::string> s_presentSkipLogged;
             if (zone.outputMonitor >= (int)monitors.size()) {
                 // Monitor index out of range this frame. GLFW can report a
                 // transiently shrunk monitor list while new windows are being
@@ -2735,8 +2740,20 @@ void Application::presentOutputs() {
                 // skip rendering this frame; it will recover once the monitor
                 // list stabilises. Keep the projector in neededMonitors so the
                 // cleanup pass below doesn't destroy it either.
+                if (s_presentSkipLogged.insert(zone.name).second) {
+                    ProjectorOutput::logEvent(
+                        "present SKIPPED: zone '" + zone.name + "' routes fullscreen monitor " +
+                        std::to_string(zone.outputMonitor) + " but only " +
+                        std::to_string(monitors.size()) + " monitor(s) exist — retrying per "
+                        "frame silently until the list recovers");
+                }
                 neededMonitors.insert(zone.outputMonitor);
             } else {
+                if (s_presentSkipLogged.erase(zone.name)) {
+                    ProjectorOutput::logEvent(
+                        "present RECOVERED: zone '" + zone.name + "' monitor " +
+                        std::to_string(zone.outputMonitor) + " is back in range");
+                }
                 neededMonitors.insert(zone.outputMonitor);
                 ProjectorOutput* proj = ensureProjector(zone.outputMonitor);
                 if (proj) {
@@ -15555,15 +15572,28 @@ void Application::saveProject(const std::string& path) {
         j["groups"] = groupsJson;
     }
 
-    // Write to file
-    std::ofstream file(path);
+    // Write atomically: temp + rename. This file is autosaved constantly and
+    // read concurrently by the SDK's probes and heals; a bare truncate-then-
+    // write hands readers torn JSON, and a crash mid-save loses the whole
+    // project (2026-07-17). rename() replaces the destination in one step.
+    const std::string tmpPath = path + ".tmp";
+    std::ofstream file(tmpPath, std::ios::binary | std::ios::trunc);
     if (file.is_open()) {
         // error_handler_t::replace — never abort the app on a stray
         // non-UTF-8 byte in a layer name / msg / path; substitute U+FFFD.
         file << j.dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
-        std::cout << "Project saved: " << path << std::endl;
+        file.flush();
+        file.close();
+        std::error_code ec;
+        std::filesystem::rename(tmpPath, path, ec);
+        if (ec) {
+            std::cerr << "Failed to move saved project into place: " << path
+                      << " (" << ec.message() << ")" << std::endl;
+        } else {
+            std::cout << "Project saved: " << path << std::endl;
+        }
     } else {
-        std::cerr << "Failed to save project: " << path << std::endl;
+        std::cerr << "Failed to save project: " << tmpPath << std::endl;
     }
 }
 
