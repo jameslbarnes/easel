@@ -160,7 +160,10 @@ bool ProjectorOutput::create(GLFWwindow* mainWindow, int monitorIndex) {
     glfwSetKeyCallback(m_window, [](GLFWwindow* win, int key, int, int action, int) {
         if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
             auto* self = (ProjectorOutput*)glfwGetWindowUserPointer(win);
-            if (self) self->requestClose();
+            if (self) {
+                logEvent("projector window: Escape pressed — operator close requested");
+                self->requestClose();
+            }
         }
     });
 
@@ -196,7 +199,8 @@ void ProjectorOutput::destroy() {
 
         glfwDestroyWindow(m_window);
         m_window = nullptr;
-        std::cout << "Projector closed" << std::endl;
+        logEvent("projector window DESTROYED (monitor " + std::to_string(m_monitorIndex) +
+                 ") — see the preceding line for who asked");
     }
     m_monitorIndex = -1;
     m_closeRequested = false;

@@ -2915,6 +2915,10 @@ void Application::presentOutputs() {
     // Clean up projectors for monitors no longer claimed by any zone
     for (auto it = m_projectors.begin(); it != m_projectors.end(); ) {
         if (neededMonitors.find(it->first) == neededMonitors.end()) {
+            ProjectorOutput::logEvent(
+                "destroying projector on monitor " + std::to_string(it->first) +
+                ": no zone claims it this frame (route changed to none/NDI, or "
+                "the zone's monitor index moved)");
             it->second->destroy();
             it = m_projectors.erase(it);
         } else {
@@ -3062,6 +3066,10 @@ void Application::removeZone(int index) {
         if (!otherClaims) {
             auto it = m_projectors.find(zone.outputMonitor);
             if (it != m_projectors.end()) {
+                ProjectorOutput::logEvent(
+                    "destroying projector on monitor " + std::to_string(zone.outputMonitor) +
+                    ": zone '" + zone.name + "' output changed away from fullscreen "
+                    "(UI or /easel/zone/output)");
                 it->second->destroy();
                 m_projectors.erase(it);
             }
