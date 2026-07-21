@@ -2946,8 +2946,13 @@ void Application::presentOutputs() {
     if (m_ndiOutputEnabled && m_ndiOutput.isActive() && !m_zones.empty() &&
         m_ndiOutput.hasReceivers()) {
         OutputZone& luZone = *m_zones[0];
-        constexpr int kFluxInputW = 768;
-        constexpr int kFluxInputH = 432;
+        // Overridable so a portrait FluxRT canvas gets a portrait substrate
+        // (the pod's notes app) without a rebuild; 768x432 remains the
+        // landscape default.
+        static const int kFluxInputW =
+            getenv("EASEL_FLUX_INPUT_W") ? atoi(getenv("EASEL_FLUX_INPUT_W")) : 768;
+        static const int kFluxInputH =
+            getenv("EASEL_FLUX_INPUT_H") ? atoi(getenv("EASEL_FLUX_INPUT_H")) : 432;
         renderReadbackFBO(luZone, m_ndiFluxInputFBO, kFluxInputW, kFluxInputH);
         m_ndiOutput.send(m_ndiFluxInputFBO.textureId(), kFluxInputW, kFluxInputH);
     }
