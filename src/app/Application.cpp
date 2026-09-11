@@ -3723,6 +3723,36 @@ void Application::renderUI() {
                     if (m_selectedLayer >= m_layerStack.count())
                         m_selectedLayer = m_layerStack.count() - 1;
                 }
+            } else if (msg.address == "/easel/layer/source/ndi"
+                       && msg.ints.size() == 1 && msg.strings.size() == 2) {
+                // Stable-ID compare-and-swap. Never create/reorder layers or
+                // alter masks, effects, transforms, names, or zone membership.
+#ifdef HAS_NDI
+                const auto id = static_cast<uint32_t>(msg.ints[0]);
+                const auto& expected = msg.strings[0];
+                const auto& replacement = msg.strings[1];
+                for (auto& layer : m_layerStack.layers()) {
+                    if (!layer || layer->id != id) continue;
+                    if (!layer->source || layer->source->typeName() != "NDI"
+                        || layer->source->sourcePath() != expected
+                        || replacement.empty()) {
+                        std::cerr << "[OSC] source/ndi: precondition failed for " << id << '\n';
+                        break;
+                    }
+                    // Reconnect even when the name is unchanged: a restarted
+                    // sender can acquire a new NDI address/port. Holding the
+                    // old receiver would otherwise leave the last frame frozen.
+                    auto source = std::make_shared<NDISource>();
+                    if (!source->connect(replacement)) {
+                        std::cerr << "[OSC] source/ndi: connection failed for " << id << '\n';
+                        break;
+                    }
+                    m_undoStack.pushState(m_layerStack, m_selectedLayer);
+                    layer->source = source;
+                    std::cout << "[OSC] source/ndi: rebound layer " << id << " to " << replacement << '\n';
+                    break;
+                }
+#endif
             } else if (msg.address == "/easel/layer/ensure/ndi"
                        && msg.strings.size() >= 2) {
                 // Agent SDK managed-layer contract: idempotently ensure exactly
