@@ -386,7 +386,9 @@ bool ObjMeshWarp::loadGLTF(const std::string& path) {
     return !m_materials.empty();
 }
 
-void ObjMeshWarp::render(GLuint sourceTexture, float aspect) {
+void ObjMeshWarp::render(GLuint sourceTexture, float aspect,
+                         const std::vector<GLuint>* zoneTextures,
+                         int currentZoneIndex) {
     if (!isLoaded()) return;
 
     glm::mat4 mdl = glm::translate(glm::mat4(1.0f), m_modelPosition);
@@ -403,14 +405,27 @@ void ObjMeshWarp::render(GLuint sourceTexture, float aspect) {
     m_shader.setMat4("uMVP", mvp);
     m_shader.setInt("uTexture", 0);
 
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, sourceTexture);
-
     // First pass: solid fill for all groups (textured or dark solid)
     for (const auto& mg : m_materials) {
         if (!mg.mesh.isLoaded()) continue;
-        m_shader.setBool("uTextured", mg.textured);
-        if (!mg.textured) {
+
+        // Routing a material back to the zone currently being rendered must
+        // use its pre-warp composite, not last frame's warpFBO (feedback).
+        GLuint materialTexture = sourceTexture;
+        if (mg.sourceZoneIndex >= 0 &&
+            mg.sourceZoneIndex != currentZoneIndex &&
+            zoneTextures &&
+            mg.sourceZoneIndex < (int)zoneTextures->size() &&
+            (*zoneTextures)[mg.sourceZoneIndex] != 0) {
+            materialTexture = (*zoneTextures)[mg.sourceZoneIndex];
+        }
+
+        bool useTexture = mg.textured && materialTexture != 0;
+        m_shader.setBool("uTextured", useTexture);
+        if (useTexture) {
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, materialTexture);
+        } else {
             m_shader.setVec4("uSolidColor", glm::vec4(0.03f, 0.03f, 0.05f, 1.0f));
         }
         mg.mesh.draw();

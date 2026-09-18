@@ -5,6 +5,7 @@
 #include <mutex>
 #include <thread>
 #include <atomic>
+#include "speech/CaptionSegment.h"
 
 struct EthereaSession {
     std::string id;
@@ -37,8 +38,11 @@ public:
     void poll();
 
     // --- Transcript callbacks ---
-    // onTranscript(text, isFinal) — fired for every interim/final Deepgram segment
-    void setTranscriptCallback(std::function<void(const std::string&, bool)> cb) {
+    // onTranscript(segment) — fired for every interim/final Deepgram segment.
+    // Etherea's raw WS "transcript" frame is snake_case (is_final, speech_final,
+    // utterance_id, revision, words[], full) and is parsed into CaptionSegment;
+    // legacy {type,text,is_final} frames still work (utteranceId empty).
+    void setTranscriptCallback(std::function<void(const CaptionSegment&)> cb) {
         m_transcriptCb = std::move(cb);
     }
 
@@ -53,7 +57,7 @@ public:
     static std::vector<EthereaSession> fetchSessions(const std::string& baseUrl = "http://localhost:7860");
 
 private:
-    std::function<void(const std::string&, bool)> m_transcriptCb;
+    std::function<void(const CaptionSegment&)> m_transcriptCb;
 
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_wsConnected{false};
@@ -82,10 +86,7 @@ private:
     std::atomic<bool> m_resetCache{false};
 
     // Pending transcript segments for main-thread dispatch
-    struct TranscriptEvent {
-        std::string text;
-        bool isFinal;
-    };
+    using TranscriptEvent = CaptionSegment;
     std::mutex m_eventMutex;
     std::vector<TranscriptEvent> m_pendingEvents;
 

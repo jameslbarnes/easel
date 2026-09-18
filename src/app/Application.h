@@ -122,8 +122,16 @@ private:
     struct TranscriptFeed {
         std::string prevSegment;              // baseline for the per-event delta
         std::vector<std::string> finalWords;  // committed words (FIFO history)
+        // Caption contract (Phase B): utterance identity + revision tracking.
+        std::string utteranceId;              // current utterance (empty for legacy producers)
+        int revision = 0;                     // last accepted revision within utteranceId
+        std::vector<std::string> committedChunks; // isFinal chunks of the current utterance
+        CaptionSegment latest;                // most recent accepted segment for this prefix
     };
-    // Route a live transcript segment to three DataBus channels under `prefix`
+    // SCTEXT/1: speaker label ("speaker_N"/producer label) -> small id in
+    // first-seen order (cap 254; 255 = unknown in the glyph buffer).
+    std::unordered_map<std::string, int> m_speakerIds;
+    // Route a live transcript segment to the DataBus channels under `prefix`
     // ("cue" or "etherea"):
     //   <prefix>.latest — full current segment (unchanged contract; the whole
     //                     growing utterance, for typewriter/reveal text shaders).
@@ -133,9 +141,26 @@ private:
     //   <prefix>.recent — a running FIFO of the last m_recentWordCap words that
     //                     slides as you speak (committed words + current segment,
     //                     windowed). This is the live "ticker" feed.
+    //   <prefix>.utterance — utteranceId of the current segment ("" when the
+    //                     producer doesn't supply one).
+    //   <prefix>.caption — utterance-long text: committed chunks of the current
+    //                     utterance + the live tail (utteranceText when the
+    //                     producer supplies it). Bind `msg` here for a reveal
+    //                     that continues across chunk commits.
+    //   <prefix>.speaker — set when the segment carries a speaker.
     // `feed` holds per-source state; `isFinal` commits the current segment.
+    // Stale revisions (same utteranceId, lower revision) are dropped.
     void pushTranscript(const std::string& prefix, TranscriptFeed& feed,
-                        const std::string& text, bool isFinal);
+                        const CaptionSegment& seg);
+    // Thin overload for producers without caption metadata (voice recognizer,
+    // OSC /cue/latest): wraps text/isFinal into a CaptionSegment.
+    void pushTranscript(const std::string& prefix, TranscriptFeed& feed,
+                        const std::string& text, bool isFinal) {
+        CaptionSegment seg;
+        seg.text = text;
+        seg.isFinal = isFinal;
+        pushTranscript(prefix, feed, seg);
+    }
     // Thin Cue-channel wrapper.
     void pushCueWords(const std::string& text, bool isFinal) {
         pushTranscript("cue", m_cueFeed, text, isFinal);
@@ -589,7 +614,14 @@ private:
     std::string m_timelineExportPath;
     // overridePath: empty = timestamped recordings/ default (UI button path);
     // non-empty = explicit output file (the /easel/record/start OSC trigger).
-    void   startRecording(const std::string& overridePath = "");
+    // zoneIndex: -1 = follow the active zone (REC button behavior); >=0 = pin
+    // the recording to that zone regardless of later editor tab clicks.
+    void   startRecording(const std::string& overridePath = "", int zoneIndex = -1);
+
+    // Session auto-record (EASEL_AUTO_RECORD, default on): pinned to the Main
+    // zone, started a few frames into the run so zone FBOs exist.
+    bool   m_autoRecordPending = false;
+    int    m_recordZoneIndex = -1;
 
     // Timeline panel visibility. Toggled via the T key or the transport-bar
     // show/hide button. Defaults to visible so the panel is discoverable.

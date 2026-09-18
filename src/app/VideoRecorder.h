@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <deque>
+#include <memory>
 #include <thread>
 #include <mutex>
 #include <atomic>
@@ -56,8 +57,56 @@ private:
         int64_t captureUs = 0;
     };
 
+    // One WASAPI capture lane (system loopback or microphone). Each lane owns its
+    // device session and a resampler to the fixed mix format; lanes are mixed
+    // sample-aligned into the single AAC track. A lane whose device dies (endpoint
+    // restart, driver reset) pads silence to keep the timeline in sync and is
+    // periodically re-opened, so audio resumes instead of ending the track.
+    struct AudioSource {
+        std::string id;          // WASAPI endpoint ID, empty = default endpoint
+        std::string name;        // display name (for logs)
+        std::string label;       // "system" | "mic"
+        bool isCapture = false;  // true = microphone, false = render loopback
+        float gain = 1.0f;
+        void* device = nullptr;         // IMMDevice*
+        void* client = nullptr;         // IAudioClient*
+        void* capture = nullptr;        // IAudioCaptureClient*
+        // MME (waveIn) alternative path — this box's Focusrite WASAPI capture
+        // endpoint delivers nothing in shared mode (the etherea capture helper
+        // works around the same defect), so capture lanes can run on MME.
+        bool useMme = false;
+        int apiForce = 0;               // 0 = auto (WASAPI, fall back to MME), 1 = wasapi only, 2 = mme only
+        void* mme = nullptr;            // MmeCapture*
+        int64_t lastDataUs = 0;         // last cycle that delivered packets
+        int64_t openedUs = 0;
+        int rate = 0, ch = 0;           // device mix format
+        SwrContext* swr = nullptr;      // device format -> mix format
+        std::vector<float> fifo;        // resampled interleaved stereo @ mix rate
+        int64_t produced = 0;           // mix-rate frames appended since anchor
+        int64_t lastReinitUs = 0;
+        int64_t lastFailLogUs = 0;
+        // ok is written by async init workers and read by the encode thread.
+        // initState (0 idle / 1 in-flight) guards against overlapping workers;
+        // a worker hung inside a wedged driver call keeps it at 1 forever, which
+        // parks the lane on silence-fill instead of hanging the encode thread.
+        std::atomic<bool> ok{false};
+        std::atomic<int> initState{0};
+        bool sawSignal = false;
+        std::vector<float> extractBuf;  // scratch for >2ch -> stereo extraction
+        // periodic stats (reset each dump)
+        int64_t statGot = 0;            // cycles with packet data
+        int64_t statAppended = 0;       // frames appended
+        int statSwrErrLogs = 0;
+    };
+
     bool initEncoder(const std::string& path, int width, int height, int fps);
     bool initAudioCapture();
+    bool initAudioSource(AudioSource& s);
+    bool initAudioSourceMme(AudioSource& s);
+    void teardownAudioSource(AudioSource& s);
+    bool readAudioSource(AudioSource& s);
+    bool readAudioSourceMme(AudioSource& s);
+    void appendResampled(AudioSource& s, const float* data, int frames);
     void encodeThread();
     void encodeVideoFrame(const RecFrame& f);
     void drainAudio();
@@ -93,11 +142,24 @@ private:
     int64_t m_audioStartUs = 0;     // wall-clock anchor for loopback silence-fill
     int m_audioFrameSize = 0;
     std::vector<float> m_audioAccum;
+    int m_audioSendErrLogs = 0;     // one-shot diagnostics for the encode/mux path
+    int m_audioWriteErrLogs = 0;
+    int m_audioPktLogs = 0;
+    bool m_loggedFirstMix = false;
+    int64_t m_lastStatsUs = 0;      // periodic per-lane stats dump
+    int64_t m_statMixed = 0;
+    int64_t m_hbUs = 0;             // drainAudio heartbeat (pre-guard)
+    // Feed-stall detector: video muxing observes whether the audio side is
+    // still delivering samples, so an audio-only death is loud in the log.
+    int64_t m_lastAudioMuxUs = 0;      // wall clock when encoded-sample count last advanced
+    int64_t m_lastAudioMuxSamples = 0; // encoded-sample count at that moment
+    int64_t m_stallLogUs = 0;          // feed-stalled warning throttle
 
-    void* m_audioClient = nullptr;
-    void* m_captureClient = nullptr;
-    void* m_audioDevice = nullptr;
-    int m_wasapiSampleRate = 0;
+    // unique_ptr: lanes hold atomics (non-movable) and async init workers hold
+    // references across cycles, so lane addresses must be stable.
+    std::vector<std::unique_ptr<AudioSource>> m_audioSources;
+    std::vector<float> m_mixScratch;
+    int m_wasapiSampleRate = 0;   // fixed mix rate once audio is initialized
     int m_wasapiChannels = 0;
 
     // PBO async readback (double-buffered)

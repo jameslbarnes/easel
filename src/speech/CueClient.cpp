@@ -1,4 +1,5 @@
 #include "speech/CueClient.h"
+#include "speech/CaptionSegment.h"
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -301,7 +302,7 @@ void CueClient::poll() {
         ps.swap(m_pendingPrompts);
     }
     if (m_transcriptCb) {
-        for (auto& t : ts) m_transcriptCb(t.text, t.isFinal, t.speaker);
+        for (auto& t : ts) m_transcriptCb(t);
     }
     if (m_actionCb) {
         for (auto& a : as) {
@@ -425,18 +426,33 @@ void CueClient::wsLoop() {
             std::string type = jsonStr(msg, "type");
 
             if (type == "transcript") {
-                std::string text    = jsonStr(msg, "text");
-                bool isFinal        = jsonBool(msg, "isFinal");
-                std::string speaker = jsonStr(msg, "speaker");
-                std::string fullT   = jsonStr(msg, "fullTranscript");
+                // Unified caption contract (camelCase, optional utteranceId/
+                // revision/speechFinal/words/...). Fall back to the legacy
+                // hand-rolled extraction if the structured parse fails.
+                CaptionSegment seg;
+                if (!parseCaptionSegmentJson(msg, seg)) {
+                    seg = CaptionSegment{};
+                    seg.text           = jsonStr(msg, "text");
+                    seg.isFinal        = jsonBool(msg, "isFinal");
+                    seg.speaker        = jsonStr(msg, "speaker");
+                    seg.fullTranscript = jsonStr(msg, "fullTranscript");
+                }
                 {
                     std::lock_guard<std::mutex> lk(m_dataMutex);
-                    m_latestWords = text;
-                    if (!fullT.empty()) m_fullTranscript = fullT;
+                    m_latestWords = seg.text;
+                    if (!seg.fullTranscript.empty()) m_fullTranscript = seg.fullTranscript;
                 }
                 {
                     std::lock_guard<std::mutex> lk(m_eventMutex);
-                    m_pendingTranscripts.push_back({text, isFinal, speaker});
+                    m_pendingTranscripts.push_back(std::move(seg));
+                }
+            } else if (type == "caption.segment") {
+                // Same fields as the unified transcript event; stored only
+                // (NOT dispatched — see CueClient.h protocol comment).
+                CaptionSegment seg;
+                if (parseCaptionSegmentJson(msg, seg)) {
+                    std::lock_guard<std::mutex> lk(m_dataMutex);
+                    m_lastCaptionSegment = std::move(seg);
                 }
             } else if (type == "action") {
                 // action: { sessionId, action: { type, payload, ... } }

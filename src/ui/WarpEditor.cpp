@@ -41,7 +41,9 @@ static void modeButton(const char* label, int thisMode, int& currentMode, float 
 
 void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
                         std::vector<std::unique_ptr<MappingProfile>>* allMappings,
-                        int activeMappingIndex) {
+                        int activeMappingIndex,
+                        const std::vector<std::string>* zoneNames,
+                        int activeZoneIndex) {
     m_wantsLoadOBJ = false;
 
     // Match the Properties panel's airy padding EXACTLY so the two
@@ -247,7 +249,42 @@ void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
                 ImGui::PushStyleColor(ImGuiCol_CheckMark, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
                 for (int mi = 0; mi < (int)mats.size(); mi++) {
                     ImGui::PushID(5000 + mi);
-                    ImGui::Checkbox(mats[mi].name.c_str(), &mats[mi].textured);
+                    ImGui::Checkbox("##enabled", &mats[mi].textured);
+                    ImGui::SameLine();
+                    ImGui::TextWrapped("%s", mats[mi].name.c_str());
+
+                    if (zoneNames && !zoneNames->empty()) {
+                        const char* sourceLabel = "Current zone";
+                        if (mats[mi].sourceZoneIndex >= 0 &&
+                            mats[mi].sourceZoneIndex < (int)zoneNames->size()) {
+                            sourceLabel = (*zoneNames)[mats[mi].sourceZoneIndex].c_str();
+                        } else if (mats[mi].sourceZoneIndex >= 0) {
+                            sourceLabel = "Missing zone";
+                        }
+                        ImGui::SetNextItemWidth(-1);
+                        if (ImGui::BeginCombo("##sourceZone", sourceLabel)) {
+                            std::string currentLabel = "Current zone";
+                            if (activeZoneIndex >= 0 && activeZoneIndex < (int)zoneNames->size()) {
+                                currentLabel += " (" + (*zoneNames)[activeZoneIndex] + ")";
+                            }
+                            if (ImGui::Selectable(currentLabel.c_str(), mats[mi].sourceZoneIndex < 0)) {
+                                mats[mi].sourceZoneIndex = -1;
+                            }
+                            for (int zi = 0; zi < (int)zoneNames->size(); zi++) {
+                                bool selected = mats[mi].sourceZoneIndex == zi;
+                                if (ImGui::Selectable((*zoneNames)[zi].c_str(), selected)) {
+                                    // Treat an explicit self-route as Current zone so it
+                                    // can never sample its previous output recursively.
+                                    mats[mi].sourceZoneIndex = zi == activeZoneIndex ? -1 : zi;
+                                }
+                            }
+                            ImGui::EndCombo();
+                        }
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Live zone feed rendered on this mesh face");
+                        }
+                    }
+                    ImGui::Dummy(ImVec2(0, 3));
                     ImGui::PopID();
                 }
                 ImGui::PopStyleColor(2);

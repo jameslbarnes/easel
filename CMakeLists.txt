@@ -246,6 +246,7 @@ add_executable(test_shaders
     src/render/Mesh.cpp
     src/render/Texture.cpp
     src/render/FontAtlas.cpp
+    src/render/GlyphBuffer.cpp
     src/app/MIDIManager.cpp
 )
 if(APPLE)
@@ -445,6 +446,16 @@ add_executable(test_databus tests/test_databus.cpp)
 target_include_directories(test_databus PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_databus PRIVATE Catch2::Catch2WithMain)
 
+# Caption contract parser (Cue camelCase + Etherea snake_case transcript shapes).
+add_executable(test_caption_segment tests/test_caption_segment.cpp src/speech/CaptionSegment.cpp)
+target_include_directories(test_caption_segment PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_caption_segment PRIVATE Catch2::Catch2WithMain nlohmann_json::nlohmann_json)
+
+# SCTEXT/1 glyph-buffer encoder (pure, no GL): text -> textBuf_<n> texels + legacy shim codes.
+add_executable(test_glyph_buffer tests/test_glyph_buffer.cpp src/render/GlyphBuffer.cpp)
+target_include_directories(test_glyph_buffer PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_glyph_buffer PRIVATE Catch2::Catch2WithMain)
+
 # Phase M.0 RenderBackend abstraction smoke test — disabled until RenderBackend_GL.cpp is implemented.
 # add_executable(test_render_backend tests/test_render_backend.cpp src/render/RenderBackend_GL.cpp)
 
@@ -564,4 +575,17 @@ if(APPLE)
                 $<TARGET_BUNDLE_DIR:${PROJECT_NAME}>
         COMMENT "Codesigning Easel.app with 'Easel Dev' (stable TCC identity)"
     )
+endif()
+
+# Offline VideoRecorder audio-path harness — drives start()/stop() with no GL
+# context (no GL call executes off the render path), so the WASAPI capture,
+# mix, encode, and mux chain can be exercised without launching Easel.
+if(FFMPEG_FOUND AND WIN32)
+    add_executable(test_video_recorder tests/test_video_recorder.cpp src/app/VideoRecorder.cpp)
+    target_compile_definitions(test_video_recorder PRIVATE HAS_FFMPEG=1 NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_include_directories(test_video_recorder PRIVATE ${CMAKE_SOURCE_DIR}/src "${FFMPEG_DIR}/include")
+    target_link_directories(test_video_recorder PRIVATE "${FFMPEG_DIR}/lib")
+    target_link_libraries(test_video_recorder PRIVATE glad avformat avcodec avutil swscale swresample ole32)
+    add_custom_command(TARGET test_video_recorder POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${FFMPEG_DLLS} $<TARGET_FILE_DIR:test_video_recorder>)
 endif()

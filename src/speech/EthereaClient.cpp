@@ -1,4 +1,5 @@
 #include "speech/EthereaClient.h"
+#include "speech/CaptionSegment.h"
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -358,7 +359,7 @@ void EthereaClient::poll() {
         events.swap(m_pendingEvents);
     }
     for (auto& ev : events) {
-        if (m_transcriptCb) m_transcriptCb(ev.text, ev.isFinal);
+        if (m_transcriptCb) m_transcriptCb(ev);
     }
 }
 
@@ -523,8 +524,17 @@ void EthereaClient::wsLoop() {
             // Parse JSON message
             std::string type = jsonStr(frame.payload, "type");
             if (type == "transcript") {
-                std::string text = jsonStr(frame.payload, "text");
-                bool isFinal = jsonBool(frame.payload, "is_final");
+                // Snake_case caption contract (is_final/speech_final/
+                // utterance_id/revision/words/full). Legacy fallback keeps
+                // old Etherea backends working.
+                CaptionSegment seg;
+                if (!parseCaptionSegmentJson(frame.payload, seg)) {
+                    seg = CaptionSegment{};
+                    seg.text    = jsonStr(frame.payload, "text");
+                    seg.isFinal = jsonBool(frame.payload, "is_final");
+                }
+                const std::string& text = seg.text;
+                const bool isFinal = seg.isFinal;
 
                 {
                     std::lock_guard<std::mutex> lk(m_dataMutex);
@@ -540,7 +550,7 @@ void EthereaClient::wsLoop() {
                 }
                 {
                     std::lock_guard<std::mutex> lk(m_eventMutex);
-                    m_pendingEvents.push_back({text, isFinal});
+                    m_pendingEvents.push_back(std::move(seg));
                 }
             } else if (type == "ping") {
                 // server keepalive, no action needed

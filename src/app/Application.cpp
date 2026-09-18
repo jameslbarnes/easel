@@ -1,4 +1,5 @@
 #include "app/Application.h"
+#include "render/GlyphBuffer.h"
 #include "ui/ParamRow.h"
 #include "ui/LucideIcons.h"
 #include "sources/ImageSource.h"
@@ -22,6 +23,7 @@
 #include "sources/WHEPSource.h"
 #endif
 #include "render/GLTransition.h"
+#include "render/FontAtlas.h"
 #include <nlohmann/json.hpp>
 #include <imgui.h>
 #include <imgui_internal.h>     // DockBuilderSetNodeSize for timeline minimize
@@ -433,13 +435,14 @@ bool Application::init() {
     }
 
     // Etherea client — WebSocket for real-time transcript, SSE for hints
-    m_ethereaClient.setTranscriptCallback([this](const std::string& text, bool isFinal) {
+    m_ethereaClient.setTranscriptCallback([this](const CaptionSegment& seg) {
         // Feeds etherea.latest (full segment), etherea.words (new-words delta),
-        // and etherea.recent (rolling last-N-words FIFO).
-        pushTranscript("etherea", m_ethereaFeed, text, isFinal);
-        if (isFinal && !text.empty()) {
+        // etherea.recent (rolling last-N-words FIFO), etherea.caption /
+        // etherea.utterance / etherea.speaker (caption contract).
+        pushTranscript("etherea", m_ethereaFeed, seg);
+        if (seg.isFinal && !seg.text.empty()) {
             // Accumulate full transcript (bounded — see DataBus::appendCapped).
-            m_dataBus.appendCapped("etherea.transcript", text);
+            m_dataBus.appendCapped("etherea.transcript", seg.text);
         }
         // Record time for voice decay
         m_voiceLastInputTime = glfwGetTime();
@@ -450,10 +453,12 @@ bool Application::init() {
     m_ethereaClient.connect("http://localhost:7860");
 
     // Cue: parallel realtime cue harness. Pushes transcript + actions into DataBus.
-    m_cueClient.setTranscriptCallback([this](const std::string& text, bool isFinal, const std::string& /*speaker*/) {
-        pushCueWords(text, isFinal);   // sets cue.latest + cue.words (new-words delta)
-        if (isFinal && !text.empty()) {
-            m_dataBus.appendCapped("cue.transcript", text);
+    m_cueClient.setTranscriptCallback([this](const CaptionSegment& seg) {
+        // sets cue.latest + cue.words (new-words delta) + cue.caption /
+        // cue.utterance, and cue.speaker when the segment carries one.
+        pushTranscript("cue", m_cueFeed, seg);
+        if (seg.isFinal && !seg.text.empty()) {
+            m_dataBus.appendCapped("cue.transcript", seg.text);
         }
     });
     m_cueClient.setActionCallback([this](const CueAction& a) {
@@ -525,6 +530,7 @@ bool Application::init() {
                 std::string(home) + "\\ShaderClaw3\\shaders",
                 std::string(home) + "\\Documents\\ShaderClaw3\\shaders",
                 std::string(home) + "\\Documents\\ShaderClaw\\shaders",
+                std::string(home) + "\\src\\shader-claw3\\shaders",
 #else
                 std::string(home) + "/ShaderClaw3/shaders",
                 std::string(home) + "/Documents/ShaderClaw3/shaders",
@@ -535,6 +541,9 @@ bool Application::init() {
             for (const auto& path : candidates) {
                 if (std::filesystem::exists(path)) {
                     m_shaderClaw.connect(path);
+                    // SCFONT/1 (Phase D): shared MSDF font assets live next to
+                    // the shaders dir (<claw3>/assets/fonts).
+                    FontAtlas::setAssetDir(path + "/../assets/fonts");
                     std::cout << "[ShaderClaw] Auto-connected to: " << path << std::endl;
                     break;
                 }
@@ -561,6 +570,20 @@ bool Application::init() {
             std::cout << "[Easel] Starting blank (landing page active)" << std::endl;
         }
     }
+
+#ifdef HAS_FFMPEG
+    // Session auto-record (James, 2026-07-24): every launch archives the Main
+    // zone's output to recordings/. On by default; EASEL_AUTO_RECORD=0 opts
+    // out. Blank starts (landing page) are not recorded. The actual start is
+    // deferred into the frame loop — zone FBOs aren't sized until the first
+    // composite.
+    {
+        const char* ar = std::getenv("EASEL_AUTO_RECORD");
+        bool off = ar && (ar[0] == '0' || ar[0] == 'f' || ar[0] == 'F' ||
+                          ar[0] == 'n' || ar[0] == 'N');
+        m_autoRecordPending = !off && m_autoLoadedProject;
+    }
+#endif
 
     // Init 3D stage view
     m_stageView.init();
@@ -1013,6 +1036,25 @@ void Application::run() {
         compositeAndWarp();
         presentOutputs();
 
+#ifdef HAS_FFMPEG
+        // Deferred session auto-record start: wait a handful of frames so the
+        // zone warp FBOs are sized, then pin the recording to the "Main" zone
+        // (fall back to zone 0).
+        if (m_autoRecordPending && !m_recorder.isActive()) {
+            static int s_autoRecWarmup = 0;
+            if (++s_autoRecWarmup > 10 && !m_zones.empty()) {
+                int idx = 0;
+                for (int i = 0; i < (int)m_zones.size(); i++) {
+                    if (m_zones[i]->name == "Main") { idx = i; break; }
+                }
+                if (m_zones[idx]->warpFBO.width() > 0) {
+                    m_autoRecordPending = false;
+                    startRecording("", idx);
+                }
+            }
+        }
+#endif
+
         // Periodic auto-save every 30 seconds (crash recovery)
         {
             static double lastAutoSave = 0;
@@ -1276,10 +1318,21 @@ void Application::run() {
                         std::string base = (slash2 != std::string::npos)
                             ? srcPath.substr(slash2 + 1) : srcPath;
                         // Per-dataKey typewriter state shared across shaders.
-                        static std::unordered_map<std::string,
-                            std::pair<std::string, double>> tw;
+                        struct TypewriterSlot {
+                            std::string target;      // last bound value
+                            double start = 0.0;      // reveal start time
+                            std::string utteranceId; // <prefix>.utterance at last bind
+                        };
+                        static std::unordered_map<std::string, TypewriterSlot> tw;
                         auto& slot = tw[dataKey];
-                        const std::string& lastTarget = slot.first;
+                        const std::string& lastTarget = slot.target;
+                        // Caption contract: when the producer supplies an
+                        // utteranceId (<prefix>.utterance non-empty), that is
+                        // the authoritative identity — reveal continues across
+                        // chunk commits and restarts on a new utterance.
+                        // Legacy producers leave it empty => heuristic below.
+                        std::string prefix = dataKey.substr(0, dataKey.find('.'));
+                        std::string uid = m_dataBus.get(prefix + ".utterance");
                         // Decide whether `val` is the SAME utterance as the
                         // last target (continue the in-progress reveal) or a
                         // genuinely NEW utterance (restart the timer).
@@ -1302,18 +1355,24 @@ void Application::run() {
                         // in-utterance revision rather than a new utterance
                         // (~3-4 words of recognizer churn).
                         constexpr size_t kTailReviseMax = 24;
-                        bool sameUtterance =
-                            !lastTarget.empty() && cp > 0 &&
-                            (lastTarget.size() - cp) <= kTailReviseMax;
-                        if (!sameUtterance) {
-                            slot.second = glfwGetTime();
+                        bool sameUtterance;
+                        if (!uid.empty()) {
+                            sameUtterance = (uid == slot.utteranceId);
+                        } else {
+                            sameUtterance =
+                                !lastTarget.empty() && cp > 0 &&
+                                (lastTarget.size() - cp) <= kTailReviseMax;
                         }
-                        slot.first = val;
+                        if (!sameUtterance) {
+                            slot.start = glfwGetTime();
+                        }
+                        slot.target = val;
+                        slot.utteranceId = uid;
 
                         // Push msgAge to every shader bound on `msg`, so
                         // both typewriter and non-typewriter shaders can
                         // animate around the utterance window.
-                        float age = (float)(glfwGetTime() - slot.second);
+                        float age = (float)(glfwGetTime() - slot.start);
                         shader->setMsgAge(age);
 
                         if (base != "text_typewriter.fs") {
@@ -1325,8 +1384,27 @@ void Application::run() {
                         }
                     }
 
-                    for (auto& c : val) c = (char)toupper((unsigned char)c);
-                    shader->setText(paramName, val);
+                    // SCTEXT/1 (Phase C): case is the shader's decision now
+                    // (ISF "CASE" key) — no host toupper. Carry the feed's
+                    // word timings / speaker into the run so converted
+                    // shaders can reveal per word; legacy shaders get the
+                    // same text through the per-char shim.
+                    {
+                        std::string feedPrefix = dataKey.substr(0, dataKey.find('.'));
+                        TranscriptFeed* feed = feedPrefix == "cue" ? &m_cueFeed
+                                             : feedPrefix == "etherea" ? &m_ethereaFeed : nullptr;
+                        auto speakerToId = [this](const std::string& sp) -> int {
+                            auto it = m_speakerIds.find(sp);
+                            if (it != m_speakerIds.end()) return it->second;
+                            if (m_speakerIds.size() >= 254) return -1;
+                            int id = (int)m_speakerIds.size();
+                            m_speakerIds.emplace(sp, id);
+                            return id;
+                        };
+                        TextRun run = feed ? GlyphBuffer::buildTextRun(val, feed->latest, speakerToId)
+                                           : TextRun{val};
+                        shader->setTextRun(paramName, run);
+                    }
                     break;
                 }
             }
@@ -2324,7 +2402,14 @@ void Application::compositeZone(OutputZone& zone) {
             mp->meshWarp.render(sourceTex);
         } else if (mp->warpMode == ViewportPanel::WarpMode::ObjMesh) {
             float aspect = (float)zone.width / (float)zone.height;
-            mp->objMeshWarp.render(sourceTex, aspect);
+            std::vector<GLuint> zoneTextures;
+            zoneTextures.reserve(m_zones.size());
+            int currentZoneIndex = -1;
+            for (int zi = 0; zi < (int)m_zones.size(); zi++) {
+                zoneTextures.push_back(m_zones[zi]->warpFBO.textureId());
+                if (m_zones[zi].get() == &zone) currentZoneIndex = zi;
+            }
+            mp->objMeshWarp.render(sourceTex, aspect, &zoneTextures, currentZoneIndex);
         }
     } else if (sourceTex) {
         // No mapping — passthrough
@@ -2926,15 +3011,20 @@ void Application::presentOutputs() {
         }
     }
 
-    // Global outputs (stream/record) — use active zone
+    // Global outputs (stream/record) — the stream follows the active zone;
+    // the recorder may be PINNED to a zone (auto-record pins to Main, same
+    // rationale as the Lu sender above: the session archive must not follow
+    // editor tab clicks).
     auto& active = activeZone();
-    bool needsReadback = false;
 #ifdef HAS_FFMPEG
-    if (m_rtmpOutput.isActive() || m_recorder.isActive()) needsReadback = true;
-#endif
-    if (needsReadback) {
+    OutputZone& recZone =
+        (m_recordZoneIndex >= 0 && m_recordZoneIndex < (int)m_zones.size())
+            ? *m_zones[m_recordZoneIndex] : active;
+    if (m_rtmpOutput.isActive() || (m_recorder.isActive() && &recZone == &active))
         renderReadbackFBO(active);
-    }
+    if (m_recorder.isActive() && &recZone != &active)
+        renderReadbackFBO(recZone);
+#endif
 
 #ifdef HAS_NDI
     // Legacy global NDI output (composition toggle in NDI panel).
@@ -2963,7 +3053,7 @@ void Application::presentOutputs() {
         m_rtmpOutput.sendFrame(active.readbackFBO.textureId(), active.width, active.height);
     }
     if (m_recorder.isActive()) {
-        m_recorder.sendFrame(active.readbackFBO.textureId(), active.width, active.height);
+        m_recorder.sendFrame(recZone.readbackFBO.textureId(), recZone.width, recZone.height);
     }
 #endif
 }
@@ -3258,7 +3348,29 @@ void Application::handleVoiceIntent(const easel::voice::VoiceIntent& intent) {
 }
 
 void Application::pushTranscript(const std::string& prefix, TranscriptFeed& feed,
-                                 const std::string& text, bool isFinal) {
+                                 const CaptionSegment& seg) {
+    const std::string& text = seg.text;
+    const bool isFinal = seg.isFinal;
+
+    // ── Caption contract prologue (utterance identity + revision) ──────
+    // (1) Stale guard: a lower revision of the utterance we're already
+    //     showing arrived late — drop it rather than flicker backwards.
+    if (!seg.utteranceId.empty() && seg.utteranceId == feed.utteranceId &&
+        seg.revision > 0 && seg.revision < feed.revision)
+        return;
+    // (2) New utterance: reset the per-utterance buffers.
+    if (!seg.utteranceId.empty() && seg.utteranceId != feed.utteranceId) {
+        feed.committedChunks.clear();
+        feed.prevSegment.clear();
+        feed.utteranceId = seg.utteranceId;
+    }
+    // (3) Record + publish identity. `.utterance` is "" for legacy producers
+    //     (no utteranceId) so the bind-loop falls back to its heuristic.
+    feed.revision = seg.revision;
+    feed.latest = seg;
+    m_dataBus.set(prefix + ".utterance", seg.utteranceId);
+    if (!seg.speaker.empty()) m_dataBus.set(prefix + ".speaker", seg.speaker);
+
     // <prefix>.latest — full current segment. Unchanged contract: typewriter/
     // reveal text shaders bind `msg` to this and depend on the whole utterance.
     m_dataBus.set(prefix + ".latest", text);
@@ -3323,9 +3435,27 @@ void Application::pushTranscript(const std::string& prefix, TranscriptFeed& feed
             feed.finalWords.erase(feed.finalWords.begin(),
                                   feed.finalWords.end() - kFinalWordsMax);
         feed.prevSegment.clear();   // next utterance counts as all-new
+        // Caption contract: a committed chunk joins the utterance buffer.
+        feed.committedChunks.push_back(text);
     } else {
         feed.prevSegment = text;    // keep growing this utterance
     }
+
+    // (5) <prefix>.caption — utterance-long text. Prefer the producer's
+    //     cumulative utteranceText; otherwise committed chunks + live tail.
+    //     Never empty when `text` is non-empty.
+    std::string caption = seg.utteranceText;
+    if (caption.empty()) {
+        caption = join(feed.committedChunks, 0);
+        if (!isFinal) {
+            if (!caption.empty()) caption += ' ';
+            caption += text;
+        }
+    }
+    m_dataBus.set(prefix + ".caption", caption);
+    // Legacy producers (no utteranceId): a final IS the whole utterance —
+    // don't let the next final accumulate onto it.
+    if (seg.utteranceId.empty() && isFinal) feed.committedChunks.clear();
 }
 
 void Application::startVoiceRecording() {
@@ -3723,6 +3853,36 @@ void Application::renderUI() {
                     if (m_selectedLayer >= m_layerStack.count())
                         m_selectedLayer = m_layerStack.count() - 1;
                 }
+            } else if (msg.address == "/easel/layer/source/ndi"
+                       && msg.ints.size() == 1 && msg.strings.size() == 2) {
+                // Stable-ID compare-and-swap. Never create/reorder layers or
+                // alter masks, effects, transforms, names, or zone membership.
+#ifdef HAS_NDI
+                const auto id = static_cast<uint32_t>(msg.ints[0]);
+                const auto& expected = msg.strings[0];
+                const auto& replacement = msg.strings[1];
+                for (auto& layer : m_layerStack.layers()) {
+                    if (!layer || layer->id != id) continue;
+                    if (!layer->source || layer->source->typeName() != "NDI"
+                        || layer->source->sourcePath() != expected
+                        || replacement.empty()) {
+                        std::cerr << "[OSC] source/ndi: precondition failed for " << id << '\n';
+                        break;
+                    }
+                    // Reconnect even when the name is unchanged: a restarted
+                    // sender can acquire a new NDI address/port. Holding the
+                    // old receiver would otherwise leave the last frame frozen.
+                    auto source = std::make_shared<NDISource>();
+                    if (!source->connect(replacement)) {
+                        std::cerr << "[OSC] source/ndi: connection failed for " << id << '\n';
+                        break;
+                    }
+                    m_undoStack.pushState(m_layerStack, m_selectedLayer);
+                    layer->source = source;
+                    std::cout << "[OSC] source/ndi: rebound layer " << id << " to " << replacement << '\n';
+                    break;
+                }
+#endif
             } else if (msg.address == "/easel/layer/ensure/ndi"
                        && msg.strings.size() >= 2) {
                 // Agent SDK managed-layer contract: idempotently ensure exactly
@@ -4061,6 +4221,8 @@ void Application::renderUI() {
                 m_dataBus.set("cue.latest", "");
                 m_dataBus.set("cue.words", "");
                 m_dataBus.set("cue.recent", "");
+                m_dataBus.set("cue.caption", "");
+                m_dataBus.set("cue.utterance", "");
                 m_cueFeed = TranscriptFeed{};
                 m_cueLatestSuppressUntil = glfwGetTime() + 0.5;
             } else if (msg.address.rfind("/easel/scene/", 0) == 0) {
@@ -4458,7 +4620,11 @@ void Application::renderUI() {
         auto* mpEarly = mappingForZone(zone);
         if (mpEarly && m_ui.isPanelVisible("Mapping")) {
             auto prevWarpMode = mpEarly->warpMode;
-            m_warpEditor.render(*mpEarly, m_maskEditMode, &m_mappings, zone.mappingIndex);
+            std::vector<std::string> zoneNames;
+            zoneNames.reserve(m_zones.size());
+            for (const auto& zonePtr : m_zones) zoneNames.push_back(zonePtr->name);
+            m_warpEditor.render(*mpEarly, m_maskEditMode, &m_mappings,
+                                zone.mappingIndex, &zoneNames, m_activeZone);
             if (mpEarly->warpMode != prevWarpMode) {
                 bool needsDepth = (mpEarly->warpMode == ViewportPanel::WarpMode::ObjMesh);
                 zone.warpFBO.create(zone.width, zone.height, needsDepth);
@@ -5457,6 +5623,8 @@ void Application::renderUI() {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
             if (ImGui::Button("Connect", ImVec2(-1, 0))) {
                 m_shaderClaw.connect(scPath);
+                // SCFONT/1 (Phase D): font assets sit next to the shaders dir
+                FontAtlas::setAssetDir(std::string(scPath) + "/../assets/fonts");
             }
             ImGui::PopStyleColor(4);
         } else {
@@ -8920,7 +9088,7 @@ static int recorderFpsHint(float targetFPS) {
 // .mp4. Records continuously until the user clicks stop — does NOT move the playhead,
 // force playback, or bind to the timeline Work Area. Frame timing is wall-clock VFR,
 // so the file captures whatever rate the app renders at, at correct playback speed.
-void Application::startRecording(const std::string& overridePath) {
+void Application::startRecording(const std::string& overridePath, int zoneIndex) {
 #ifdef HAS_FFMPEG
     if (m_recorder.isActive()) return;
 
@@ -8939,13 +9107,22 @@ void Application::startRecording(const std::string& overridePath) {
         fname = buf;
     }
 
-    auto& zone = activeZone();
+    {
+        std::error_code ec;
+        auto parent = std::filesystem::path(fname).parent_path();
+        if (!parent.empty()) std::filesystem::create_directories(parent, ec);
+    }
+
+    if (zoneIndex >= (int)m_zones.size()) zoneIndex = -1;
+    m_recordZoneIndex = zoneIndex;
+    auto& zone = (zoneIndex >= 0) ? *m_zones[zoneIndex] : activeZone();
     m_recorder.setAudioDevice(m_selectedAudioDevice);
     if (!m_recorder.start(fname, zone.warpFBO.width(), zone.warpFBO.height(), recorderFpsHint(m_targetFPS))) {
         std::cerr << "[REC] Recording failed: recorder.start() returned false\n";
         return;
     }
-    std::cerr << "[REC] Recording (indefinite) to " << fname << "\n";
+    std::cerr << "[REC] Recording (indefinite) to " << fname
+              << (zoneIndex >= 0 ? " [pinned to zone " + zone.name + "]" : "") << "\n";
 #endif
 }
 
@@ -13629,11 +13806,26 @@ void Application::registerLayerWithZones(uint32_t layerId) {
     for (const auto& l : m_layerStack.layers()) {
         if (l && l->id == layerId && !l->managedKey.empty()) return;
     }
+    // New layers join ONLY the currently selected zone (James, 2026-07-24).
+    // Previously every zone gained the layer (explicit sets via insert,
+    // show-all zones implicitly). Non-destructive: a show-all zone is first
+    // materialized to its exact current layer list — the same filter
+    // compositeZone applies (non-managed layers + explicitly placed managed
+    // ones) — so its output doesn't change; it simply doesn't gain new layers.
+    if (m_zones.empty()) return;
+    OutputZone* target = &activeZone();
     for (auto& z : m_zones) {
-        if (!z->showAllLayers) {
-            z->visibleLayerIds.insert(layerId);
+        if (!z || z.get() == target) continue;
+        if (z->showAllLayers) {
+            z->showAllLayers = false;
+            for (int i = 0; i < m_layerStack.count(); i++) {
+                auto& L = m_layerStack[i];
+                if (!L || L->id == layerId) continue;
+                if (L->managedKey.empty()) z->visibleLayerIds.insert(L->id);
+            }
         }
     }
+    if (!target->showAllLayers) target->visibleLayerIds.insert(layerId);
 }
 
 void Application::loadImage(const std::string& path) {
@@ -15152,6 +15344,7 @@ void Application::saveProject(const std::string& path) {
                 json mj2;
                 mj2["name"] = mg.name;
                 mj2["textured"] = mg.textured;
+                mj2["sourceZoneIndex"] = mg.sourceZoneIndex;
                 matsJson.push_back(mj2);
             }
             objJson["materials"] = matsJson;
@@ -15713,8 +15906,13 @@ void Application::loadProject(const std::string& path) {
                 for (const auto& matJ : matsJson) {
                     std::string name = matJ.value("name", "");
                     bool tex = matJ.value("textured", true);
+                    int sourceZoneIndex = matJ.value("sourceZoneIndex", -1);
                     for (auto& mg : mats) {
-                        if (mg.name == name) { mg.textured = tex; break; }
+                        if (mg.name == name) {
+                            mg.textured = tex;
+                            mg.sourceZoneIndex = sourceZoneIndex;
+                            break;
+                        }
                     }
                 }
             }

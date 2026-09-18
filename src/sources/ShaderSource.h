@@ -4,6 +4,7 @@
 #include "render/ShaderProgram.h"
 #include "render/Framebuffer.h"
 #include "render/Mesh.h"
+#include "render/GlyphBuffer.h"
 #include <glm/glm.hpp>
 #include <string>
 #include <vector>
@@ -46,6 +47,22 @@ struct ISFInput {
 
     // Text default
     std::string defaultText;
+
+    // SCTEXT/1 text-input options (Phase C). Optional ISF keys on TYPE:"text":
+    //   "CASE": "upper"|"lower"|"preserve" (default preserve — the shader's
+    //           decision now; the host no longer uppercases),
+    //   "OVERFLOW": "head"|"tail" (default tail = keep the END of the text).
+    // textShim: the GLSL body references `<name>_<digits>` — keep declaring +
+    // uploading the legacy per-char int uniforms (A-Z 0..25, space 26, 0-9
+    // 27..36). textBufRef: body references `textBuf_<name>` (glyph buffer
+    // sampler + `<name>_cap` are declared/bound).
+    std::string textCase = "preserve";
+    bool textOverflowHead = false;
+    bool textShim = false;
+    bool textBufRef = false;
+    TextRun textRun;            // current run (text + optional word timing/speaker)
+    bool textDirty = true;      // re-encode + re-upload on next uploadUniforms
+    GlyphEncoded textEncoded;   // last encode (len, texels, shim codes)
 
     // Long (enum) — parallel arrays for VALUES and LABELS so the UI can show
     // named pills instead of a numeric slider when labels are present.
@@ -93,7 +110,7 @@ struct ImageBinding {
 
 class ShaderSource : public ContentSource {
 public:
-    ~ShaderSource() override = default;
+    ~ShaderSource() override;
 
     // Load from ISF .fs file (optionally with paired .vs)
     bool loadFromFile(const std::string& path);
@@ -126,7 +143,8 @@ public:
     void setColor(const std::string& name, const glm::vec4& v);
     void setBool(const std::string& name, bool v);
     void setPoint2D(const std::string& name, const glm::vec2& v);
-    void setText(const std::string& name, const std::string& text);
+    void setText(const std::string& name, const std::string& text);   // = setTextRun(name, TextRun{text})
+    void setTextRun(const std::string& name, const TextRun& run);
 
     // Audio state for ISF shaders (Shader-Claw naming convention)
     void setAudioState(float rms, float bass, float mid, float high, GLuint fftTex);
@@ -223,4 +241,20 @@ private:
 
     // Upload all uniforms to shader (pass index for multi-pass)
     void uploadUniforms(int passIndex = 0, int passWidth = 0, int passHeight = 0);
+
+    // SCTEXT/1 glyph-buffer textures (`textBuf_<input>`), keyed by text input
+    // name and owned by this source (created lazily in uploadUniforms,
+    // deleted in pruneTextBufTextures()/destructor).
+    std::map<std::string, GLuint> m_textBufTex;
+    void pruneTextBufTextures(bool all);
+    // Cached "body references X" flags (set in parseISF from the GLSL body).
+    bool m_bodyHasGlyphAtlas = false;   // `glyphAtlasTex` -> bind FontAtlas::glyphTexture() at unit 12
+    bool m_bodyHasScText = false;       // `scText`/`scGlyph` -> inject the sc_text v1 helper block
+    // SCFONT/1 MSDF face references (Phase D) -- units 10 (atlas) / 11 (metrics)
+    bool m_bodyHasMSDFTex = false;      // `glyphMSDFTex`
+    bool m_bodyHasMetricsTex = false;   // `glyphMetricsTex`
+    bool m_bodyHasAtlasInfo = false;    // `glyphAtlasInfo` vec4
+    bool m_bodyHasFaceInfo = false;     // `glyphFaceInfo` vec4
+    bool m_loggedMSDFCollision = false; // once: >2 image inputs collide with units 10/11
+    bool m_loggedTextBufOverflow = false;
 };

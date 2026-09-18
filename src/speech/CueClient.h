@@ -5,6 +5,7 @@
 #include <mutex>
 #include <thread>
 #include <atomic>
+#include "speech/CaptionSegment.h"
 
 // Client for a Cue server (https://github.com/jameslbarnes/cue) running locally
 // or on the LAN. Subscribes to /sessions/:id/events (a single WebSocket) and
@@ -14,7 +15,18 @@
 // Protocol reference (see external/cue/AGENTS.md):
 //   ready, state.snapshot, observation, transcript, actions, action,
 //   prompt, vision.description, signal, output.available, source.available,
-//   output.status
+//   output.status, caption.segment
+//
+// Caption contract (Phase B): the unified "transcript" event carries text,
+// isFinal, speechFinal, live, speaker, utteranceId, revision, startMs/endMs,
+// words[] and (after ingest) fullTranscript — all optional except text/isFinal,
+// so legacy {type,text,isFinal} servers keep working. It is parsed into a
+// CaptionSegment and dispatched via setTranscriptCallback. "caption.segment"
+// (emitted by Cue's captionOutputProvider for kind:"text" outputs) carries the
+// same fields; it is parsed into lastCaptionSegment() but deliberately NOT
+// dispatched to the transcript callback — the transcript event already carries
+// everything, and dispatching both would double-push every segment. Reserved
+// for a future managed captions layer.
 //
 // CueClient is read-only: it does not push observations. Audio/frame ingest
 // belongs in dedicated providers connected to /sessions/:id/transcription
@@ -42,7 +54,7 @@ public:
     void poll();
 
     // ─── Callbacks (fired from poll(), main thread) ────────────────────
-    void setTranscriptCallback(std::function<void(const std::string& text, bool isFinal, const std::string& speaker)> cb) {
+    void setTranscriptCallback(std::function<void(const CaptionSegment&)> cb) {
         m_transcriptCb = std::move(cb);
     }
     // Fired for every action the model selects (filter on action.type yourself).
@@ -60,9 +72,11 @@ public:
     std::string prompt() const         { std::lock_guard<std::mutex> lk(m_dataMutex); return m_prompt; }
     std::string lastActionType() const { std::lock_guard<std::mutex> lk(m_dataMutex); return m_lastActionType; }
     std::string lastActionPayload() const { std::lock_guard<std::mutex> lk(m_dataMutex); return m_lastActionPayload; }
+    // Most recent "caption.segment" event (not dispatched — see header comment).
+    CaptionSegment lastCaptionSegment() const { std::lock_guard<std::mutex> lk(m_dataMutex); return m_lastCaptionSegment; }
 
 private:
-    std::function<void(const std::string&, bool, const std::string&)> m_transcriptCb;
+    std::function<void(const CaptionSegment&)>                         m_transcriptCb;
     std::function<void(const CueAction&)>                              m_actionCb;
     std::function<void(const std::string&, bool)>                      m_promptCb;
 
@@ -82,9 +96,10 @@ private:
     std::string m_prompt;
     std::string m_lastActionType;
     std::string m_lastActionPayload;
+    CaptionSegment m_lastCaptionSegment;
 
     // Pending events for main-thread dispatch
-    struct PendingTranscript { std::string text; bool isFinal; std::string speaker; };
+    using PendingTranscript = CaptionSegment;
     struct PendingAction     { std::string type; std::string payload; };
     struct PendingPrompt     { std::string prompt; bool reset; };
 

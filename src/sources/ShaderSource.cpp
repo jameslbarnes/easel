@@ -157,9 +157,20 @@ bool ShaderSource::parseISF(const std::string& source) {
                         param.maxVal = 12.0f;
                     }
                     param.defaultText = input.value("DEFAULT", "");
-                    // Uppercase the default text
-                    for (auto& c : param.defaultText) c = (char)toupper((unsigned char)c);
+                    // SCTEXT/1: case is the shader's decision (CASE key, default
+                    // preserve) — the DEFAULT is no longer uppercased here.
                     param.value = param.defaultText;
+                    param.textRun = TextRun{param.defaultText};
+                    if (input.contains("CASE") && input["CASE"].is_string()) {
+                        std::string cs = input["CASE"].get<std::string>();
+                        for (auto& c : cs) c = (char)tolower((unsigned char)c);
+                        if (cs == "upper" || cs == "lower" || cs == "preserve") param.textCase = cs;
+                    }
+                    if (input.contains("OVERFLOW") && input["OVERFLOW"].is_string()) {
+                        std::string ov = input["OVERFLOW"].get<std::string>();
+                        for (auto& c : ov) c = (char)tolower((unsigned char)c);
+                        param.textOverflowHead = (ov == "head");
+                    }
                 } else if (param.type == "image") {
                     // Image input — texture sampler, stub for generators
                     param.value = false; // placeholder
@@ -183,6 +194,28 @@ bool ShaderSource::parseISF(const std::string& source) {
     } catch (const json::exception& e) {
         std::cerr << "ISF parse error: " << e.what() << std::endl;
         return false;
+    }
+
+    // SCTEXT/1: decide per text input whether the GLSL BODY (not the JSON)
+    // still uses the legacy per-char uniforms (`<n>_<digits>` => shim) and
+    // whether it samples the glyph buffer (`textBuf_<n>`); cache the global
+    // glyph-atlas / helper-block references for translateFragment +
+    // uploadUniforms.
+    {
+        std::string body = source.substr(commentEnd + 2);
+        m_bodyHasGlyphAtlas = body.find("glyphAtlasTex") != std::string::npos;
+        m_bodyHasScText = body.find("scText") != std::string::npos ||
+                          body.find("scGlyph") != std::string::npos;
+        // SCFONT/1 MSDF face references (Phase D)
+        m_bodyHasMSDFTex    = body.find("glyphMSDFTex")    != std::string::npos;
+        m_bodyHasMetricsTex = body.find("glyphMetricsTex") != std::string::npos;
+        m_bodyHasAtlasInfo  = body.find("glyphAtlasInfo")  != std::string::npos;
+        m_bodyHasFaceInfo   = body.find("glyphFaceInfo")   != std::string::npos;
+        for (auto& in : m_inputs) {
+            if (in.type != "text") continue;
+            in.textShim = std::regex_search(body, std::regex("\\b" + in.name + "_[0-9]+\\b"));
+            in.textBufRef = body.find("textBuf_" + in.name) != std::string::npos;
+        }
     }
 
     return true;
@@ -294,6 +327,28 @@ std::string ShaderSource::translateFragment(const std::string& isfBody) {
         out << "uniform sampler2D fontAtlasTex;\n";
         hasImageInputs = true;
     }
+    // SCTEXT/1 glyph atlas (16x6 printable-ASCII grid, unit 12)
+    if (body.find("glyphAtlasTex") != std::string::npos) {
+        out << "uniform sampler2D glyphAtlasTex;\n";
+        hasImageInputs = true;
+    }
+    // SCFONT/1 MSDF glyph atlas + metrics (Phase D, phase-D-design.md 1.4):
+    // units 10 (atlas, LINEAR) / 11 (metrics, NEAREST), each declared only
+    // when the body references the name.
+    if (body.find("glyphMSDFTex") != std::string::npos) {
+        out << "uniform sampler2D glyphMSDFTex;\n";
+        hasImageInputs = true;
+    }
+    if (body.find("glyphMetricsTex") != std::string::npos) {
+        out << "uniform sampler2D glyphMetricsTex;\n";
+        hasImageInputs = true;
+    }
+    if (body.find("glyphAtlasInfo") != std::string::npos) {
+        out << "uniform vec4 glyphAtlasInfo;\n";
+    }
+    if (body.find("glyphFaceInfo") != std::string::npos) {
+        out << "uniform vec4 glyphFaceInfo;\n";
+    }
 
     // Shader-Claw audio FFT sampler (always declared — bound by setAudioState)
     out << "uniform sampler2D audioFFT;\n";
@@ -393,12 +448,22 @@ std::string ShaderSource::translateFragment(const std::string& isfBody) {
         } else if (input.type == "long") {
             out << "uniform int " << input.name << ";\n";
         } else if (input.type == "text") {
-            // Text inputs in Shader-Claw compile to int arrays: name_0..name_N + name_len
+            // SCTEXT/1 (phase-C-design.md 1.2/1.4): `<n>_len` always; the
+            // legacy per-char ints `<n>_0..` only while the body still uses
+            // them (shim, cap min(MAX_LENGTH,64)); the glyph buffer sampler +
+            // `<n>_cap` only when the body samples `textBuf_<n>`.
             int maxLen = (int)input.maxVal;
             if (maxLen <= 0) maxLen = 12;
             out << "uniform int " << input.name << "_len;\n";
-            for (int i = 0; i < maxLen; i++) {
-                out << "uniform int " << input.name << "_" << i << ";\n";
+            if (input.textShim) {
+                int shimCap = std::min(maxLen, 64);
+                for (int i = 0; i < shimCap; i++) {
+                    out << "uniform int " << input.name << "_" << i << ";\n";
+                }
+            }
+            if (input.textBufRef) {
+                out << "uniform sampler2D textBuf_" << input.name << ";\n";
+                out << "uniform float " << input.name << "_cap;\n";
             }
         }
         // image type already declared above
@@ -424,6 +489,97 @@ std::string ShaderSource::translateFragment(const std::string& isfBody) {
     out << "float audioBreath(){ return pow(max(audioLevel,0.0),0.6); }\n"; // perceptual loudness
     out << "float audioAlive(float rest,float drive,float amount){ return rest+drive*amount; }\n"; // living baseline
     out << "\n";
+
+    // SCTEXT/1 + SCFONT/1 helper block "sc_text v2" (phase-C-design.md 1.6 +
+    // phase-D-design.md 1.6) — verbatim across easel / claw3 / etherea except
+    // `texture(` here because the preamble is emitted after the
+    // texture2D->texture regex on the body. v1 function text is byte-identical.
+    if (body.find("scText") != std::string::npos || body.find("scGlyph") != std::string::npos ||
+        body.find("scMSDF") != std::string::npos || body.find("sampleGlyphMSDF") != std::string::npos) {
+        out << "// ---- sc_text v2 : SCTEXT/1 glyph buffer + SCFONT/1 MSDF glyph atlas + metrics helpers (keep identical across easel / claw3 / etherea) ----\n"
+               "vec4 scTextTexel(sampler2D buf, float cap, int i, float sub) {\n"
+               "    return texture(buf, vec2((float(i) * 2.0 + sub + 0.5) / (cap * 2.0), 0.5));\n"
+               "}\n"
+               "int scTextByte(float v) { return int(floor(v * 255.0 + 0.5)); }\n"
+               "int scTextCode(sampler2D buf, float cap, int i) {         // Unicode code point; 0 = empty slot\n"
+               "    vec4 t = scTextTexel(buf, cap, i, 0.0);\n"
+               "    return scTextByte(t.r) + 256 * scTextByte(t.g);\n"
+               "}\n"
+               "int scTextWord(sampler2D buf, float cap, int i) {         // word index; -1 = none (whitespace)\n"
+               "    int w = scTextByte(scTextTexel(buf, cap, i, 0.0).b);\n"
+               "    return (w == 255) ? -1 : w;\n"
+               "}\n"
+               "float scTextRevealMs(sampler2D buf, float cap, int i) {   // ms since utterance start; -1.0 = unknown\n"
+               "    vec4 t = scTextTexel(buf, cap, i, 1.0);\n"
+               "    int ms = scTextByte(t.r) + 256 * scTextByte(t.g);\n"
+               "    return (ms == 65535) ? -1.0 : float(ms);\n"
+               "}\n"
+               "int scTextSpeaker(sampler2D buf, float cap, int i) {      // speaker id; -1 = unknown\n"
+               "    int s = scTextByte(scTextTexel(buf, cap, i, 1.0).b);\n"
+               "    return (s == 255) ? -1 : s;\n"
+               "}\n"
+               "int scGlyphCell(int cp) { return (cp >= 32 && cp <= 126) ? cp - 32 : 95; }\n"
+               "vec2 scGlyphUV(int cp, vec2 uv) {                         // uv glyph-local, y = 1 at glyph top\n"
+               "    float idx = float(scGlyphCell(cp));\n"
+               "    float col = mod(idx, 16.0);\n"
+               "    float row = floor(idx / 16.0);\n"
+               "    return vec2((col + uv.x) / 16.0, 1.0 - (row + 1.0 - uv.y) / 6.0);\n"
+               "}\n"
+               "float scGlyphSample(sampler2D atlas, int cp, vec2 uv) {   // coverage 0..1; 0 outside the cell / for space\n"
+               "    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 0.0;\n"
+               "    if (cp <= 32) return 0.0;\n"
+               "    return texture(atlas, scGlyphUV(cp, uv)).r;\n"
+               "}\n"
+               "float scU16(vec2 v) { return floor(v.x * 255.0 + 0.5) + 256.0 * floor(v.y * 255.0 + 0.5); }\n"
+               "float scS16em(vec2 v) { return (scU16(v) - 32768.0) / 4096.0; }          // em, fixed-point 1/4096\n"
+               "vec4 scGlyphMetricTexel(sampler2D mtx, int cp, int k) {                  // 8 texels per code point, page = cp/256\n"
+               "    int page = cp / 256; int lo = cp - page * 256;\n"
+               "    return texture(mtx, vec2((float(lo * 8 + k) + 0.5) / 2048.0, (float(page) + 0.5) / 256.0));\n"
+               "}\n"
+               "bool  scGlyphPresent(sampler2D mtx, int cp) { return scGlyphMetricTexel(mtx, cp, 4).b > 0.5; }\n"
+               "int   scGlyphResolve(sampler2D mtx, int cp) { return scGlyphPresent(mtx, cp) ? cp : 65533; }   // U+FFFD fallback\n"
+               "vec4  scGlyphAtlasRect(sampler2D mtx, int cp) {                           // atlas px (left, bottom, right, top), y up\n"
+               "    vec4 a = scGlyphMetricTexel(mtx, cp, 0), b = scGlyphMetricTexel(mtx, cp, 1);\n"
+               "    return vec4(scU16(a.rg), scU16(a.ba), scU16(b.rg), scU16(b.ba));\n"
+               "}\n"
+               "vec4  scGlyphPlane(sampler2D mtx, int cp) {                               // em box rel. to pen origin (left, bottom, right, top)\n"
+               "    vec4 a = scGlyphMetricTexel(mtx, cp, 2), b = scGlyphMetricTexel(mtx, cp, 3);\n"
+               "    return vec4(scS16em(a.rg), scS16em(a.ba), scS16em(b.rg), scS16em(b.ba));\n"
+               "}\n"
+               "float scGlyphAdvance(sampler2D mtx, int cp) { return scS16em(scGlyphMetricTexel(mtx, cp, 4).rg); }   // em\n"
+               "float scMSDFMedian(vec3 c) { return max(min(c.r, c.g), min(max(c.r, c.g), c.b)); }\n"
+               "// Analytic (no derivatives): screenPxRange = distanceRangePx * (glyph px on screen / glyph px in the atlas).\n"
+               "float scMSDFCoverage(sampler2D atlas, vec2 atlasUV, float screenPxRange) {\n"
+               "    float sd = scMSDFMedian(texture(atlas, atlasUV).rgb) - 0.5;\n"
+               "    return clamp(sd * max(screenPxRange, 1.0) + 0.5, 0.0, 1.0);\n"
+               "}\n"
+               "float scMSDFScreenPxRange(vec4 atlasInfo, float glyphScreenPx, float glyphAtlasPx) {\n"
+               "    return atlasInfo.z * glyphScreenPx / max(glyphAtlasPx, 1.0);\n"
+               "}\n"
+               "// Glyph-local uv over the plane box (x 0..1 left->right, y 0..1 bottom->top) -> coverage; 0 outside / absent / space.\n"
+               "float scGlyphMSDF(sampler2D atlas, sampler2D mtx, vec4 atlasInfo, int cp, vec2 uv, float screenPxRange) {\n"
+               "    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 0.0;\n"
+               "    vec4 r = scGlyphAtlasRect(mtx, cp);\n"
+               "    if (r.z <= r.x || r.w <= r.y) return 0.0;\n"
+               "    vec2 auv = (r.xy + uv * (r.zw - r.xy)) / atlasInfo.xy;\n"
+               "    return scMSDFCoverage(atlas, auv, screenPxRange);\n"
+               "}\n"
+               "// ---- end sc_text v2 ----\n\n";
+    }
+
+    // sc_text v2d: derivative-based MSDF sampler, only when referenced
+    // (GLSL 330 core has fwidth without any extension).
+    if (body.find("sampleGlyphMSDF") != std::string::npos) {
+        out << "// ---- sc_text v2d : derivative-based variant ----\n"
+               "float sampleGlyphMSDF(sampler2D atlas, vec2 atlasUV, float distanceRange, vec2 atlasSizePx) {\n"
+               "    vec2 unitRange = vec2(distanceRange) / atlasSizePx;\n"
+               "    vec2 screenTexSize = vec2(1.0) / fwidth(atlasUV);\n"
+               "    float screenPxRange = max(0.5 * dot(unitRange, screenTexSize), 1.0);\n"
+               "    float sd = scMSDFMedian(texture(atlas, atlasUV).rgb) - 0.5;\n"
+               "    return clamp(sd * screenPxRange + 0.5, 0.0, 1.0);\n"
+               "}\n"
+               "// ---- end sc_text v2d ----\n\n";
+    }
 
     out << body << "\n";
 
@@ -608,6 +764,7 @@ bool ShaderSource::loadFromCode(const std::string& isfSource) {
         createPassFBOs();
     }
 
+    pruneTextBufTextures(false);
     return true;
 }
 
@@ -617,6 +774,9 @@ bool ShaderSource::reload(const std::string& isfSource) {
     std::string oldRawFrag = m_rawFragment;
     auto oldInputs = m_inputs;
     auto oldPassBuffers = m_passBuffers;
+    bool oldHasGlyphAtlas = m_bodyHasGlyphAtlas, oldHasScText = m_bodyHasScText;
+    bool oldHasMSDFTex = m_bodyHasMSDFTex, oldHasMetricsTex = m_bodyHasMetricsTex;
+    bool oldHasAtlasInfo = m_bodyHasAtlasInfo, oldHasFaceInfo = m_bodyHasFaceInfo;
 
     m_rawFragment = isfSource;
     parseISF(isfSource);
@@ -637,6 +797,12 @@ bool ShaderSource::reload(const std::string& isfSource) {
         m_rawFragment = oldRawFrag;
         m_inputs = oldInputs;
         m_passBuffers = oldPassBuffers;
+        m_bodyHasGlyphAtlas = oldHasGlyphAtlas;
+        m_bodyHasScText = oldHasScText;
+        m_bodyHasMSDFTex = oldHasMSDFTex;
+        m_bodyHasMetricsTex = oldHasMetricsTex;
+        m_bodyHasAtlasInfo = oldHasAtlasInfo;
+        m_bodyHasFaceInfo = oldHasFaceInfo;
         std::cerr << "Shader reload failed, keeping previous version" << std::endl;
         return false;
     }
@@ -646,6 +812,9 @@ bool ShaderSource::reload(const std::string& isfSource) {
         for (const auto& oldInput : oldInputs) {
             if (newInput.name == oldInput.name && newInput.type == oldInput.type) {
                 newInput.value = oldInput.value;
+                if (newInput.type == "text") {
+                    newInput.textRun = oldInput.textRun;   // keep word timings; textDirty stays true
+                }
                 break;
             }
         }
@@ -663,7 +832,28 @@ bool ShaderSource::reload(const std::string& isfSource) {
     if (m_passBuffers != oldPassBuffers) {
         createPassFBOs();
     }
+    pruneTextBufTextures(false);
     return true;
+}
+
+ShaderSource::~ShaderSource() {
+    pruneTextBufTextures(true);
+}
+
+// Delete glyph-buffer textures that no current text input samples (or all
+// of them when `all` — destructor path).
+void ShaderSource::pruneTextBufTextures(bool all) {
+    for (auto it = m_textBufTex.begin(); it != m_textBufTex.end();) {
+        bool keep = false;
+        if (!all) {
+            for (const auto& in : m_inputs) {
+                if (in.type == "text" && in.textBufRef && in.name == it->first) { keep = true; break; }
+            }
+        }
+        if (keep) { ++it; continue; }
+        if (it->second) glDeleteTextures(1, &it->second);
+        it = m_textBufTex.erase(it);
+    }
 }
 
 // --- Rendering ---
@@ -887,8 +1077,58 @@ void ShaderSource::uploadUniforms(int passIndex, int passWidth, int passHeight) 
     glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_2D, fontAtlas);
 
+    // SCTEXT/1 glyph atlas (unit 12) when the body references it
+    if (m_bodyHasGlyphAtlas) {
+        glActiveTexture(GL_TEXTURE12);
+        glBindTexture(GL_TEXTURE_2D, FontAtlas::glyphTexture());
+        m_shader.setInt("glyphAtlasTex", 12);
+    }
+
+    // SCFONT/1 MSDF face (Phase D): atlas on unit 10, metrics on unit 11,
+    // resolved from the shader's fontFamily/fontWeight inputs (default 0/400).
+    if (m_bodyHasMSDFTex || m_bodyHasMetricsTex || m_bodyHasAtlasInfo || m_bodyHasFaceInfo) {
+        int msdfFam = 0, msdfWeight = 400;
+        int imageInputCount = 0;
+        for (const auto& in : m_inputs) {
+            if (in.type == "image") imageInputCount++;
+            if ((in.type == "long" || in.type == "float") &&
+                std::holds_alternative<float>(in.value)) {
+                if (in.name == "fontFamily")
+                    msdfFam = (int)std::lround(std::get<float>(in.value));
+                else if (in.name == "fontWeight")
+                    msdfWeight = (int)std::lround(std::get<float>(in.value));
+            }
+        }
+        const MSDFFace& msdf = FontAtlas::msdfFace(msdfFam, msdfWeight);
+        if (m_bodyHasMSDFTex) {
+            glActiveTexture(GL_TEXTURE10);
+            glBindTexture(GL_TEXTURE_2D, msdf.atlasTex);
+            m_shader.setInt("glyphMSDFTex", 10);
+        }
+        if (m_bodyHasMetricsTex) {
+            glActiveTexture(GL_TEXTURE11);
+            glBindTexture(GL_TEXTURE_2D, msdf.metricsTex);
+            m_shader.setInt("glyphMetricsTex", 11);
+        }
+        if (m_bodyHasAtlasInfo)
+            m_shader.setVec4("glyphAtlasInfo", glm::vec4(msdf.atlasInfo[0], msdf.atlasInfo[1],
+                                                         msdf.atlasInfo[2], msdf.atlasInfo[3]));
+        if (m_bodyHasFaceInfo)
+            m_shader.setVec4("glyphFaceInfo", glm::vec4(msdf.faceInfo[0], msdf.faceInfo[1],
+                                                        msdf.faceInfo[2], msdf.faceInfo[3]));
+        // Image inputs bind at units 8+; a 3rd/4th image collides with 10/11
+        // (design-accepted like Phase C's 12-15 note) — log once.
+        if (!m_loggedMSDFCollision && imageInputCount > 2) {
+            std::cerr << "ShaderSource: SCFONT/1 uses texture units 10/11; "
+                      << imageInputCount << " image inputs (units 8+) may collide"
+                      << std::endl;
+            m_loggedMSDFCollision = true;
+        }
+    }
+
     // User inputs
-    for (const auto& input : m_inputs) {
+    int textBufIndex = 0; // k-th text input sampling textBuf_<n> -> unit 13+k (max 3)
+    for (auto& input : m_inputs) {
         if (input.type == "float") {
             m_shader.setFloat(input.name, std::get<float>(input.value));
         } else if (input.type == "color") {
@@ -900,25 +1140,71 @@ void ShaderSource::uploadUniforms(int passIndex, int passWidth, int passHeight) 
         } else if (input.type == "long") {
             m_shader.setInt(input.name, (int)std::get<float>(input.value));
         } else if (input.type == "text") {
-            // Send text as character code uniforms
-            // Shader-Claw 3 encoding: A=0..Z=25, space=26, 0-9=27-36
-            std::string text = std::get<std::string>(input.value);
+            // SCTEXT/1: encode lazily (text/options changed), upload the
+            // glyph-buffer texture when the body samples it, and keep the
+            // legacy per-char int uniforms alive for shim shaders.
             int maxLen = (int)input.maxVal;
             if (maxLen <= 0) maxLen = 12;
-            if ((int)text.size() > maxLen) {
-                text = text.substr(text.size() - maxLen);
+            const int cap = std::max(1, std::min(maxLen, 1024));
+            const int shimCap = std::min(maxLen, 64);
+
+            // Direct writes to input.value (PropertyPanel, OSC) bypass
+            // setTextRun — resync the run from the value string.
+            const std::string& cur = std::get<std::string>(input.value);
+            if (cur != input.textRun.text) {
+                input.textRun = TextRun{cur};
+                input.textDirty = true;
             }
-            m_shader.setInt(input.name + "_len", (int)text.size());
-            for (int i = 0; i < maxLen; i++) {
-                int ch = 26; // space/empty
-                if (i < (int)text.size()) {
-                    char c = text[i];
-                    if (c >= 'A' && c <= 'Z') ch = c - 'A';
-                    else if (c >= 'a' && c <= 'z') ch = c - 'a';
-                    else if (c >= '0' && c <= '9') ch = 27 + (c - '0');
-                    else ch = 26; // space or unknown
+            if (input.textDirty) {
+                GlyphEncodeOptions o;
+                o.cap = cap;
+                o.shimCap = shimCap;
+                o.caseMode = input.textCase == "upper" ? GlyphEncodeOptions::Upper
+                           : input.textCase == "lower" ? GlyphEncodeOptions::Lower
+                                                        : GlyphEncodeOptions::Preserve;
+                o.overflowHead = input.textOverflowHead;
+                input.textEncoded = GlyphBuffer::encodeTextRun(input.textRun, o);
+                if (input.textBufRef) {
+                    GLuint& tex = m_textBufTex[input.name];
+                    if (!tex) glGenTextures(1, &tex);
+                    glActiveTexture(GL_TEXTURE0 + 13 + std::min(textBufIndex, 2));
+                    glBindTexture(GL_TEXTURE_2D, tex);
+                    GLint prevAlign = 4;
+                    glGetIntegerv(GL_UNPACK_ALIGNMENT, &prevAlign);
+                    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, cap * 2, 1, 0,
+                                 GL_RGBA, GL_UNSIGNED_BYTE, input.textEncoded.bytes.data());
+                    glPixelStorei(GL_UNPACK_ALIGNMENT, prevAlign);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
                 }
-                m_shader.setInt(input.name + "_" + std::to_string(i), ch);
+                input.textDirty = false;
+            }
+            const GlyphEncoded& enc = input.textEncoded;
+            // `<n>_len`: glyph slots after OVERFLOW (shim-only shaders: the shim window)
+            int len = (input.textShim && !input.textBufRef) ? enc.shimLen : enc.len;
+            m_shader.setInt(input.name + "_len", len);
+            if (input.textShim) {
+                for (int i = 0; i < shimCap && i < (int)enc.shimCodes.size(); i++) {
+                    m_shader.setInt(input.name + "_" + std::to_string(i), enc.shimCodes[i]);
+                }
+            }
+            if (input.textBufRef) {
+                if (textBufIndex < 3) {
+                    int unit = 13 + textBufIndex;
+                    auto it = m_textBufTex.find(input.name);
+                    glActiveTexture(GL_TEXTURE0 + unit);
+                    glBindTexture(GL_TEXTURE_2D, it != m_textBufTex.end() ? it->second : 0);
+                    m_shader.setInt("textBuf_" + input.name, unit);
+                    m_shader.setFloat(input.name + "_cap", (float)cap);
+                } else if (!m_loggedTextBufOverflow) {
+                    m_loggedTextBufOverflow = true;
+                    std::cerr << "ShaderSource: more than 3 glyph-buffer text inputs; '"
+                              << input.name << "' not bound (" << m_path << ")" << std::endl;
+                }
+                textBufIndex++;
             }
         }
         // image inputs: bind external texture if available
@@ -998,9 +1284,27 @@ void ShaderSource::setPoint2D(const std::string& name, const glm::vec2& v) {
 }
 
 void ShaderSource::setText(const std::string& name, const std::string& text) {
+    setTextRun(name, TextRun{text});
+}
+
+void ShaderSource::setTextRun(const std::string& name, const TextRun& run) {
     for (auto& input : m_inputs) {
         if (input.name == name && input.type == "text") {
-            input.value = text;
+            const std::string& cur = std::get<std::string>(input.value);
+            bool same = (cur == run.text) && (input.textRun.text == run.text) &&
+                        (input.textRun.speakerId == run.speakerId) &&
+                        (input.textRun.words.size() == run.words.size());
+            if (same) {
+                for (size_t i = 0; i < run.words.size(); ++i) {
+                    const auto& a = input.textRun.words[i]; const auto& b = run.words[i];
+                    if (a.start != b.start || a.end != b.end || a.revealMs != b.revealMs ||
+                        a.speakerId != b.speakerId) { same = false; break; }
+                }
+            }
+            if (same) return;   // unchanged: no re-encode / re-upload
+            input.value = run.text;
+            input.textRun = run;
+            input.textDirty = true;
             return;
         }
     }

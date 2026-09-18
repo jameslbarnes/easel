@@ -20,6 +20,10 @@ struct MaterialGroup {
     std::string name;
     Mesh3D mesh;
     bool textured = false; // true = receives projected texture, false = solid black
+    // -1 uses the current output zone's pre-warp composite. A non-negative
+    // value samples another OutputZone's completed warp texture, allowing one
+    // 3D object to place different live zone feeds on different materials.
+    int sourceZoneIndex = -1;
 };
 
 class ObjMeshWarp {
@@ -28,7 +32,9 @@ public:
     bool loadOBJ(const std::string& path);
     bool loadGLTF(const std::string& path);
     bool loadModel(const std::string& path); // auto-detect by extension
-    void render(GLuint sourceTexture, float aspect);
+    void render(GLuint sourceTexture, float aspect,
+                const std::vector<GLuint>* zoneTextures = nullptr,
+                int currentZoneIndex = -1);
 
     bool isLoaded() const;
     const std::string& meshPath() const { return m_meshPath; }
