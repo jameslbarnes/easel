@@ -347,8 +347,8 @@ private:
     float m_audioRMS = 0; // backward compat: smoothed audio level
     // Global "Audio -> Shaders" switch. When true, the full AudioFeatures bus is
     // fed to every shader's GLSL uniforms; when false, shaders get a neutral
-    // (zeroed) bus — the panic off-switch that the old "feed zeros" decision
-    // provided. The explicit per-param audio-binding system is independent.
+    // bus. Off also suspends audio parameter bindings, preserving their recipe
+    // and values; MIDI remains independent. Persisted in the project.
     bool m_audioToShaders = true;
     // Auto-connect the first MIDI controller so it "just works" without opening
     // it in the MIDI panel. Set true once the user explicitly picks "None",
@@ -590,6 +590,7 @@ private:
 
 #ifdef HAS_FFMPEG
     RTMPOutput m_rtmpOutput;
+    std::string m_streamZoneName; // optional OSC pin, independent of editor tabs
     char m_streamKeyBuf[128] = {};
     int m_streamAspect = 0; // 0=16:9, 1=4:3, 2=16:10, 3=Source
     VideoRecorder m_recorder;

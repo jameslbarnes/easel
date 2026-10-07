@@ -1337,6 +1337,12 @@ void ShaderSource::applyAudioBindings(float level, float bass, float mid, float 
 
     for (auto& [paramName, binding] : m_audioBindings) {
         if (binding.signal == AudioSignal::None) continue;
+        if (!m_audioEnabled && binding.signal != AudioSignal::MidiCC) {
+            // Hold the current parameter value without destroying its recipe.
+            // Re-enable from a fresh sample rather than a stale follower tail.
+            binding.hasSmoothed = false;
+            continue;
+        }
 
         // Get raw signal value (0-1)
         float raw = 0.0f;
@@ -1384,15 +1390,21 @@ void ShaderSource::applyAudioBindings(float level, float bass, float mid, float 
 }
 
 void ShaderSource::setAudioState(float rms, float bass, float mid, float high, GLuint fftTex) {
-    m_audioRMS = rms;
-    m_audioBass = bass;
-    m_audioMid = mid;
-    m_audioHigh = high;
-    m_audioFFTTex = fftTex;
+    m_audioRMS = m_audioEnabled ? rms : 0.0f;
+    m_audioBass = m_audioEnabled ? bass : 0.0f;
+    m_audioMid = m_audioEnabled ? mid : 0.0f;
+    m_audioHigh = m_audioEnabled ? high : 0.0f;
+    m_audioFFTTex = m_audioEnabled ? fftTex : 0;
 }
 
-void ShaderSource::setAudioFeatures(const AudioFeatures& f) {
-    m_af = f;
+void ShaderSource::setAudioEnabled(bool enabled) {
+    m_audioEnabled = enabled;
+    if (!enabled) setAudioFeatures(AudioFeatures{});
+}
+
+void ShaderSource::setAudioFeatures(const AudioFeatures& features) {
+    m_af = m_audioEnabled ? features : AudioFeatures{};
+    const auto& f = m_af;
     // Mirror the legacy fields so old shaders' audioLevel/Bass/Mid/High/FFT
     // keep their exact prior meaning (audioMid = merged lowMid+highMid).
     m_audioRMS  = f.level;

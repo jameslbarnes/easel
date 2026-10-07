@@ -153,6 +153,9 @@ public:
     // struct AND mirrors the legacy audioLevel/Bass/Mid/High/FFT fields so old
     // shaders keep working unchanged.
     void setAudioFeatures(const AudioFeatures& f);
+    // Master gate for the complete feature bus and audio bindings. MIDI and
+    // ordinary TIME animation remain independent. Off preserves binding recipes.
+    void setAudioEnabled(bool enabled);
 
     // Mouse state for interactive shaders (CFD paint, etc.)
     void setMouseState(float x, float y, bool down);
@@ -232,6 +235,7 @@ private:
     float m_audioRMS = 0, m_audioBass = 0, m_audioMid = 0, m_audioHigh = 0;
     GLuint m_audioFFTTex = 0;
     AudioFeatures m_af;   // full feature bus (uploaded alongside legacy fields)
+    bool m_audioEnabled = true;
 
     // Image input bindings (input name -> external texture)
     std::map<std::string, ImageBinding> m_imageBindings;

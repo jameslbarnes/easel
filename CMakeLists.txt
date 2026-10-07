@@ -238,8 +238,7 @@ endif()
 find_package(OpenGL REQUIRED)
 
 # Shader test harness
-add_executable(test_shaders
-    src/test_shaders.cpp
+set(SHADER_TEST_SOURCES
     src/sources/ShaderSource.cpp
     src/render/ShaderProgram.cpp
     src/render/Framebuffer.cpp
@@ -249,20 +248,24 @@ add_executable(test_shaders
     src/render/GlyphBuffer.cpp
     src/app/MIDIManager.cpp
 )
+add_executable(test_shaders src/test_shaders.cpp ${SHADER_TEST_SOURCES})
+add_executable(test_shader_audio tests/test_shader_audio.cpp ${SHADER_TEST_SOURCES})
+foreach(shader_test test_shaders test_shader_audio)
 if(APPLE)
-    target_sources(test_shaders PRIVATE src/app/MIDIManager_mac.mm)
+    target_sources(${shader_test} PRIVATE src/app/MIDIManager_mac.mm)
 endif()
 if(WIN32)
-    target_compile_definitions(test_shaders PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_definitions(${shader_test} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
-target_include_directories(test_shaders PRIVATE ${CMAKE_SOURCE_DIR}/src ${stb_SOURCE_DIR})
-target_link_libraries(test_shaders PRIVATE glfw glad glm::glm nlohmann_json::nlohmann_json OpenGL::GL)
+target_include_directories(${shader_test} PRIVATE ${CMAKE_SOURCE_DIR}/src ${stb_SOURCE_DIR})
+target_link_libraries(${shader_test} PRIVATE glfw glad glm::glm nlohmann_json::nlohmann_json OpenGL::GL)
 if(APPLE)
-    target_link_libraries(test_shaders PRIVATE
+    target_link_libraries(${shader_test} PRIVATE
         "-framework CoreMIDI"
         "-framework CoreFoundation"
     )
 endif()
+endforeach()
 
 if(WIN32)
     target_compile_definitions(${PROJECT_NAME} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -581,6 +584,13 @@ endif()
 # context (no GL call executes off the render path), so the WASAPI capture,
 # mix, encode, and mux chain can be exercised without launching Easel.
 if(FFMPEG_FOUND AND WIN32)
+    add_executable(test_rtmp_output tests/test_rtmp_output.cpp src/app/RTMPOutput.cpp)
+    target_compile_definitions(test_rtmp_output PRIVATE HAS_FFMPEG=1 NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_include_directories(test_rtmp_output PRIVATE ${CMAKE_SOURCE_DIR}/src "${FFMPEG_DIR}/include")
+    target_link_directories(test_rtmp_output PRIVATE "${FFMPEG_DIR}/lib")
+    target_link_libraries(test_rtmp_output PRIVATE glfw glad avformat avcodec avutil swscale swresample ole32)
+    add_custom_command(TARGET test_rtmp_output POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${FFMPEG_DLLS} $<TARGET_FILE_DIR:test_rtmp_output>)
     add_executable(test_video_recorder tests/test_video_recorder.cpp src/app/VideoRecorder.cpp)
     target_compile_definitions(test_video_recorder PRIVATE HAS_FFMPEG=1 NOMINMAX WIN32_LEAN_AND_MEAN)
     target_include_directories(test_video_recorder PRIVATE ${CMAKE_SOURCE_DIR}/src "${FFMPEG_DIR}/include")

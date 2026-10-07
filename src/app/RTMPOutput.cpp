@@ -2,6 +2,9 @@
 #include "app/RTMPOutput.h"
 #include <iostream>
 #include <cstring>
+#include <algorithm>
+#include <cstdlib>
+#include <cctype>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -35,6 +38,16 @@ bool RTMPOutput::start(const std::string& streamKey, int width, int height,
 bool RTMPOutput::startCustom(const std::string& url, int width, int height,
                               int aspectNum, int aspectDen, int fps) {
     stop();
+    m_stopRequested = false;
+    m_packetsWritten = 0;
+    m_videoPacketsWritten = 0;
+    m_videoTime = 0;
+    m_audioTime = 0;
+    m_audioCaptureGaps = 0;
+    m_audioSilenceFrames = 0;
+    m_idleAudioTarget = 0;
+    m_fps = fps;
+    m_nextReadback = 0;
     if (!initEncoder(url, width, height, aspectNum, aspectDen, fps)) {
         cleanup();
         return false;
@@ -45,8 +58,13 @@ bool RTMPOutput::startCustom(const std::string& url, int width, int height,
     m_droppedFrames = 0;
     m_videoFrameIndex = 0;
     m_audioSamplesWritten = 0;
+    m_audioClock.reset();
+    if (m_captureClient && m_audioCodecCtx) {
+        m_audioThread = std::thread(&RTMPOutput::captureAudioThread, this);
+        m_audioEncodeThread = std::thread(&RTMPOutput::encodeAudioThread, this);
+    }
     m_thread = std::thread(&RTMPOutput::encodeThread, this);
-    std::cout << "[RTMP] Streaming to: " << url << std::endl;
+    std::cout << "[RTMP] Streaming started" << std::endl;
     return true;
 }
 
@@ -56,6 +74,8 @@ void RTMPOutput::stop() {
         m_cv.notify_all();
         if (m_thread.joinable())
             m_thread.join();
+        if (m_audioThread.joinable())
+            m_audioThread.join();
         m_active = false;
         std::cout << "[RTMP] Stream stopped. Dropped frames: " << m_droppedFrames << std::endl;
     }
@@ -65,6 +85,27 @@ void RTMPOutput::stop() {
 double RTMPOutput::uptimeSeconds() const {
     if (!m_active) return 0;
     return av_gettime_relative() / 1000000.0 - m_startTime;
+}
+
+int RTMPOutput::interruptIO(void* opaque) {
+    auto* output = static_cast<RTMPOutput*>(opaque);
+    const auto deadline = output->m_ioDeadline.load();
+    return deadline > 0 && av_gettime_relative() > deadline;
+}
+
+int RTMPOutput::writePacket(AVPacket* packet) {
+    if (!packet) packet = m_packet;
+    std::lock_guard<std::mutex> lock(m_muxMutex);
+    const bool video = m_videoStream && packet->stream_index == m_videoStream->index;
+    m_ioDeadline = av_gettime_relative() + 5000000;
+    int result = av_interleaved_write_frame(m_fmtCtx, packet);
+    m_ioDeadline = 0;
+    if (result < 0) m_stopRequested = true;
+    else {
+        ++m_packetsWritten;
+        if (video) ++m_videoPacketsWritten;
+    }
+    return result;
 }
 
 // ─── WASAPI loopback init ───────────────────────────────────────────
@@ -83,10 +124,61 @@ bool RTMPOutput::initAudioCapture() {
     }
 
     IMMDevice* device = nullptr;
-    hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
+    bool loopback = true;
+    // Use the installation's program-audio route. Virtual-cable installations
+    // often have a silent default render endpoint; the cable capture endpoint
+    // carries the actual show. A stream-specific override takes precedence.
+    const char* configured = std::getenv("EASEL_STREAM_AUDIO");
+    if (!configured || !configured[0]) configured = std::getenv("EASEL_RECORD_SYS");
+    if (configured && configured[0]) {
+        std::string needle = configured;
+        std::transform(needle.begin(), needle.end(), needle.begin(),
+                       [](unsigned char c) { return (char)std::tolower(c); });
+        IMMDeviceCollection* collection = nullptr;
+        if (SUCCEEDED(enumerator->EnumAudioEndpoints(eAll, DEVICE_STATE_ACTIVE, &collection))) {
+            UINT count = 0;
+            collection->GetCount(&count);
+            for (UINT i = 0; i < count && !device; ++i) {
+                IMMDevice* candidate = nullptr;
+                if (FAILED(collection->Item(i, &candidate))) continue;
+                IPropertyStore* properties = nullptr;
+                bool match = false;
+                if (SUCCEEDED(candidate->OpenPropertyStore(STGM_READ, &properties))) {
+                    PROPVARIANT value;
+                    PropVariantInit(&value);
+                    PROPERTYKEY nameKey = {{0xa45c254e, 0xdf1c, 0x4efd,
+                        {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}}, 14};
+                    if (SUCCEEDED(properties->GetValue(nameKey, &value)) && value.vt == VT_LPWSTR) {
+                        char name[1024] = {};
+                        WideCharToMultiByte(CP_UTF8, 0, value.pwszVal, -1, name, sizeof(name), nullptr, nullptr);
+                        std::string lower = name;
+                        std::transform(lower.begin(), lower.end(), lower.begin(),
+                                       [](unsigned char c) { return (char)std::tolower(c); });
+                        match = lower.find(needle) != std::string::npos;
+                    }
+                    PropVariantClear(&value);
+                    properties->Release();
+                }
+                if (match) {
+                    IMMEndpoint* endpoint = nullptr;
+                    EDataFlow flow = eRender;
+                    if (SUCCEEDED(candidate->QueryInterface(__uuidof(IMMEndpoint), (void**)&endpoint))) {
+                        endpoint->GetDataFlow(&flow);
+                        endpoint->Release();
+                    }
+                    loopback = flow == eRender;
+                    device = candidate;
+                } else candidate->Release();
+            }
+            collection->Release();
+        }
+        hr = device ? S_OK : E_FAIL;
+    } else {
+        hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
+    }
     enumerator->Release();
     if (FAILED(hr)) {
-        std::cerr << "[RTMP] No default audio output device" << std::endl;
+        std::cerr << "[RTMP] Program audio device unavailable" << std::endl;
         return false;
     }
     m_audioDevice = device;
@@ -112,10 +204,11 @@ bool RTMPOutput::initAudioCapture() {
               << m_wasapiChannels << " ch" << std::endl;
 
     // Initialize in loopback mode (capture system audio output)
-    // Use 50ms buffer — enough headroom, low latency
-    REFERENCE_TIME bufferDuration = 500000; // 50ms in 100ns units
+    // Capacity for scheduling hiccups, not an added playback delay: a dedicated
+    // capture thread drains available packets every 5 ms.
+    REFERENCE_TIME bufferDuration = 2000000; // 200ms in 100ns units
     hr = audioClient->Initialize(AUDCLNT_SHAREMODE_SHARED,
-                                  AUDCLNT_STREAMFLAGS_LOOPBACK,
+                                  loopback ? AUDCLNT_STREAMFLAGS_LOOPBACK : 0,
                                   bufferDuration, 0, mixFmt, nullptr);
     CoTaskMemFree(mixFmt);
     if (FAILED(hr)) {
@@ -153,6 +246,7 @@ bool RTMPOutput::initEncoder(const std::string& url, int width, int height,
                               int aspectNum, int aspectDen, int fps) {
     m_width = width;
     m_height = height;
+    if (width < 2 || height < 2 || fps <= 0) return false;
 
     // Compute center crop to target aspect ratio
     if (aspectNum > 0 && aspectDen > 0) {
@@ -224,43 +318,61 @@ bool RTMPOutput::initEncoder(const std::string& url, int width, int height,
     }
 
     // ── Video stream (H.264) ──
-    const AVCodec* videoCodec = avcodec_find_encoder(AV_CODEC_ID_H264);
-    if (!videoCodec) {
-        std::cerr << "[RTMP] H.264 encoder not found" << std::endl;
-        return false;
-    }
-
-    m_videoStream = avformat_new_stream(m_fmtCtx, videoCodec);
+    const char* requested = std::getenv("EASEL_STREAM_ENCODER");
+    const AVCodec* hardware = (!requested || std::string(requested) != "software")
+        ? avcodec_find_encoder_by_name("h264_nvenc") : nullptr;
+    const AVCodec* software = avcodec_find_encoder(AV_CODEC_ID_H264);
+    m_videoStream = avformat_new_stream(m_fmtCtx, nullptr);
     if (!m_videoStream) return false;
 
-    m_videoCodecCtx = avcodec_alloc_context3(videoCodec);
-    if (!m_videoCodecCtx) return false;
-
-    m_videoCodecCtx->width = m_encWidth;
-    m_videoCodecCtx->height = m_encHeight;
-    m_videoCodecCtx->time_base = {1, fps};
-    m_videoCodecCtx->framerate = {fps, 1};
-    m_videoCodecCtx->pix_fmt = AV_PIX_FMT_YUV420P;
-    m_videoCodecCtx->gop_size = fps * 2;
-    m_videoCodecCtx->max_b_frames = 2;
-    m_videoCodecCtx->bit_rate = 4500000;
-
-    av_opt_set(m_videoCodecCtx->priv_data, "preset", "veryfast", 0);
-    av_opt_set(m_videoCodecCtx->priv_data, "tune", "zerolatency", 0);
-    av_opt_set(m_videoCodecCtx->priv_data, "profile", "high", 0);
-
-    if (m_fmtCtx->oformat->flags & AVFMT_GLOBALHEADER)
-        m_videoCodecCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-
-    ret = avcodec_open2(m_videoCodecCtx, videoCodec, nullptr);
-    if (ret < 0) {
-        char err[128]; av_strerror(ret, err, sizeof(err));
-        std::cerr << "[RTMP] Failed to open video encoder: " << err << std::endl;
+    // Use NVENC's dedicated engine when available. Fall back cleanly on hosts
+    // without a usable NVIDIA device; no hardware requirement for the app.
+    for (const AVCodec* codec : {hardware, software}) {
+        if (!codec) continue;
+        m_videoCodecCtx = avcodec_alloc_context3(codec);
+        if (!m_videoCodecCtx) return false;
+        m_videoCodecCtx->width = m_encWidth;
+        m_videoCodecCtx->height = m_encHeight;
+        m_videoCodecCtx->time_base = {1, fps};
+        m_videoCodecCtx->framerate = {fps, 1};
+        m_videoCodecCtx->pix_fmt = AV_PIX_FMT_YUV420P;
+        m_videoCodecCtx->gop_size = fps * 2;
+        m_videoCodecCtx->max_b_frames = 0;
+        m_videoCodecCtx->bit_rate = m_encHeight >= 1080 ? 6000000 : 4500000;
+        m_videoCodecCtx->rc_max_rate = m_videoCodecCtx->bit_rate;
+        m_videoCodecCtx->rc_buffer_size = static_cast<int>(m_videoCodecCtx->bit_rate);
+        if (codec == hardware) {
+            av_opt_set(m_videoCodecCtx->priv_data, "preset", "p3", 0);
+            av_opt_set(m_videoCodecCtx->priv_data, "tune", "ull", 0);
+            av_opt_set(m_videoCodecCtx->priv_data, "rc", "cbr", 0);
+            av_opt_set(m_videoCodecCtx->priv_data, "zerolatency", "1", 0);
+            av_opt_set(m_videoCodecCtx->priv_data, "rc-lookahead", "0", 0);
+            av_opt_set(m_videoCodecCtx->priv_data, "delay", "0", 0);
+            const char* gpu = std::getenv("EASEL_STREAM_GPU");
+            av_opt_set(m_videoCodecCtx->priv_data, "gpu", gpu ? gpu : "0", 0);
+        } else {
+            av_opt_set(m_videoCodecCtx->priv_data, "preset", "veryfast", 0);
+            av_opt_set(m_videoCodecCtx->priv_data, "tune", "zerolatency", 0);
+        }
+        av_opt_set(m_videoCodecCtx->priv_data, "profile", "high", 0);
+        if (m_fmtCtx->oformat->flags & AVFMT_GLOBALHEADER)
+            m_videoCodecCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+        ret = avcodec_open2(m_videoCodecCtx, codec, nullptr);
+        if (ret >= 0) {
+            m_videoEncoder = codec->name;
+            std::cout << "[RTMP] Video encoder: " << m_videoEncoder << std::endl;
+            break;
+        }
+        avcodec_free_context(&m_videoCodecCtx);
+    }
+    if (!m_videoCodecCtx) {
+        std::cerr << "[RTMP] No usable H.264 encoder" << std::endl;
         return false;
     }
 
     avcodec_parameters_from_context(m_videoStream->codecpar, m_videoCodecCtx);
     m_videoStream->time_base = m_videoCodecCtx->time_base;
+    m_videoStream->avg_frame_rate = {fps, 1};
 
     // Video frame + converter (handles both colorspace conversion and scaling)
     m_videoFrame = av_frame_alloc();
@@ -355,8 +467,18 @@ bool RTMPOutput::initEncoder(const std::string& url, int width, int height,
 
     // ── Open RTMP connection and write header ──
     m_packet = av_packet_alloc();
+    m_audioPacket = av_packet_alloc();
 
-    ret = avio_open(&m_fmtCtx->pb, url.c_str(), AVIO_FLAG_WRITE);
+    m_fmtCtx->interrupt_callback = {&RTMPOutput::interruptIO, this};
+    // Do not let one stalled track accumulate seconds of the other in the muxer.
+    m_fmtCtx->max_interleave_delta = 100000;
+    m_fmtCtx->flags |= AVFMT_FLAG_FLUSH_PACKETS;
+    m_ioDeadline = av_gettime_relative() + 5000000;
+    AVDictionary* ioOptions = nullptr;
+    av_dict_set(&ioOptions, "rw_timeout", "5000000", 0);
+    ret = avio_open2(&m_fmtCtx->pb, url.c_str(), AVIO_FLAG_WRITE,
+                    &m_fmtCtx->interrupt_callback, &ioOptions);
+    av_dict_free(&ioOptions);
     if (ret < 0) {
         char err[128]; av_strerror(ret, err, sizeof(err));
         std::cerr << "[RTMP] Failed to open URL: " << err << std::endl;
@@ -369,6 +491,7 @@ bool RTMPOutput::initEncoder(const std::string& url, int width, int height,
         std::cerr << "[RTMP] Failed to write header: " << err << std::endl;
         return false;
     }
+    m_ioDeadline = 0;
 
     // Allocate readback buffers
     m_readbackBuf.resize(width * height * 4);
@@ -380,7 +503,14 @@ bool RTMPOutput::initEncoder(const std::string& url, int width, int height,
 // ─── GL readback (main thread) ──────────────────────────────────────
 
 void RTMPOutput::sendFrame(GLuint texture, int w, int h) {
-    if (!m_active || w != m_width || h != m_height) return;
+    if (!isActive()) return;
+    if (w != m_width || h != m_height) {
+        m_stopRequested = true; // supervisor can reopen with the new geometry
+        return;
+    }
+    double now = av_gettime_relative() / 1000000.0;
+    if (now < m_nextReadback) return;
+    m_nextReadback = std::max(m_nextReadback + 1.0 / m_fps, now);
 
     size_t bytes = (size_t)w * h * 4;
 
@@ -437,47 +567,123 @@ void RTMPOutput::sendFrame(GLuint texture, int w, int h) {
 
 // ─── Audio drain (called from encode thread) ────────────────────────
 
-void RTMPOutput::drainAudio() {
-    if (!m_captureClient || !m_audioCodecCtx) return;
-
+void RTMPOutput::captureAudioThread() {
 #ifdef _WIN32
-    IAudioCaptureClient* capture = (IAudioCaptureClient*)m_captureClient;
-
-    UINT32 packetLength = 0;
-    capture->GetNextPacketSize(&packetLength);
-
-    while (packetLength > 0) {
-        BYTE* data = nullptr;
-        UINT32 numFrames = 0;
-        DWORD flags = 0;
-
-        HRESULT hr = capture->GetBuffer(&data, &numFrames, &flags, nullptr, nullptr);
-        if (FAILED(hr)) break;
-
-        if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
-            // Insert silence
-            std::vector<float> silence(numFrames * m_wasapiChannels, 0.0f);
-            encodeAudioSamples(silence.data(), numFrames, m_wasapiChannels);
-        } else {
-            encodeAudioSamples((const float*)data, numFrames, m_wasapiChannels);
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+    auto* capture = static_cast<IAudioCaptureClient*>(m_captureClient);
+    bool first = true;
+    double lastCapture = uptimeSeconds();
+    while (!m_stopRequested) {
+        UINT32 packetLength = 0;
+        if (FAILED(capture->GetNextPacketSize(&packetLength))) {
+            m_stopRequested = true;
+            break;
         }
-
-        capture->ReleaseBuffer(numFrames);
-        capture->GetNextPacketSize(&packetLength);
+        while (packetLength > 0 && !m_stopRequested) {
+            BYTE* data = nullptr;
+            UINT32 frames = 0;
+            DWORD flags = 0;
+            UINT64 position = 0, qpc = 0;
+            if (FAILED(capture->GetBuffer(&data, &frames, &flags, &position, &qpc))) {
+                m_stopRequested = true;
+                break;
+            }
+            CapturedAudio packet;
+            packet.frames = frames;
+            packet.position = position;
+            packet.timestampValid = !(flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR);
+            double elapsed = uptimeSeconds();
+            double age = double(frames) / m_wasapiSampleRate;
+            if (packet.timestampValid) {
+                LARGE_INTEGER counter, frequency;
+                QueryPerformanceCounter(&counter);
+                QueryPerformanceFrequency(&frequency);
+                age = double(counter.QuadPart) / frequency.QuadPart - double(qpc) / 10000000.0;
+            }
+            packet.wallSample = static_cast<int64_t>((elapsed - std::max(0.0, age)) * m_wasapiSampleRate);
+            packet.samples.resize(size_t(frames) * m_wasapiChannels, 0.0f);
+            if (!(flags & AUDCLNT_BUFFERFLAGS_SILENT))
+                std::memcpy(packet.samples.data(), data, packet.samples.size() * sizeof(float));
+            // Release WASAPI before taking any queue lock, encoding or network IO.
+            capture->ReleaseBuffer(frames);
+            if (!first && (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY))
+                ++m_audioCaptureGaps;
+            first = false;
+            {
+                std::lock_guard<std::mutex> lock(m_audioMutex);
+                m_queuedAudioFrames += frames;
+                m_audioQueue.push_back(std::move(packet));
+                lastCapture = uptimeSeconds();
+                m_idleAudioTarget = 0;
+                // Bounded storage even if the network blocks until its timeout.
+                while (m_queuedAudioFrames > size_t(m_wasapiSampleRate) && m_audioQueue.size() > 1) {
+                    m_queuedAudioFrames -= m_audioQueue.front().frames;
+                    m_audioQueue.pop_front();
+                    ++m_audioCaptureGaps;
+                }
+            }
+            if (FAILED(capture->GetNextPacketSize(&packetLength))) {
+                m_stopRequested = true;
+                break;
+            }
+        }
+        // Only the capture thread can distinguish an idle device from samples
+        // waiting in WASAPI while this thread was descheduled during a scene cut.
+        // Drain all available packets first. An encoder-side wall-clock deadline
+        // used to insert silence and then discard those valid, delayed samples.
+        if (uptimeSeconds() - lastCapture >= 0.250) {
+            std::lock_guard<std::mutex> lock(m_audioMutex);
+            m_idleAudioTarget = static_cast<int64_t>((uptimeSeconds() - 0.060) * m_wasapiSampleRate);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
+    CoUninitialize();
 #endif
 }
 
+void RTMPOutput::drainAudio() {
+    if (!m_captureClient || !m_audioCodecCtx) return;
+    std::deque<CapturedAudio> packets;
+    int64_t idleTarget = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_audioMutex);
+        packets.swap(m_audioQueue);
+        m_queuedAudioFrames = 0;
+        idleTarget = m_idleAudioTarget;
+    }
+    for (const auto& packet : packets) {
+        if (m_stopRequested) break;
+        int64_t begin = m_audioClock.sampleAt(packet.position, packet.wallSample, packet.timestampValid);
+        m_audioClock.advance(begin, packet.frames);
+        int64_t end = m_audioSamplesWritten + m_audioAccum.size() / m_wasapiChannels;
+        if (begin > end) {
+            encodeAudioSamples(nullptr, static_cast<int>(begin - end), m_wasapiChannels);
+            end = begin;
+        }
+        int skip = static_cast<int>(std::min<int64_t>(packet.frames, std::max<int64_t>(0, end - begin)));
+        if (skip < static_cast<int>(packet.frames))
+            encodeAudioSamples(packet.samples.data() + skip * m_wasapiChannels,
+                packet.frames - skip, m_wasapiChannels);
+    }
+    // Fill only silence confirmed by the capture thread, never a scheduling gap.
+    int64_t end = m_audioSamplesWritten + m_audioAccum.size() / m_wasapiChannels;
+    if (idleTarget > end && !m_stopRequested)
+        encodeAudioSamples(nullptr, static_cast<int>(idleTarget - end), m_wasapiChannels);
+}
+
 void RTMPOutput::encodeAudioSamples(const float* data, int numSamples, int channels) {
+    if (!data) m_audioSilenceFrames += numSamples;
     // Accumulate interleaved float samples, encode when we have a full AAC frame
     int totalFloats = numSamples * channels;
-    m_audioAccum.insert(m_audioAccum.end(), data, data + totalFloats);
+    if (data) m_audioAccum.insert(m_audioAccum.end(), data, data + totalFloats);
+    else m_audioAccum.insert(m_audioAccum.end(), totalFloats, 0.0f);
 
     // Process complete frames (m_audioFrameSize samples * channels)
     int samplesPerFrame = m_audioFrameSize; // in sample-sets (not individual floats)
     int floatsPerFrame = samplesPerFrame * channels;
 
-    while ((int)m_audioAccum.size() >= floatsPerFrame) {
+    while (!m_stopRequested && (int)m_audioAccum.size() >= floatsPerFrame) {
         av_frame_make_writable(m_audioFrame);
         m_audioFrame->nb_samples = samplesPerFrame;
 
@@ -490,18 +696,20 @@ void RTMPOutput::encodeAudioSamples(const float* data, int numSamples, int chann
         if (converted > 0) {
             m_audioFrame->pts = m_audioSamplesWritten;
             m_audioSamplesWritten += converted;
+            m_audioTime = double(m_audioSamplesWritten) / m_wasapiSampleRate;
 
             int ret = avcodec_send_frame(m_audioCodecCtx, m_audioFrame);
             while (ret >= 0) {
-                ret = avcodec_receive_packet(m_audioCodecCtx, m_packet);
+                ret = avcodec_receive_packet(m_audioCodecCtx, m_audioPacket);
                 if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
                 if (ret < 0) break;
 
-                av_packet_rescale_ts(m_packet,
+                av_packet_rescale_ts(m_audioPacket,
                     m_audioCodecCtx->time_base, m_audioStream->time_base);
-                m_packet->stream_index = m_audioStream->index;
-                av_interleaved_write_frame(m_fmtCtx, m_packet);
-                av_packet_unref(m_packet);
+                m_audioPacket->stream_index = m_audioStream->index;
+                int written = writePacket(m_audioPacket);
+                av_packet_unref(m_audioPacket);
+                if (written < 0) break;
             }
         }
 
@@ -512,31 +720,72 @@ void RTMPOutput::encodeAudioSamples(const float* data, int numSamples, int chann
 
 // ─── Encode thread ──────────────────────────────────────────────────
 
+void RTMPOutput::encodeAudioThread() {
+#ifdef _WIN32
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+#endif
+    while (!m_stopRequested) {
+        drainAudio();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    // Flush audio encoder
+    if (m_audioCodecCtx) {
+        avcodec_send_frame(m_audioCodecCtx, nullptr);
+        while (avcodec_receive_packet(m_audioCodecCtx, m_audioPacket) == 0) {
+            av_packet_rescale_ts(m_audioPacket, m_audioCodecCtx->time_base, m_audioStream->time_base);
+            m_audioPacket->stream_index = m_audioStream->index;
+            int written = writePacket(m_audioPacket);
+            av_packet_unref(m_audioPacket);
+            if (written < 0) break;
+        }
+    }
+
+}
+
 void RTMPOutput::encodeThread() {
 #ifdef _WIN32
     // COM init for this thread (WASAPI calls happen here via drainAudio)
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 #endif
 
+    std::vector<uint8_t> frame;
     while (!m_stopRequested) {
+        // CFR belongs to the encoder clock, not the renderer's arrival rate.
+        // Repeat the latest image through render stalls. If video encoding itself
+        // stalls, skip overdue slots instead of restarting uninterrupted audio or
+        // sending a burst of stale video. Both tracks retain wall-clock time.
+        double due = double(m_videoFrameIndex) / m_fps;
+        double elapsed = uptimeSeconds();
+        if (!frame.empty() && elapsed - due > 2.0 / m_fps) {
+            auto current = static_cast<int64_t>(elapsed * m_fps);
+            m_droppedFrames += static_cast<int>(current - m_videoFrameIndex);
+            m_videoFrameIndex = current;
+            due = double(current) / m_fps;
+        }
         std::unique_lock<std::mutex> lock(m_mutex);
-        m_cv.wait_for(lock, std::chrono::milliseconds(20), [this] {
-            return m_frameReady || m_stopRequested.load();
-        });
+        if (elapsed < due || frame.empty()) {
+            auto wait = std::chrono::duration<double>(frame.empty() ? 0.005 : std::min(0.005, due - elapsed));
+            m_cv.wait_for(lock, wait, [this] { return m_stopRequested.load(); });
+        }
 
         if (m_stopRequested) break;
 
         bool hasVideo = m_frameReady;
-        if (hasVideo) m_frameReady = false;
+        if (hasVideo) {
+            frame.swap(m_encodeBuf); // producer cannot overwrite a frame being encoded
+            m_frameReady = false;
+        }
         lock.unlock();
 
-        // Always drain audio, even if no video frame this tick
-        drainAudio();
-
-        if (hasVideo) {
-            encodeVideoFrame(m_encodeBuf.data(), m_width, m_height);
+        if (!frame.empty() && !m_stopRequested && uptimeSeconds() >= due) {
+            if (m_videoFrameIndex == 0)
+                m_videoFrameIndex = static_cast<int64_t>(uptimeSeconds() * m_fps);
+            encodeVideoFrame(frame.data(), m_width, m_height);
         }
     }
+
+    // Audio owns its codec and packets; finish it before writing the trailer.
+    if (m_audioEncodeThread.joinable()) m_audioEncodeThread.join();
 
     // Flush video encoder
     if (m_videoCodecCtx) {
@@ -544,23 +793,14 @@ void RTMPOutput::encodeThread() {
         while (avcodec_receive_packet(m_videoCodecCtx, m_packet) == 0) {
             av_packet_rescale_ts(m_packet, m_videoCodecCtx->time_base, m_videoStream->time_base);
             m_packet->stream_index = m_videoStream->index;
-            av_interleaved_write_frame(m_fmtCtx, m_packet);
+            int written = writePacket();
             av_packet_unref(m_packet);
-        }
-    }
-
-    // Flush audio encoder
-    if (m_audioCodecCtx) {
-        avcodec_send_frame(m_audioCodecCtx, nullptr);
-        while (avcodec_receive_packet(m_audioCodecCtx, m_packet) == 0) {
-            av_packet_rescale_ts(m_packet, m_audioCodecCtx->time_base, m_audioStream->time_base);
-            m_packet->stream_index = m_audioStream->index;
-            av_interleaved_write_frame(m_fmtCtx, m_packet);
-            av_packet_unref(m_packet);
+            if (written < 0) break;
         }
     }
 
     if (m_fmtCtx && m_fmtCtx->pb) {
+        m_ioDeadline = av_gettime_relative() + 5000000;
         av_write_trailer(m_fmtCtx);
     }
 
@@ -578,6 +818,7 @@ void RTMPOutput::encodeVideoFrame(const uint8_t* rgbaData, int /*w*/, int /*h*/)
               m_videoFrame->data, m_videoFrame->linesize);
 
     m_videoFrame->pts = m_videoFrameIndex++;
+    m_videoTime = double(m_videoFrame->pts) / m_fps;
 
     int ret = avcodec_send_frame(m_videoCodecCtx, m_videoFrame);
     if (ret < 0) return;
@@ -590,13 +831,13 @@ void RTMPOutput::encodeVideoFrame(const uint8_t* rgbaData, int /*w*/, int /*h*/)
         av_packet_rescale_ts(m_packet, m_videoCodecCtx->time_base, m_videoStream->time_base);
         m_packet->stream_index = m_videoStream->index;
 
-        ret = av_interleaved_write_frame(m_fmtCtx, m_packet);
+        ret = writePacket();
+        av_packet_unref(m_packet);
         if (ret < 0) {
             std::cerr << "[RTMP] Write error — connection lost?" << std::endl;
             m_stopRequested = true;
             break;
         }
-        av_packet_unref(m_packet);
     }
 }
 
@@ -629,6 +870,8 @@ void RTMPOutput::cleanupAudio() {
     if (m_audioCodecCtx) { avcodec_free_context(&m_audioCodecCtx); }
     m_audioStream = nullptr;
     m_audioAccum.clear();
+    m_audioQueue.clear();
+    m_queuedAudioFrames = 0;
 }
 
 void RTMPOutput::cleanup() {
@@ -641,8 +884,10 @@ void RTMPOutput::cleanup() {
     if (m_swsCtx) { sws_freeContext(m_swsCtx); m_swsCtx = nullptr; }
     if (m_videoFrame) { av_frame_free(&m_videoFrame); }
     if (m_packet) { av_packet_free(&m_packet); }
+    if (m_audioPacket) { av_packet_free(&m_audioPacket); }
     if (m_videoCodecCtx) { avcodec_free_context(&m_videoCodecCtx); }
     if (m_fmtCtx) {
+        m_ioDeadline = av_gettime_relative() + 5000000;
         if (m_fmtCtx->pb) avio_closep(&m_fmtCtx->pb);
         avformat_free_context(m_fmtCtx);
         m_fmtCtx = nullptr;
@@ -651,6 +896,7 @@ void RTMPOutput::cleanup() {
     m_readbackBuf.clear();
     m_encodeBuf.clear();
     m_frameReady = false;
+    m_ioDeadline = 0;
 }
 
 #endif // HAS_FFMPEG

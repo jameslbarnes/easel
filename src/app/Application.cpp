@@ -1760,14 +1760,10 @@ void Application::updateSources() {
                     if (sw == 0 || sh == 0) { sw = activeZone().width; sh = activeZone().height; }
                 }
                 shaderSrc->setResolution(sw, sh);
-                // Baked-in audio reactivity removed: shaders no longer receive
-                // live audio in their GLSL uniforms (audioBass/Mid/High/Level/
-                // FFT). Audio reactivity is now ONLY the explicit, editable
-                // parameter-binding system below (per-param sparkle bindings +
-                // the "Audio Reactivity On" quick-bind button), which reads the
-                // analyzer directly and animates param VALUES. Feeding zeros
-                // neutralizes every `audioReact`-style shader globally without
-                // editing the shader files; they fall back to base visuals.
+                // One global gate covers both GLSL audio uniforms and audio
+                // parameter bindings. Clear the complete feature bus on Off,
+                // including extended features and audio-driven clocks.
+                shaderSrc->setAudioEnabled(m_audioToShaders);
                 // A layer exclusively owned by one mic-active zone (see
                 // zoneAudioOwner above) reacts to that zone's own push-to-talk
                 // mic instead of the shared global analyzer — both the Audio
@@ -1850,11 +1846,9 @@ void Application::updateSources() {
                     af.stemAirPresence    = a.stemPresence(AudioAnalyzer::StemAir);
                     af.stemVocalPresence  = a.stemPresence(AudioAnalyzer::StemVocal);
                     shaderSrc->setAudioFeatures(af);
-                } else {
-                    shaderSrc->setAudioState(0.0f, 0.0f, 0.0f, 0.0f, 0); // global neutralize
                 }
-                // Per-param "sparkle" bindings read the analyzer directly and
-                // aren't gated by m_audioToShaders. The song-arc signals
+                // Per-param "sparkle" bindings read the analyzer directly;
+                // ShaderSource applies the same global gate. The song-arc signals
                 // (energy/build/drop/silence/momentum) default to the shared
                 // global analyzer computed once above; a zone-owned layer gets
                 // its own zone mic's version of the same signals instead.
@@ -3011,19 +3005,30 @@ void Application::presentOutputs() {
         }
     }
 
-    // Global outputs (stream/record) — the stream follows the active zone;
+    // Global outputs (stream/record) — automated streams can pin a zone;
     // the recorder may be PINNED to a zone (auto-record pins to Main, same
     // rationale as the Lu sender above: the session archive must not follow
     // editor tab clicks).
     auto& active = activeZone();
 #ifdef HAS_FFMPEG
+    if (!m_rtmpOutput.isActive()) m_streamZoneName.clear();
+    OutputZone* streamZone = &active;
+    if (!m_streamZoneName.empty()) {
+        streamZone = nullptr;
+        for (auto& zone : m_zones)
+            if (zone->name == m_streamZoneName) streamZone = zone.get();
+        if (!streamZone) m_rtmpOutput.stop();
+    }
     OutputZone& recZone =
         (m_recordZoneIndex >= 0 && m_recordZoneIndex < (int)m_zones.size())
             ? *m_zones[m_recordZoneIndex] : active;
-    if (m_rtmpOutput.isActive() || (m_recorder.isActive() && &recZone == &active))
+    if ((m_rtmpOutput.isActive() && streamZone == &active) || (m_recorder.isActive() && &recZone == &active))
         renderReadbackFBO(active);
     if (m_recorder.isActive() && &recZone != &active)
         renderReadbackFBO(recZone);
+    if (m_rtmpOutput.isActive() && streamZone != &active &&
+        !(m_recorder.isActive() && streamZone == &recZone))
+        renderReadbackFBO(*streamZone);
 #endif
 
 #ifdef HAS_NDI
@@ -3050,7 +3055,7 @@ void Application::presentOutputs() {
 
 #ifdef HAS_FFMPEG
     if (m_rtmpOutput.isActive()) {
-        m_rtmpOutput.sendFrame(active.readbackFBO.textureId(), active.width, active.height);
+        m_rtmpOutput.sendFrame(streamZone->readbackFBO.textureId(), streamZone->width, streamZone->height);
     }
     if (m_recorder.isActive()) {
         m_recorder.sendFrame(recZone.readbackFBO.textureId(), recZone.width, recZone.height);
@@ -4059,6 +4064,7 @@ void Application::renderUI() {
             } else if (msg.address == "/easel/audio/toshaders" && !msg.ints.empty()) {
                 // Global Audio -> Shaders switch (the panic off-switch).
                 m_audioToShaders = (msg.ints[0] != 0);
+                saveProject(defaultProjectPath());
 #ifdef HAS_FFMPEG
             } else if (msg.address == "/easel/record/start") {
                 // /easel/record/start [<path>] — headless recording, same code
@@ -4077,13 +4083,43 @@ void Application::renderUI() {
                 // uses the default ingest (start); a full rtmp(s):// URL streams
                 // to a custom ingest (startCustom). Idempotent while active.
                 if (!m_rtmpOutput.isActive()) {
-                    auto& z = activeZone();
+                    OutputZone* selected = &activeZone();
+                    std::string pin = msg.strings.size() > 1 ? msg.strings[1] : "";
+                    if (!pin.empty()) {
+                        selected = nullptr;
+                        for (auto& zone : m_zones)
+                            if (zone->name == pin) selected = zone.get();
+                        if (!selected) continue;
+                    }
+                    auto& z = *selected;
                     const std::string& dest = msg.strings[0];
                     bool isUrl = dest.rfind("rtmp://", 0) == 0 || dest.rfind("rtmps://", 0) == 0;
                     bool ok = isUrl
                         ? m_rtmpOutput.startCustom(dest, z.warpFBO.width(), z.warpFBO.height(), 16, 9, 30)
                         : m_rtmpOutput.start(dest, z.warpFBO.width(), z.warpFBO.height(), 16, 9, 30);
                     if (!ok) std::cerr << "[RTMP] OSC stream start failed\n";
+                    else m_streamZoneName = pin;
+                }
+            } else if (msg.address == "/easel/rtmp/status" && !msg.ints.empty()) {
+                // Loopback-only reply; never include the destination or stream key.
+                int port = msg.ints[0];
+                if (port > 0 && port <= 65535) {
+                    OSCManager reply;
+                    reply.setSendTarget("127.0.0.1", port);
+                    reply.sendString("/easel/rtmp/status", json({
+                        {"active", m_rtmpOutput.isActive()},
+                        {"zone", m_streamZoneName},
+                        {"packetsWritten", m_rtmpOutput.packetsWritten()},
+                        {"videoPacketsWritten", m_rtmpOutput.videoPacketsWritten()},
+                        {"width", m_rtmpOutput.outputWidth()},
+                        {"height", m_rtmpOutput.outputHeight()},
+                        {"videoTimeSeconds", m_rtmpOutput.videoTimeSeconds()},
+                        {"audioTimeSeconds", m_rtmpOutput.audioTimeSeconds()},
+                        {"videoEncoder", m_rtmpOutput.videoEncoder()},
+                        {"audioCaptureGaps", m_rtmpOutput.audioCaptureGaps()},
+                        {"audioSilenceFrames", m_rtmpOutput.audioSilenceFrames()},
+                        {"uptimeSeconds", m_rtmpOutput.uptimeSeconds()}
+                    }).dump());
                 }
             } else if (msg.address == "/easel/rtmp/stop") {
                 if (m_rtmpOutput.isActive()) m_rtmpOutput.stop();
@@ -13285,7 +13321,8 @@ void Application::renderNavBarPrefix() {
         if (ImGui::BeginMenu("Output")) {
             // Global Audio -> Shaders switch (feeds the Audio Feature Bus to
             // every shader's GLSL uniforms; off = neutralized / fed zeros).
-            ImGui::MenuItem("Audio -> Shaders", nullptr, &m_audioToShaders);
+            if (ImGui::MenuItem("Audio -> Shaders", nullptr, &m_audioToShaders))
+                saveProject(defaultProjectPath());
             ImGui::Separator();
             // Two alternative output modes (the existing per-zone behaviour is
             // "Independent"; "Spanned" slices one wide canvas across screens).
@@ -15292,6 +15329,7 @@ void Application::refreshNdiPeerStatus() {
 void Application::saveProject(const std::string& path) {
     json j;
     j["version"] = 2;
+    j["audioToShaders"] = m_audioToShaders;
 
 #ifdef HAS_NDI
     // NDI network selection — additive; older projects omit it and load as Auto.
@@ -15813,6 +15851,12 @@ void Application::loadProject(const std::string& path) {
         std::cerr << "Failed to parse project: " << e.what() << std::endl;
         return;
     }
+
+    // Legacy projects retain the historical default; once changed, both UI
+    // and OSC persist the choice immediately, including across a crash.
+    m_audioToShaders = j.value("audioToShaders", true);
+    std::cout << "[Audio] project audioToShaders="
+              << (m_audioToShaders ? "on" : "off") << std::endl;
 
 #ifdef HAS_NDI
     // NDI network selection (additive — absent in older projects → stays Auto).
